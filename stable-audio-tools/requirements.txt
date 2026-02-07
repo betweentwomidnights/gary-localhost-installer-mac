@@ -1,0 +1,2 @@
+# Production install entrypoint for stable-audio localhost backend.
+-r requirements.runtime.txt

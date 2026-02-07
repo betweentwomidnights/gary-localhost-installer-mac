@@ -1,0 +1,91 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+*.egg-info/
+dist/
+build/
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Windows Zone.Identifier files (anywhere in repo including nested audiocraft)
+*:Zone.Identifier
+*.Zone.Identifier
+**/*:Zone.Identifier
+**/*.Zone.Identifier
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Cache directories
+.cache/
+*.cache
+.pytest_cache/
+
+# Hugging Face and model caches
+.cache/huggingface/
+transformers_cache/
+torch_cache/
+
+# Backup files
+*_backup.py
+*.bak
+*.backup
+*~
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Audio files (if any test files get created)
+*.wav
+*.mp3
+*.flac
+*.ogg
+!audiocraft/**/*.wav
+!audiocraft/**/*.mp3
+
+# Model checkpoints and weights (if any get downloaded locally)
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+!audiocraft/**/*.pt
+!audiocraft/**/*.pth

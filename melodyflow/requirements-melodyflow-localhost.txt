@@ -1,0 +1,2 @@
+# Legacy alias kept for compatibility.
+-r requirements.runtime.txt

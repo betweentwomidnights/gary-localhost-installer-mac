@@ -1,0 +1,32 @@
+# OS / editor
+.DS_Store
+*.swp
+*.swo
+
+# Python caches
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# Virtual environments
+**/.venv/
+
+# Local environment files
+**/.env
+**/.env.*
+
+# Logs
+**/*.log
+
+# Generated audio / artifacts
+**/api_out.wav
+**/*_bench.wav
+**/terry_*.wav
+**/loop_*.wav
+
+# Generated output folders
+**/outputs/
+**/reports/
+
+# Local backup of previous nested git metadata
+.git-backups/
