@@ -25,6 +25,7 @@ struct ServiceDefinition: Decodable, Identifiable {
     let environment: [String: String]
     let logFile: String
     let healthCheck: HealthCheckConfig
+    let bootstrap: ServiceBootstrapConfig?
     let autoStart: Bool
     let restartOnCrash: Bool
     let gracefulShutdownSeconds: Int
@@ -38,6 +39,7 @@ struct ServiceDefinition: Decodable, Identifiable {
         case environment
         case logFile = "log_file"
         case healthCheck = "health_check"
+        case bootstrap
         case autoStart = "auto_start"
         case restartOnCrash = "restart_on_crash"
         case gracefulShutdownSeconds = "graceful_shutdown_seconds"
@@ -53,9 +55,35 @@ struct ServiceDefinition: Decodable, Identifiable {
         environment = try container.decodeIfPresent([String: String].self, forKey: .environment) ?? [:]
         logFile = try container.decodeIfPresent(String.self, forKey: .logFile) ?? "\(id).log"
         healthCheck = try container.decode(HealthCheckConfig.self, forKey: .healthCheck)
+        bootstrap = try container.decodeIfPresent(ServiceBootstrapConfig.self, forKey: .bootstrap)
         autoStart = try container.decodeIfPresent(Bool.self, forKey: .autoStart) ?? false
         restartOnCrash = try container.decodeIfPresent(Bool.self, forKey: .restartOnCrash) ?? false
         gracefulShutdownSeconds = try container.decodeIfPresent(Int.self, forKey: .gracefulShutdownSeconds) ?? 8
+    }
+}
+
+struct ServiceBootstrapConfig: Decodable {
+    let pythonExecutable: String
+    let venvDirectory: String
+    let requirementsFile: String
+    let upgradeBuildTools: Bool
+    let pipArguments: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case pythonExecutable = "python_executable"
+        case venvDirectory = "venv_directory"
+        case requirementsFile = "requirements_file"
+        case upgradeBuildTools = "upgrade_build_tools"
+        case pipArguments = "pip_arguments"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        pythonExecutable = try container.decodeIfPresent(String.self, forKey: .pythonExecutable) ?? "python3"
+        venvDirectory = try container.decode(String.self, forKey: .venvDirectory)
+        requirementsFile = try container.decode(String.self, forKey: .requirementsFile)
+        upgradeBuildTools = try container.decodeIfPresent(Bool.self, forKey: .upgradeBuildTools) ?? true
+        pipArguments = try container.decodeIfPresent([String].self, forKey: .pipArguments) ?? []
     }
 }
 
@@ -97,6 +125,7 @@ struct ResolvedService: Identifiable {
     let environment: [String: String]
     let logFile: URL
     let healthCheck: ResolvedHealthCheck
+    let bootstrap: ResolvedBootstrapConfig?
     let autoStart: Bool
     let restartOnCrash: Bool
     let gracefulShutdownSeconds: Int
@@ -107,6 +136,14 @@ struct ResolvedHealthCheck {
     let expectedStatus: Int
     let intervalSeconds: Int
     let timeoutSeconds: Int
+}
+
+struct ResolvedBootstrapConfig {
+    let pythonExecutable: String
+    let venvDirectory: URL
+    let requirementsFile: URL
+    let upgradeBuildTools: Bool
+    let pipArguments: [String]
 }
 
 enum ProcessState: String {
@@ -123,16 +160,34 @@ enum HealthState: String {
     case unhealthy
 }
 
+enum BootstrapState: String {
+    case notConfigured
+    case ready
+    case running
+    case succeeded
+    case failed
+}
+
 struct ServiceRuntime: Identifiable {
     let service: ResolvedService
     var processState: ProcessState = .stopped
     var healthState: HealthState = .unknown
+    var bootstrapState: BootstrapState
+    var bootstrapMessage: String?
     var pid: Int32?
     var lastExitCode: Int32?
     var lastError: String?
 
+    init(service: ResolvedService) {
+        self.service = service
+        self.bootstrapState = service.bootstrap == nil ? .notConfigured : .ready
+    }
+
     var id: String { service.id }
     var isRunning: Bool {
         processState == .starting || processState == .running || processState == .stopping
+    }
+    var isBootstrapping: Bool {
+        bootstrapState == .running
     }
 }

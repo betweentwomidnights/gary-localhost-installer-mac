@@ -30,3 +30,6 @@
 
 # Local backup of previous nested git metadata
 .git-backups/
+
+# Local UX reference screenshots
+hf-screenshots/

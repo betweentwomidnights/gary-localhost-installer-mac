@@ -85,6 +85,26 @@ struct ManifestLoader {
                 resolvedEnv[key] = expand(value, variables: variables)
             }
 
+            let resolvedBootstrap: ResolvedBootstrapConfig?
+            if let bootstrap = service.bootstrap {
+                let venvDirectory = URL(
+                    fileURLWithPath: normalizePath(expand(bootstrap.venvDirectory, variables: variables))
+                )
+                let requirementsFile = URL(
+                    fileURLWithPath: normalizePath(expand(bootstrap.requirementsFile, variables: variables))
+                )
+
+                resolvedBootstrap = ResolvedBootstrapConfig(
+                    pythonExecutable: expand(bootstrap.pythonExecutable, variables: variables),
+                    venvDirectory: venvDirectory,
+                    requirementsFile: requirementsFile,
+                    upgradeBuildTools: bootstrap.upgradeBuildTools,
+                    pipArguments: bootstrap.pipArguments.map { expand($0, variables: variables) }
+                )
+            } else {
+                resolvedBootstrap = nil
+            }
+
             return ResolvedService(
                 id: service.id,
                 name: service.name,
@@ -99,6 +119,7 @@ struct ManifestLoader {
                     intervalSeconds: max(1, service.healthCheck.intervalSeconds),
                     timeoutSeconds: max(1, service.healthCheck.timeoutSeconds)
                 ),
+                bootstrap: resolvedBootstrap,
                 autoStart: service.autoStart,
                 restartOnCrash: service.restartOnCrash,
                 gracefulShutdownSeconds: max(1, service.gracefulShutdownSeconds)

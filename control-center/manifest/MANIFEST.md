@@ -20,6 +20,7 @@ The control center reads a JSON manifest that defines service launch commands, h
 - `environment` (`Object<String,String>`): extra env vars.
 - `log_file` (`String`): absolute path or file name relative to `default_log_directory`.
 - `health_check` (`Object`): health probe config.
+- `bootstrap` (`Object`, optional): environment bootstrap instructions for in-app venv rebuild.
 - `auto_start` (`Bool`): start automatically at app launch.
 - `restart_on_crash` (`Bool`): restart if unexpected exit.
 - `graceful_shutdown_seconds` (`Int`): wait time before force-kill.
@@ -30,6 +31,14 @@ The control center reads a JSON manifest that defines service launch commands, h
 - `expected_status` (`Int`): expected HTTP status.
 - `interval_seconds` (`Int`): poll interval.
 - `timeout_seconds` (`Int`): per-request timeout.
+
+## `bootstrap` Fields
+
+- `python_executable` (`String`, default `python3`): interpreter used to create venv (`python -m venv`). For this project use `python3.11`.
+- `venv_directory` (`String`): target `.venv` directory path.
+- `requirements_file` (`String`): requirements file passed to `pip install -r`.
+- `upgrade_build_tools` (`Bool`, default `true`): run `pip install --upgrade pip setuptools wheel`.
+- `pip_arguments` (`Array<String>`, default `[]`): extra arguments appended to `pip install`.
 
 ## Variable Expansion
 

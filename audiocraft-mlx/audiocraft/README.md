@@ -15,14 +15,14 @@ This folder is the cleaned runtime backend used by the JUCE plugin on macOS Appl
 
 ## Install
 ```bash
-cd /Users/karenjessen/gary-localhost-installer-mac/audiocraft-mlx
+cd /path/to/gary-localhost-installer-mac/audiocraft-mlx
 source .venv/bin/activate
 python -m pip install -r audiocraft/requirements.txt
 ```
 
 ## Run localhost backend
 ```bash
-cd /Users/karenjessen/gary-localhost-installer-mac/audiocraft-mlx/audiocraft
+cd /path/to/gary-localhost-installer-mac/audiocraft-mlx/audiocraft
 python g4l_localhost.py
 ```
 

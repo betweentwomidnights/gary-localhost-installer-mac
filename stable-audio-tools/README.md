@@ -16,17 +16,17 @@ This folder is the cleaned Stable Audio localhost backend used by the JUCE plugi
 
 ## Install
 ```bash
-cd /Users/karenjessen/gary-localhost-installer-mac/stable-audio-tools
+cd /path/to/gary-localhost-installer-mac/stable-audio-tools
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
 ## Run localhost backend
 ```bash
-cd /Users/karenjessen/gary-localhost-installer-mac/stable-audio-tools
+cd /path/to/gary-localhost-installer-mac/stable-audio-tools
 python api.py
 ```
 
 ## Notes
-- Backend defaults to port `8004`.
+- Backend defaults to port `8005`.
 - `sample_rf_guided` support is already integrated in `stable_audio_tools/inference/sampling.py`.

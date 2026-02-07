@@ -6,6 +6,8 @@ Prototype macOS menu-bar control center for managing local Gary backend services
 
 - Loads service config from `manifest/services.dev.json`
 - Starts/stops/restarts each backend process
+- Rebuilds each service Python environment from manifest-defined bootstrap config
+- Guides Stable Audio Hugging Face access setup and stores token in macOS Keychain
 - Polls each service `health_check` URL
 - Streams process `stdout/stderr` into per-service log files
 - Shows logs in UI
@@ -13,7 +15,7 @@ Prototype macOS menu-bar control center for managing local Gary backend services
 ## Development Build
 
 ```bash
-cd /Users/karenjessen/gary-localhost-installer-mac/control-center
+cd /path/to/gary-localhost-installer-mac/control-center
 swift build
 swift run
 ```
@@ -28,7 +30,7 @@ GARY_SERVICE_MANIFEST=/absolute/path/to/services.json swift run
 
 Open this package folder in Xcode:
 
-- `/Users/karenjessen/gary-localhost-installer-mac/control-center`
+- `/path/to/gary-localhost-installer-mac/control-center`
 
 Then run the `GaryControlCenter` executable target.
 

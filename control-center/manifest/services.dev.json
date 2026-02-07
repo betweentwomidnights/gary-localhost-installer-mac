@@ -17,6 +17,13 @@
       "environment": {
         "PYTHONUNBUFFERED": "${PYTHONUNBUFFERED}"
       },
+      "bootstrap": {
+        "python_executable": "python3.11",
+        "venv_directory": "${WORKSPACE_ROOT}/audiocraft-mlx/.venv",
+        "requirements_file": "${WORKSPACE_ROOT}/audiocraft-mlx/audiocraft/requirements.txt",
+        "upgrade_build_tools": true,
+        "pip_arguments": []
+      },
       "log_file": "audiocraft-mlx.log",
       "health_check": {
         "url": "http://127.0.0.1:8000/health",
@@ -37,7 +44,15 @@
         "localhost_melodyflow.py"
       ],
       "environment": {
-        "PYTHONUNBUFFERED": "${PYTHONUNBUFFERED}"
+        "PYTHONUNBUFFERED": "${PYTHONUNBUFFERED}",
+        "MELODYFLOW_REQUIRE_MPS": "1"
+      },
+      "bootstrap": {
+        "python_executable": "python3.11",
+        "venv_directory": "${WORKSPACE_ROOT}/melodyflow/.venv",
+        "requirements_file": "${WORKSPACE_ROOT}/melodyflow/requirements.txt",
+        "upgrade_build_tools": true,
+        "pip_arguments": []
       },
       "log_file": "melodyflow.log",
       "health_check": {
@@ -60,6 +75,13 @@
       ],
       "environment": {
         "PYTHONUNBUFFERED": "${PYTHONUNBUFFERED}"
+      },
+      "bootstrap": {
+        "python_executable": "python3.11",
+        "venv_directory": "${WORKSPACE_ROOT}/stable-audio-tools/.venv",
+        "requirements_file": "${WORKSPACE_ROOT}/stable-audio-tools/requirements.txt",
+        "upgrade_build_tools": true,
+        "pip_arguments": []
       },
       "log_file": "stable-audio.log",
       "health_check": {

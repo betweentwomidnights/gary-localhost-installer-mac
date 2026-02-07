@@ -6,14 +6,14 @@ This folder vendors a minimal MLX implementation of MusicGen and adds **audio-pr
 Use your existing venv and install from the runtime requirements in this repo:
 
 ```bash
-cd /Users/karenjessen/gary-localhost-installer-mac/audiocraft-mlx
+cd /path/to/gary-localhost-installer-mac/audiocraft-mlx
 source .venv/bin/activate
 python -m pip install -r audiocraft/requirements.runtime.txt
 ```
 
 ## Run continuation
 ```bash
-cd /Users/karenjessen/gary-localhost-installer-mac/audiocraft-mlx/audiocraft
+cd /path/to/gary-localhost-installer-mac/audiocraft-mlx/audiocraft
 python -m mlx_continuation.continue \
   --model facebook/musicgen-small \
   --prompt /path/to/prompt.wav \

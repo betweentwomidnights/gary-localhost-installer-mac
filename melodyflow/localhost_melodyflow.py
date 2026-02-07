@@ -162,10 +162,28 @@ CORS(app)
 # Global variables
 model = None
 def _pick_device() -> str:
-    if torch.cuda.is_available():
-        return 'cuda'
+    forced_device = os.environ.get("MELODYFLOW_DEVICE", "").strip().lower()
+    require_mps = os.environ.get("MELODYFLOW_REQUIRE_MPS", "0") == "1"
+
+    if forced_device:
+        if forced_device == "mps":
+            if torch.backends.mps.is_available():
+                return "mps"
+            raise RuntimeError("MELODYFLOW_DEVICE=mps but MPS is not available.")
+        if forced_device == "cuda":
+            if torch.cuda.is_available():
+                return "cuda"
+            raise RuntimeError("MELODYFLOW_DEVICE=cuda but CUDA is not available.")
+        if forced_device == "cpu":
+            return "cpu"
+        raise RuntimeError(f"Unsupported MELODYFLOW_DEVICE='{forced_device}'.")
+
     if torch.backends.mps.is_available():
         return 'mps'
+    if torch.cuda.is_available():
+        return 'cuda'
+    if require_mps:
+        raise RuntimeError("MELODYFLOW_REQUIRE_MPS=1 but no MPS device is available.")
     return 'cpu'
 
 device = _pick_device()
