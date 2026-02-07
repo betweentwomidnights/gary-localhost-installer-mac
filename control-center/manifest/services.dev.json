@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "app_name": "Gary Localhost Control Center",
+  "variables": {
+    "PYTHONUNBUFFERED": "1"
+  },
+  "default_log_directory": "${HOME}/Library/Logs/GaryLocalhost",
+  "services": [
+    {
+      "id": "audiocraft_mlx",
+      "name": "Audiocraft MLX",
+      "working_directory": "${WORKSPACE_ROOT}/audiocraft-mlx/audiocraft",
+      "executable": "${WORKSPACE_ROOT}/audiocraft-mlx/.venv/bin/python",
+      "arguments": [
+        "g4l_localhost.py"
+      ],
+      "environment": {
+        "PYTHONUNBUFFERED": "${PYTHONUNBUFFERED}"
+      },
+      "log_file": "audiocraft-mlx.log",
+      "health_check": {
+        "url": "http://127.0.0.1:8000/health",
+        "expected_status": 200,
+        "interval_seconds": 3,
+        "timeout_seconds": 2
+      },
+      "auto_start": false,
+      "restart_on_crash": true,
+      "graceful_shutdown_seconds": 8
+    },
+    {
+      "id": "melodyflow",
+      "name": "MelodyFlow",
+      "working_directory": "${WORKSPACE_ROOT}/melodyflow",
+      "executable": "${WORKSPACE_ROOT}/melodyflow/.venv/bin/python",
+      "arguments": [
+        "localhost_melodyflow.py"
+      ],
+      "environment": {
+        "PYTHONUNBUFFERED": "${PYTHONUNBUFFERED}"
+      },
+      "log_file": "melodyflow.log",
+      "health_check": {
+        "url": "http://127.0.0.1:8002/health",
+        "expected_status": 200,
+        "interval_seconds": 3,
+        "timeout_seconds": 2
+      },
+      "auto_start": false,
+      "restart_on_crash": true,
+      "graceful_shutdown_seconds": 8
+    },
+    {
+      "id": "stable_audio",
+      "name": "Stable Audio",
+      "working_directory": "${WORKSPACE_ROOT}/stable-audio-tools",
+      "executable": "${WORKSPACE_ROOT}/stable-audio-tools/.venv/bin/python",
+      "arguments": [
+        "api.py"
+      ],
+      "environment": {
+        "PYTHONUNBUFFERED": "${PYTHONUNBUFFERED}"
+      },
+      "log_file": "stable-audio.log",
+      "health_check": {
+        "url": "http://127.0.0.1:8005/health",
+        "expected_status": 200,
+        "interval_seconds": 3,
+        "timeout_seconds": 2
+      },
+      "auto_start": false,
+      "restart_on_crash": true,
+      "graceful_shutdown_seconds": 8
+    }
+  ]
+}

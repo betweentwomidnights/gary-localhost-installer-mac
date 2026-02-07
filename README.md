@@ -9,6 +9,7 @@ It is intended to pair with [gary4juce](https://github.com/betweentwomidnights/g
 - `audiocraft-mlx/`: MusicGen continuation localhost backend (MLX path)
 - `melodyflow/`: MelodyFlow localhost backend (custom MPS-enabled AudioCraft fork)
 - `stable-audio-tools/`: Stable Audio localhost backend (custom MPS-enabled fork)
+- `control-center/`: Swift menu bar control-center prototype (manifest-driven service manager)
 
 ## Current Status
 
