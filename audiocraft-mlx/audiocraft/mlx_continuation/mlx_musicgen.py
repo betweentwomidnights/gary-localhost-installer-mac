@@ -484,8 +484,47 @@ class MusicGenContinuation(MusicGen):
     def frame_rate(self) -> float:
         return self._audio_decoder.quantizer.frame_rate
 
+    def _decoder_num_codebooks(self) -> int:
+        quantizer = getattr(self._audio_decoder, "quantizer", None)
+        layers = getattr(quantizer, "layers", None)
+        if layers is not None:
+            return int(len(layers))
+        return int(self.num_codebooks)
+
     def decode_tokens(self, audio_tokens: mx.array) -> mx.array:
         """Decode tokens of shape (B, T, K) to audio (B, T_audio, C)."""
+        if audio_tokens.ndim != 3:
+            raise ValueError("audio_tokens should have shape (B, T, K)")
+        if int(audio_tokens.shape[1]) == 0 or int(audio_tokens.shape[2]) == 0:
+            channels = int(getattr(self._audio_decoder, "channels", 1))
+            return mx.zeros(
+                (int(audio_tokens.shape[0]), 0, channels),
+                dtype=mx.float32,
+            )
+        token_codebooks = int(audio_tokens.shape[2])
+        decoder_codebooks = self._decoder_num_codebooks()
+        decoder_channels = int(getattr(self._audio_decoder, "channels", 1))
+
+        # Stereo fine-tunes can interleave two mono-codebook streams:
+        # [k0_left, k0_right, k1_left, k1_right, ...].
+        if (
+            decoder_channels == 1
+            and token_codebooks == decoder_codebooks * 2
+        ):
+            left_tokens = audio_tokens[:, :, 0::2]
+            right_tokens = audio_tokens[:, :, 1::2]
+            left_seq = mx.swapaxes(left_tokens, -1, -2)[:, mx.newaxis]
+            right_seq = mx.swapaxes(right_tokens, -1, -2)[:, mx.newaxis]
+            left_audio = self._audio_decoder.decode(left_seq, audio_scales=[None])
+            right_audio = self._audio_decoder.decode(right_seq, audio_scales=[None])
+            return mx.concatenate([left_audio, right_audio], axis=-1)
+
+        if token_codebooks > decoder_codebooks:
+            raise ValueError(
+                "Token codebook count exceeds decoder capacity "
+                f"({token_codebooks} > {decoder_codebooks}) and does not match stereo interleaving."
+            )
+
         audio_seq = mx.swapaxes(audio_tokens, -1, -2)[:, mx.newaxis]
         audio = self._audio_decoder.decode(audio_seq, audio_scales=[None])
         return audio
@@ -564,6 +603,24 @@ class MusicGenContinuation(MusicGen):
             raise ValueError("prompt_tokens should have shape (B, K, T)")
         if prompt_tokens.shape[0] != 1:
             raise ValueError("Only batch size 1 is supported for prompt_tokens.")
+        if int(prompt_tokens.shape[1]) != int(self.num_codebooks):
+            target_codebooks = int(self.num_codebooks)
+            current_codebooks = int(prompt_tokens.shape[1])
+            if current_codebooks > target_codebooks:
+                print(
+                    "[WARN] prompt_tokens codebook dimension exceeds model expectation; truncating."
+                )
+                prompt_tokens = prompt_tokens[:, :target_codebooks, :]
+            else:
+                print(
+                    "[WARN] prompt_tokens codebook dimension below model expectation; padding BOS."
+                )
+                bos_pad = mx.full(
+                    (int(prompt_tokens.shape[0]), target_codebooks - current_codebooks, int(prompt_tokens.shape[-1])),
+                    self.bos_token_id,
+                    dtype=prompt_tokens.dtype,
+                )
+                prompt_tokens = mx.concatenate([prompt_tokens, bos_pad], axis=1)
 
         prompt_frames = prompt_tokens.shape[-1]
         if prepend_bos:
@@ -661,7 +718,14 @@ class MusicGenContinuation(MusicGen):
         prompt_frames = prompt_tokens.shape[-1]
         cont_tokens = tokens[:, prompt_frames:]
         full_audio = self.decode_tokens(tokens)
-        cont_audio = self.decode_tokens(cont_tokens)
+        cont_audio = (
+            self.decode_tokens(cont_tokens)
+            if int(cont_tokens.shape[1]) > 0
+            else mx.zeros(
+                (int(full_audio.shape[0]), 0, int(full_audio.shape[-1])),
+                dtype=full_audio.dtype,
+            )
+        )
         if return_tokens:
             return full_audio, cont_audio, tokens
         return full_audio, cont_audio
@@ -691,6 +755,7 @@ class MusicGenContinuation(MusicGen):
         cls,
         path_or_repo: str,
         base_model: Optional[str] = None,
+        prefer_base_config: bool = False,
         download_progress_callback: Optional[Callable[[dict], None]] = None,
     ):
         import torch
@@ -726,6 +791,9 @@ class MusicGenContinuation(MusicGen):
             )
 
         config_path = path / "config.json"
+        if prefer_base_config and base_model is not None:
+            config_path = Path("__force_base_config__")
+
         if not config_path.exists():
             if base_model is None:
                 raise FileNotFoundError(

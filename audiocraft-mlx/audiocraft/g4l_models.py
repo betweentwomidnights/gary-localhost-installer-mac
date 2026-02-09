@@ -46,10 +46,9 @@ MODEL_CATALOG: dict[str, list[str]] = {
         "thepatch/keygen-gary-large-20",
         "thepatch/keygen-gary-v2-large-12",
         "thepatch/keygen-gary-v2-large-16",
+        "thepatch/gary-grunge-large-stereo-v2-4",
+        "thepatch/gary-grunge-large-stereo-12",
     ],
-    # Future: if we add stereo finetunes, we can either:
-    # - add a dedicated category here, or
-    # - keep them in "large" and map base model per-model below.
 }
 
 
@@ -57,6 +56,12 @@ BASE_MODEL_BY_SIZE: dict[str, str] = {
     "small": "facebook/musicgen-small",
     "medium": "facebook/musicgen-medium",
     "large": "facebook/musicgen-large",
+}
+
+# Per-model base override for checkpoints that do not match the category default.
+BASE_MODEL_BY_MODEL: dict[str, str] = {
+    "thepatch/gary-grunge-large-stereo-v2-4": "facebook/musicgen-stereo-large",
+    "thepatch/gary-grunge-large-stereo-12": "facebook/musicgen-stereo-large",
 }
 
 
@@ -75,6 +80,9 @@ def get_base_model_for_finetune(model_name: str) -> str:
     We intentionally error for unknown models so we don't silently pick the
     wrong base config (small/medium/large mismatch will break weight loading).
     """
+    if model_name in BASE_MODEL_BY_MODEL:
+        return BASE_MODEL_BY_MODEL[model_name]
+
     size = find_model_size(model_name)
     if size is None:
         raise KeyError(
@@ -82,6 +90,10 @@ def get_base_model_for_finetune(model_name: str) -> str:
             "so we can infer the correct base model (small/medium/large)."
         )
     return BASE_MODEL_BY_SIZE[size]
+
+
+def has_explicit_base_model_override(model_name: str) -> bool:
+    return model_name in BASE_MODEL_BY_MODEL
 
 
 # ---------------------------------------------------------------------------
@@ -98,4 +110,3 @@ def get_model_description(model_name: str, custom_description: Optional[str] = N
     if custom_description is not None and custom_description.strip():
         return custom_description
     return AUTO_DESCRIPTIONS.get(model_name)
-

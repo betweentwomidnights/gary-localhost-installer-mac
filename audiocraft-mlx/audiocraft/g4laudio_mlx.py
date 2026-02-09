@@ -16,6 +16,7 @@ from scipy.signal import resample_poly
 from g4l_models import (
     OUTPUT_DURATION_S,
     get_base_model_for_finetune,
+    has_explicit_base_model_override,
     get_model_description,
 )
 from mlx_continuation.encodec import preprocess_audio as encodec_preprocess_audio
@@ -231,14 +232,47 @@ def _samples_to_frames(num_samples: int, sample_rate: int, frame_rate: float) ->
     return int(round((num_samples / sample_rate) * frame_rate))
 
 
-def _encode_prompt_tokens(model: MusicGenContinuation, prompt_audio: np.ndarray, prompt_sr: int) -> mx.array:
-    """
-    Convert prompt waveform (T, C) at prompt_sr to prompt tokens (1, K, T_frames).
-    """
-    audio = _resample(prompt_audio, prompt_sr, model.sampling_rate)
-    audio = _convert_channels(audio, model._audio_decoder.channels)
+def _decoder_num_codebooks(model: MusicGenContinuation) -> int:
+    quantizer = getattr(model._audio_decoder, "quantizer", None)
+    layers = getattr(quantizer, "layers", None)
+    if layers is not None:
+        return int(len(layers))
+    return int(model.num_codebooks)
 
-    num_samples = audio.shape[0]
+
+def _select_prompt_encode_bandwidth(
+    model: MusicGenContinuation,
+    target_codebooks: Optional[int] = None,
+) -> Optional[float]:
+    quantizer = getattr(model._audio_decoder, "quantizer", None)
+    config = getattr(model._audio_decoder, "config", None)
+    target_bandwidths = list(getattr(config, "target_bandwidths", []) or [])
+    if quantizer is None or not target_bandwidths:
+        return None
+
+    if target_codebooks is None:
+        target_codebooks = int(model.num_codebooks)
+    best_bandwidth: Optional[float] = None
+    best_distance: Optional[int] = None
+
+    for bw in target_bandwidths:
+        bw_float = float(bw)
+        num_quantizers = int(quantizer.get_num_quantizers_for_bandwidth(bw_float))
+        distance = abs(num_quantizers - target_codebooks)
+        if distance == 0:
+            return bw_float
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_bandwidth = bw_float
+
+    return best_bandwidth
+
+
+def _encode_prompt_with_decoder(
+    model: MusicGenContinuation,
+    audio: np.ndarray,
+    encode_bandwidth: Optional[float],
+) -> mx.array:
     audio_mx = mx.array(audio)
     inputs, masks = encodec_preprocess_audio(
         audio_mx,
@@ -246,13 +280,94 @@ def _encode_prompt_tokens(model: MusicGenContinuation, prompt_audio: np.ndarray,
         chunk_length=model._audio_decoder.chunk_length,
         chunk_stride=model._audio_decoder.chunk_stride,
     )
-    encoded_frames, _ = model._audio_decoder.encode(inputs, masks)
-    prompt_tokens = _flatten_codes(encoded_frames)
+    encoded_frames, _ = model._audio_decoder.encode(
+        inputs,
+        masks,
+        bandwidth=encode_bandwidth,
+    )
+    return _flatten_codes(encoded_frames)
+
+
+def _align_prompt_codebooks(model: MusicGenContinuation, prompt_tokens: mx.array) -> mx.array:
+    target_codebooks = int(model.num_codebooks)
+    current_codebooks = int(prompt_tokens.shape[1])
+    if current_codebooks == target_codebooks:
+        return prompt_tokens
+
+    frames = int(prompt_tokens.shape[-1])
+    if current_codebooks > target_codebooks:
+        print(
+            f"[WARN] Prompt codebooks ({current_codebooks}) > model codebooks ({target_codebooks}); truncating."
+        )
+        return prompt_tokens[:, :target_codebooks, :]
+
+    print(
+        f"[WARN] Prompt codebooks ({current_codebooks}) < model codebooks ({target_codebooks}); padding with BOS."
+    )
+    bos_pad = mx.full(
+        (int(prompt_tokens.shape[0]), target_codebooks - current_codebooks, frames),
+        model.bos_token_id,
+        dtype=prompt_tokens.dtype,
+    )
+    return mx.concatenate([prompt_tokens, bos_pad], axis=1)
+
+
+def _encode_prompt_tokens(model: MusicGenContinuation, prompt_audio: np.ndarray, prompt_sr: int) -> mx.array:
+    """
+    Convert prompt waveform (T, C) at prompt_sr to prompt tokens (1, K, T_frames).
+    """
+    audio = _resample(prompt_audio, prompt_sr, model.sampling_rate)
+    num_samples = audio.shape[0]
+    prompt_frames_target = _samples_to_frames(num_samples, model.sampling_rate, model.frame_rate)
+
+    decoder_channels = int(getattr(model._audio_decoder, "channels", 1))
+    decoder_codebooks = _decoder_num_codebooks(model)
+    model_codebooks = int(model.num_codebooks)
+
+    # Stereo fine-tunes can expose doubled LM codebooks while the EnCodec decoder
+    # remains mono. Mirror AudioCraft's interleaving by encoding L/R independently.
+    is_stereo_interleaved = (
+        decoder_channels == 1 and model_codebooks == decoder_codebooks * 2
+    )
+
+    if is_stereo_interleaved:
+        audio = _convert_channels(audio, 2)
+        encode_bandwidth = _select_prompt_encode_bandwidth(
+            model,
+            target_codebooks=decoder_codebooks,
+        )
+        left_tokens = _encode_prompt_with_decoder(
+            model,
+            audio[:, 0:1],
+            encode_bandwidth,
+        )
+        right_tokens = _encode_prompt_with_decoder(
+            model,
+            audio[:, 1:2],
+            encode_bandwidth,
+        )
+        pairwise = mx.stack([left_tokens, right_tokens], axis=2)
+        prompt_tokens = pairwise.reshape(
+            int(pairwise.shape[0]),
+            int(pairwise.shape[1]) * int(pairwise.shape[2]),
+            int(pairwise.shape[3]),
+        )
+    else:
+        audio = _convert_channels(audio, decoder_channels)
+        encode_bandwidth = _select_prompt_encode_bandwidth(
+            model,
+            target_codebooks=model_codebooks,
+        )
+        prompt_tokens = _encode_prompt_with_decoder(
+            model,
+            audio,
+            encode_bandwidth,
+        )
 
     # Trim tokens to match the prompt length in frames.
-    prompt_frames_target = _samples_to_frames(num_samples, model.sampling_rate, model.frame_rate)
     prompt_frames_target = max(1, min(prompt_frames_target, prompt_tokens.shape[-1]))
     prompt_tokens = prompt_tokens[:, :, :prompt_frames_target]
+    prompt_tokens = _align_prompt_codebooks(model, prompt_tokens)
     return prompt_tokens
 
 
@@ -277,17 +392,29 @@ def _get_model(
         for (name, _base, qmode), cached in _MODEL_CACHE.items():
             if name == model_name and qmode == resolved_quantization_mode:
                 return cached
+        base_model = None
+        prefer_base_config = False
+        if has_explicit_base_model_override(model_name):
+            # Some fine-tunes include config.json variants that don't decode reliably on MLX.
+            # For explicit overrides we always use the known base config.
+            base_model = get_base_model_for_finetune(model_name)
+            prefer_base_config = True
+            print(
+                f"[INFO] Loading '{model_name}' with forced base config '{base_model}'."
+            )
         try:
             model = MusicGenContinuation.from_pretrained(
                 model_name,
+                base_model=base_model,
+                prefer_base_config=prefer_base_config,
                 download_progress_callback=download_progress_callback,
             )
-            base_model = None
         except FileNotFoundError:
             base_model = get_base_model_for_finetune(model_name)
             model = MusicGenContinuation.from_pretrained(
                 model_name,
                 base_model=base_model,
+                prefer_base_config=True,
                 download_progress_callback=download_progress_callback,
             )
         _apply_quantization_preset(model, resolved_quantization_mode)

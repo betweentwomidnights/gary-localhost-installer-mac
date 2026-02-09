@@ -14,6 +14,7 @@ import time
 import uuid
 import gc
 import base64
+import traceback
 import threading
 import requests
 from contextlib import contextmanager
@@ -444,6 +445,7 @@ def run_audio_processing(session_id: str, audio_data: str, model_name: str,
 
         except Exception as e:
             print(f"[ERROR] Audio processing failed for {session_id}: {e}")
+            print(traceback.format_exc())
             store_session_status(session_id, "failed", str(e))
             store_queue_status_update(session_id, {
                 "status": "failed",
@@ -561,6 +563,7 @@ def run_continue_processing(session_id: str, audio_data: str, model_name: str,
 
         except Exception as e:
             print(f"[ERROR] Continue processing failed for {session_id}: {e}")
+            print(traceback.format_exc())
             store_session_status(session_id, "failed", str(e))
             store_queue_status_update(session_id, {
                 "status": "failed",
@@ -1051,23 +1054,34 @@ def get_available_models():
                         'type': 'single'
                     })
                 else:
-                    # Multiple checkpoints or single checkpoint - create group
+                    # Multiple checkpoints - create group.
+                    # Single-checkpoint groups are flattened to avoid client-side
+                    # dropdowns skipping group nodes with one child.
                     checkpoints = sorted(
                         [m for m in models_group if m['has_checkpoint']], 
                         key=lambda x: x['checkpoint']
                     )
-                    result.append({
-                        'name': base_name,
-                        'type': 'group',
-                        'checkpoints': [
-                            {
-                                'name': f"{base_name}-{c['checkpoint']}",
-                                'path': c['full_path'],
-                                'epoch': c['checkpoint']
-                            }
-                            for c in checkpoints
-                        ]
-                    })
+                    if len(checkpoints) == 1:
+                        c = checkpoints[0]
+                        result.append({
+                            'name': c['display_name'],
+                            'path': c['full_path'],
+                            'type': 'single',
+                            'epoch': c['checkpoint'],
+                        })
+                    else:
+                        result.append({
+                            'name': base_name,
+                            'type': 'group',
+                            'checkpoints': [
+                                {
+                                    'name': f"{base_name}-{c['checkpoint']}",
+                                    'path': c['full_path'],
+                                    'epoch': c['checkpoint']
+                                }
+                                for c in checkpoints
+                            ]
+                        })
             
             return result
         
