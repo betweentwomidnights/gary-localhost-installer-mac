@@ -33,3 +33,7 @@
 
 # Local UX reference screenshots
 hf-screenshots/
+
+# Xcode local state
+**/xcuserdata/
+**/*.xcuserstate
