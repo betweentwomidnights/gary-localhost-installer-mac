@@ -3,6 +3,10 @@
 
 -e .
 
+# clip imports "from pkg_resources import packaging"; setuptools>=82 removed
+# pkg_resources, so keep setuptools on a compatible major version.
+setuptools<82
+
 Flask==3.1.2
 python-dotenv==1.2.1
 
