@@ -46,6 +46,7 @@ final class ServiceManager: ObservableObject {
     private var healthTasks: [String: Task<Void, Never>] = [:]
     private var bootstrapTasks: [String: Task<Void, Never>] = [:]
     private var rebuildAllTask: Task<Void, Never>?
+    private var isShuttingDown = false
 
     init(manifest: ResolvedManifest) {
         self.manifest = manifest
@@ -68,6 +69,72 @@ final class ServiceManager: ObservableObject {
         }
     }
 
+    func shutdownForApplicationTermination() {
+        guard !isShuttingDown else { return }
+        isShuttingDown = true
+
+        rebuildAllTask?.cancel()
+        rebuildAllTask = nil
+        for (_, task) in healthTasks {
+            task.cancel()
+        }
+        healthTasks.removeAll()
+        for (_, task) in bootstrapTasks {
+            task.cancel()
+        }
+        bootstrapTasks.removeAll()
+
+        let maxGrace = max(services.map { $0.service.gracefulShutdownSeconds }.max() ?? 1, 1)
+
+        for (serviceID, process) in processes where process.isRunning {
+            if let index = indexForService(serviceID) {
+                services[index].processState = .stopping
+                services[index].healthState = .unknown
+                services[index].lastError = nil
+            }
+            process.terminate()
+        }
+
+        let deadline = Date().addingTimeInterval(TimeInterval(maxGrace))
+        while Date() < deadline {
+            if processes.values.allSatisfy({ !$0.isRunning }) {
+                break
+            }
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+
+        for (serviceID, process) in processes where process.isRunning {
+            _ = kill(process.processIdentifier, SIGKILL)
+            if let index = indexForService(serviceID) {
+                services[index].lastError = "Forced stop during app shutdown."
+            }
+        }
+
+        for serviceID in Set(processes.keys).union(outputPipes.keys).union(logHandles.keys) {
+            cleanupIO(for: serviceID)
+        }
+        processes.removeAll()
+
+        // Port-level cleanup is the final safety net for orphaned workers that are no
+        // longer tracked in `processes` (for example, after abrupt app teardown).
+        for service in services.map(\.service) {
+            let environment = makeEnvironment(for: service)
+            try? clearConflictingListenersIfNeeded(
+                for: service,
+                environment: environment,
+                failIfNotCleared: false
+            )
+        }
+
+        for index in services.indices {
+            services[index].pid = nil
+            if services[index].processState != .failed {
+                services[index].processState = .stopped
+            }
+            services[index].healthState = .unknown
+        }
+    }
+
     func startAutoStartServices() {
         for runtime in services where runtime.service.autoStart {
             start(serviceID: runtime.service.id)
@@ -75,6 +142,7 @@ final class ServiceManager: ObservableObject {
     }
 
     func start(serviceID: String) {
+        guard !isShuttingDown else { return }
         guard let index = indexForService(serviceID) else { return }
         guard processes[serviceID]?.isRunning != true else { return }
         guard bootstrapTasks[serviceID] == nil else {
@@ -176,6 +244,7 @@ final class ServiceManager: ObservableObject {
     }
 
     func restart(serviceID: String) {
+        guard !isShuttingDown else { return }
         stop(serviceID: serviceID)
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -717,7 +786,7 @@ final class ServiceManager: ObservableObject {
         healthTasks[serviceID]?.cancel()
         healthTasks[serviceID] = nil
 
-        if expectedStop || status == 0 {
+        if isShuttingDown || expectedStop || status == 0 {
             services[index].processState = .stopped
             services[index].lastError = nil
         } else {

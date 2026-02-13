@@ -39,6 +39,7 @@ struct ManifestLoader {
             cwd.appendingPathComponent("control-center/manifest/services.dev.json"),
             cwd.appendingPathComponent("manifest/services.dev.json"),
             cwd.appendingPathComponent("../control-center/manifest/services.dev.json"),
+            home.appendingPathComponent("gary/gary-localhost-installer-mac/control-center/manifest/services.dev.json"),
             home.appendingPathComponent("gary-localhost-installer-mac/control-center/manifest/services.dev.json"),
         ]
 

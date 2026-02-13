@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import AppKit
 
 @MainActor
 final class ControlCenterViewModel: ObservableObject {
@@ -15,8 +16,10 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var stableAudioStep2ScreenshotPath: String?
 
     private var logRefreshTask: Task<Void, Never>?
+    private var cancellables = Set<AnyCancellable>()
 
     init() {
+        observeApplicationTermination()
         refreshStableAudioTokenState()
         loadManifest()
     }
@@ -182,5 +185,14 @@ final class ControlCenterViewModel: ObservableObject {
         } else if stableAudioTokenStatus == "Token already saved in Keychain." {
             stableAudioTokenStatus = ""
         }
+    }
+
+    private func observeApplicationTermination() {
+        NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)
+            .sink { [weak self] _ in
+                self?.logRefreshTask?.cancel()
+                self?.manager?.shutdownForApplicationTermination()
+            }
+            .store(in: &cancellables)
     }
 }
