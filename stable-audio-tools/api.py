@@ -16,12 +16,32 @@ import time
 import re
 import threading
 import gc
+import sys
+import types
 from einops import rearrange
 from huggingface_hub import login
-from stable_audio_tools import get_pretrained_model
-from stable_audio_tools.inference.generation import generate_diffusion_cond
 from contextlib import contextmanager
 import contextlib
+
+# Compatibility shim:
+# Some transitive dependencies (e.g. clip) still import
+# "from pkg_resources import packaging". Newer setuptools releases may not
+# ship pkg_resources, so provide a minimal replacement before loading
+# stable_audio_tools and its dependencies.
+try:
+    import pkg_resources  # noqa: F401
+except ModuleNotFoundError:
+    try:
+        from packaging import version as _packaging_version
+    except ModuleNotFoundError:
+        from setuptools._vendor.packaging import version as _packaging_version
+
+    _packaging_module = types.SimpleNamespace(version=_packaging_version)
+    _pkg_resources_module = types.SimpleNamespace(packaging=_packaging_module)
+    sys.modules["pkg_resources"] = _pkg_resources_module
+
+from stable_audio_tools import get_pretrained_model
+from stable_audio_tools.inference.generation import generate_diffusion_cond
 
 from riff_manager import RiffManager
 
@@ -35,7 +55,6 @@ from stable_audio_tools.inference.sampling import sample_rf_guided
 
 import numpy as np
 
-import gc
 import ctypes
 
 # Load .env if present for HF_TOKEN and other config
@@ -358,6 +377,12 @@ riff_manager = RiffManager()
 # Global model storage
 model_cache = {}
 model_lock = threading.Lock()
+
+# Async Jerry generation status store (for JUCE polling)
+jerry_generation_jobs = {}
+jerry_generation_jobs_lock = threading.Lock()
+jerry_generation_worker_lock = threading.Lock()
+JERRY_JOB_TTL_SECONDS = 30 * 60
 
 
 
@@ -847,192 +872,584 @@ def sampler_kwargs_for_objective(model, config, client_overrides=None):
 
     return kw
 
+def _report_generation_progress(progress_callback, progress, stage):
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(max(0, min(100, int(progress))), stage)
+    except Exception:
+        pass
+
+def _set_jerry_job_state(request_id, **updates):
+    now = time.time()
+    with jerry_generation_jobs_lock:
+        state = dict(jerry_generation_jobs.get(request_id, {}))
+        state.update(updates)
+        state["updated_at"] = now
+        jerry_generation_jobs[request_id] = state
+
+def _get_jerry_job_state(request_id):
+    with jerry_generation_jobs_lock:
+        state = jerry_generation_jobs.get(request_id)
+        return dict(state) if state is not None else None
+
+def _cleanup_jerry_jobs():
+    now = time.time()
+    with jerry_generation_jobs_lock:
+        stale_ids = []
+        for request_id, state in jerry_generation_jobs.items():
+            updated_at = float(state.get("updated_at", now))
+            status = state.get("status", "")
+            if status in ("completed", "failed"):
+                if now - updated_at > JERRY_JOB_TTL_SECONDS:
+                    stale_ids.append(request_id)
+            elif now - updated_at > (2 * JERRY_JOB_TTL_SECONDS):
+                stale_ids.append(request_id)
+
+        for request_id in stale_ids:
+            jerry_generation_jobs.pop(request_id, None)
+
+def _run_generate_request(data, progress_callback=None):
+    if not isinstance(data, dict):
+        raise ValueError("JSON body required")
+
+    _report_generation_progress(progress_callback, 2, "validating")
+
+    model_type = data.get("model_type", "standard")
+    finetune_repo = data.get("finetune_repo")
+    finetune_checkpoint = data.get("finetune_checkpoint")
+
+    prompt = data.get("prompt")
+    if not prompt:
+        raise ValueError("prompt is required")
+
+    _report_generation_progress(progress_callback, 10, "loading_model")
+    model, config, device = get_model(model_type, finetune_repo, finetune_checkpoint)
+
+    sample_rate = int(config.get("sample_rate", 44100))
+    model_sample_size = int(config.get("sample_size", 524288))
+    model_seconds_max = max(1, model_sample_size // sample_rate)
+    model_family = detect_model_family(config)
+
+    req_seconds_total = data.get("seconds_total")
+    if req_seconds_total is None:
+        seconds_total = model_seconds_max
+    else:
+        try:
+            seconds_total = int(req_seconds_total)
+        except Exception as exc:
+            raise ValueError("seconds_total must be an integer number of seconds") from exc
+        if seconds_total < 1:
+            raise ValueError("seconds_total must be >= 1")
+        if seconds_total > model_seconds_max:
+            seconds_total = model_seconds_max
+
+    diffusion_objective = getattr(model, "diffusion_objective", None)
+    steps = data.get("steps")
+    if steps is None:
+        if model_family == "sao1.0":
+            steps = 100
+        elif diffusion_objective == "rectified_flow":
+            steps = 50
+        else:
+            steps = 8
+    if not isinstance(steps, int) or steps < 1 or steps > 250:
+        raise ValueError("steps must be integer between 1-250")
+
+    cfg_scale = data.get("cfg_scale", 1.0)
+    if not isinstance(cfg_scale, (int, float)) or cfg_scale < 0 or cfg_scale > 20:
+        raise ValueError("cfg_scale must be number between 0-20")
+
+    negative_prompt = data.get("negative_prompt")
+
+    seed = data.get("seed", -1)
+    if seed != -1:
+        torch.manual_seed(seed)
+        if device == "cuda":
+            torch.cuda.manual_seed(seed)
+    else:
+        seed = torch.randint(0, 2**32 - 1, (1,)).item()
+        torch.manual_seed(seed)
+        if device == "cuda":
+            torch.cuda.manual_seed(seed)
+
+    _report_generation_progress(progress_callback, 25, "preparing_conditioning")
+    conditioning = [{
+        "prompt": prompt,
+        "seconds_total": seconds_total
+    }]
+
+    negative_conditioning = None
+    if negative_prompt:
+        negative_conditioning = [{
+            "prompt": negative_prompt,
+            "seconds_total": seconds_total
+        }]
+
+    if model_family == "sao1.0":
+        seconds_start = data.get("seconds_start", 0)
+        conditioning[0]["seconds_start"] = seconds_start
+        if negative_conditioning:
+            negative_conditioning[0]["seconds_start"] = seconds_start
+
+    client_sampler_overrides = {}
+    if "sampler_type" in data:
+        client_sampler_overrides["sampler_type"] = data["sampler_type"]
+
+    _report_generation_progress(progress_callback, 35, "configuring_sampler")
+    skw = sampler_kwargs_for_objective(model, config, client_sampler_overrides)
+
+    print(f"Generating with {model_type} model:")
+    print(f"   Prompt: {prompt}")
+    print(f"   Objective: {diffusion_objective}")
+    print(f"   seconds_total: {seconds_total} (max {model_seconds_max})")
+    print(f"   Steps: {steps}, CFG: {cfg_scale}, Seed: {seed}")
+    print(f"   Negative: {negative_prompt or 'None'}")
+
+    sampling_progress_start = 22
+    sampling_progress_end = 92
+    if progress_callback is not None:
+        _report_generation_progress(progress_callback, sampling_progress_start, "sampling")
+
+        existing_sampler_callback = skw.get("callback")
+        sampling_state = {
+            "last_progress": sampling_progress_start - 1,
+            "last_completed_step": 0,
+            "saw_zero_index": False
+        }
+
+        def _sampling_step_callback(payload):
+            if callable(existing_sampler_callback):
+                try:
+                    existing_sampler_callback(payload)
+                except Exception:
+                    pass
+
+            if not isinstance(payload, dict):
+                return
+
+            raw_index = payload.get("i")
+            if not isinstance(raw_index, (int, float)):
+                return
+
+            step_index = int(raw_index)
+            if step_index < 0:
+                return
+
+            if step_index == 0:
+                sampling_state["saw_zero_index"] = True
+
+            if sampling_state["saw_zero_index"]:
+                completed_step = step_index + 1
+            else:
+                # Some samplers report 1-based step numbers; prefer conservative mapping
+                # unless we observe a zero index.
+                cand_from_zero_based = max(1, step_index + 1)
+                cand_from_one_based = max(1, step_index)
+                prev_completed = sampling_state["last_completed_step"]
+                viable = [c for c in (cand_from_zero_based, cand_from_one_based) if c >= prev_completed]
+                completed_step = min(viable) if viable else max(cand_from_zero_based, cand_from_one_based, prev_completed)
+
+            completed_step = max(1, min(steps, completed_step))
+            sampling_state["last_completed_step"] = completed_step
+
+            fraction = completed_step / float(max(steps, 1))
+            progress = sampling_progress_start + int(round((sampling_progress_end - sampling_progress_start) * fraction))
+            progress = max(sampling_progress_start, min(sampling_progress_end, progress))
+
+            if progress > sampling_state["last_progress"]:
+                sampling_state["last_progress"] = progress
+                _report_generation_progress(progress_callback, progress, "sampling")
+
+        skw["callback"] = _sampling_step_callback
+
+    start_time = time.time()
+    with resource_cleanup():
+        maybe_empty_cache(device)
+        with autocast_ctx(device):
+            output = generate_diffusion_cond(
+                model,
+                steps=steps,
+                cfg_scale=cfg_scale,
+                conditioning=conditioning,
+                negative_conditioning=negative_conditioning,
+                sample_size=model_sample_size,
+                device=device,
+                seed=seed,
+                **skw
+            )
+
+    generation_time = time.time() - start_time
+
+    _report_generation_progress(progress_callback, 95, "postprocessing")
+    output = rearrange(output, "b d n -> d (b n)")
+    output = output.to(torch.float32).div(torch.max(torch.abs(output))).clamp(-1, 1)
+
+    requested_samples = seconds_total * sample_rate
+    actual_samples = output.shape[1]
+    if requested_samples < actual_samples:
+        output = output[:, :requested_samples]
+        print(f"   ✂️  Trimmed from {actual_samples/sample_rate:.1f}s to {seconds_total}s")
+
+    output_int16 = output.mul(32767).to(torch.int16).cpu()
+
+    detected_bpm = extract_bpm(prompt)
+    metadata = {
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "steps": steps,
+        "cfg_scale": cfg_scale,
+        "seed": seed,
+        "sample_rate": sample_rate,
+        "duration_seconds": seconds_total,
+        "generation_time": round(generation_time, 2),
+        "realtime_factor": round(seconds_total / max(generation_time, 1e-6), 2),
+        "detected_bpm": detected_bpm,
+        "device": device
+    }
+    if device == "cuda":
+        memory_used = torch.cuda.memory_allocated() / 1e9
+        memory_peak = torch.cuda.max_memory_allocated() / 1e9
+        metadata["gpu_memory_used"] = round(memory_used, 2)
+        metadata["gpu_memory_peak"] = round(memory_peak, 2)
+        torch.cuda.reset_peak_memory_stats()
+
+    print(f"✅ Generated in {generation_time:.2f}s ({metadata['realtime_factor']:.1f}x RT)")
+
+    _report_generation_progress(progress_callback, 98, "encoding_audio")
+    buffer = io.BytesIO()
+    save_audio(buffer, output_int16, sample_rate)
+    wav_bytes = buffer.getvalue()
+    audio_b64 = base64.b64encode(wav_bytes).decode()
+    del output, output_int16
+
+    _report_generation_progress(progress_callback, 100, "completed")
+    return {
+        "audio_base64": audio_b64,
+        "wav_bytes": wav_bytes,
+        "metadata": metadata
+    }
+
+def _run_generate_loop_request(data, progress_callback=None):
+    if not isinstance(data, dict):
+        raise ValueError("JSON body required")
+
+    _report_generation_progress(progress_callback, 2, "validating")
+
+    model_type = data.get("model_type", "standard")
+    finetune_repo = data.get("finetune_repo")
+    finetune_checkpoint = data.get("finetune_checkpoint")
+
+    prompt = data.get("prompt")
+    if not prompt:
+        raise ValueError("prompt is required")
+
+    loop_type = str(data.get("loop_type", "auto")).strip().lower()
+    if loop_type not in ("auto", "drums", "instruments"):
+        raise ValueError("loop_type must be auto, drums, or instruments")
+
+    bars = data.get("bars")
+    steps = data.get("steps", 8)
+    cfg_scale = data.get("cfg_scale", 6.0)
+    seed = data.get("seed", -1)
+
+    try:
+        steps = int(steps)
+    except Exception as exc:
+        raise ValueError("steps must be an integer") from exc
+    if steps < 1 or steps > 250:
+        raise ValueError("steps must be integer between 1-250")
+
+    try:
+        cfg_scale = float(cfg_scale)
+    except Exception as exc:
+        raise ValueError("cfg_scale must be a number") from exc
+    if cfg_scale < 0 or cfg_scale > 20:
+        raise ValueError("cfg_scale must be number between 0-20")
+
+    try:
+        seed = int(seed)
+    except Exception as exc:
+        raise ValueError("seed must be an integer") from exc
+
+    detected_bpm = extract_bpm(prompt)
+    if not detected_bpm:
+        raise ValueError("BPM must be specified in prompt (e.g., '120bpm')")
+
+    _report_generation_progress(progress_callback, 10, "loading_model")
+    model, config, device = load_model(model_type, finetune_repo, finetune_checkpoint)
+
+    sample_rate = int(config.get("sample_rate", 44100))
+    model_sample_size = int(config.get("sample_size", 524288))
+    max_duration = model_sample_size / sample_rate
+    model_family = detect_model_family(config)
+
+    if bars is not None and str(bars).strip() != "" and str(bars).lower() != "auto":
+        try:
+            bars = int(bars)
+        except Exception as exc:
+            raise ValueError("bars must be 1, 2, 4, or 8") from exc
+    else:
+        seconds_per_beat = 60.0 / detected_bpm
+        seconds_per_bar = seconds_per_beat * 4
+        max_loop_duration = max_duration - 1.0
+
+        possible_bars = [8, 4, 2, 1]
+        bars = 1
+        for bar_count in possible_bars:
+            loop_duration = seconds_per_bar * bar_count
+            if loop_duration <= max_loop_duration:
+                bars = bar_count
+                break
+
+    if bars not in [1, 2, 4, 8]:
+        raise ValueError("bars must be 1, 2, 4, or 8")
+
+    seconds_per_beat = 60.0 / detected_bpm
+    seconds_per_bar = seconds_per_beat * 4
+    calculated_loop_duration = seconds_per_bar * bars
+
+    if calculated_loop_duration > max_duration:
+        if calculated_loop_duration > (max_duration + 1.0):
+            bars = max(1, bars // 2)
+            calculated_loop_duration = seconds_per_bar * bars
+
+    enhanced_prompt = prompt
+    negative_prompt = ""
+    if loop_type == "drums":
+        if "drum" not in prompt.lower():
+            enhanced_prompt = f"{prompt} drum loop"
+        negative_prompt = "melody, harmony, pitched instruments, vocals, singing"
+    elif loop_type == "instruments":
+        if "drum" in prompt.lower():
+            enhanced_prompt = prompt.replace("drum", "").replace("drums", "").strip()
+        negative_prompt = "drums, percussion, kick, snare, hi-hat"
+
+    _report_generation_progress(progress_callback, 25, "preparing_conditioning")
+    generation_sample_size = model_sample_size
+    seconds_total = max(1, model_sample_size // sample_rate)
+
+    # SAO 1.0 can generate long windows; for loop mode we only need enough
+    # samples for the requested loop duration, which significantly improves latency.
+    if model_family == "sao1.0":
+        requested_loop_seconds = max(1.0, min(max_duration, float(calculated_loop_duration)))
+        requested_samples = int(np.ceil(requested_loop_seconds * sample_rate))
+
+        downsampling_ratio = 1
+        pretransform = getattr(model, "pretransform", None)
+        if pretransform is not None:
+            downsampling_ratio = int(getattr(pretransform, "downsampling_ratio", 1) or 1)
+        downsampling_ratio = max(1, downsampling_ratio)
+
+        aligned_samples = requested_samples
+        if downsampling_ratio > 1:
+            aligned_samples = ((aligned_samples + downsampling_ratio - 1) // downsampling_ratio) * downsampling_ratio
+
+        generation_sample_size = int(max(1, min(model_sample_size, aligned_samples)))
+        seconds_total = generation_sample_size / float(sample_rate)
+    try:
+        seconds_start = float(data.get("seconds_start", 0))
+    except Exception:
+        seconds_start = 0.0
+
+    conditioning = [{
+        "prompt": enhanced_prompt,
+        "seconds_total": seconds_total
+    }]
+
+    negative_conditioning = None
+    if negative_prompt:
+        negative_conditioning = [{
+            "prompt": negative_prompt,
+            "seconds_total": seconds_total
+        }]
+
+    if model_family == "sao1.0":
+        conditioning[0]["seconds_start"] = seconds_start
+        if negative_conditioning:
+            negative_conditioning[0]["seconds_start"] = seconds_start
+
+    client_sampler_overrides = {}
+    if "sampler_type" in data:
+        client_sampler_overrides["sampler_type"] = data["sampler_type"]
+
+    _report_generation_progress(progress_callback, 35, "configuring_sampler")
+    skw = sampler_kwargs_for_objective(model, config, client_sampler_overrides)
+
+    if seed != -1:
+        torch.manual_seed(seed)
+        if device == "cuda":
+            torch.cuda.manual_seed(seed)
+    else:
+        seed = torch.randint(0, 2**32 - 1, (1,)).item()
+        torch.manual_seed(seed)
+        if device == "cuda":
+            torch.cuda.manual_seed(seed)
+
+    print("🔄 Loop generation:")
+    print(f"   BPM: {detected_bpm}, Bars: {bars}")
+    print(f"   Type: {loop_type}")
+    print(f"   Model: {model_type}")
+    print(f"   Enhanced prompt: {enhanced_prompt}")
+    print(f"   Negative: {negative_prompt}")
+    print(f"   seconds_total: {seconds_total}, seconds_start: {seconds_start}")
+    print(f"   generation sample size: {generation_sample_size} (model max {model_sample_size})")
+    print(f"   Steps: {steps}, CFG: {cfg_scale}, Seed: {seed}")
+    print(f"   Using sampler kwargs: {skw}")
+
+    sampling_progress_start = 22
+    sampling_progress_end = 92
+    if progress_callback is not None:
+        _report_generation_progress(progress_callback, sampling_progress_start, "sampling")
+
+        existing_sampler_callback = skw.get("callback")
+        sampling_state = {
+            "last_progress": sampling_progress_start - 1,
+            "last_completed_step": 0,
+            "saw_zero_index": False
+        }
+
+        def _sampling_step_callback(payload):
+            if callable(existing_sampler_callback):
+                try:
+                    existing_sampler_callback(payload)
+                except Exception:
+                    pass
+
+            if not isinstance(payload, dict):
+                return
+
+            raw_index = payload.get("i")
+            if not isinstance(raw_index, (int, float)):
+                return
+
+            step_index = int(raw_index)
+            if step_index < 0:
+                return
+
+            if step_index == 0:
+                sampling_state["saw_zero_index"] = True
+
+            if sampling_state["saw_zero_index"]:
+                completed_step = step_index + 1
+            else:
+                cand_from_zero_based = max(1, step_index + 1)
+                cand_from_one_based = max(1, step_index)
+                prev_completed = sampling_state["last_completed_step"]
+                viable = [c for c in (cand_from_zero_based, cand_from_one_based) if c >= prev_completed]
+                completed_step = min(viable) if viable else max(cand_from_zero_based, cand_from_one_based, prev_completed)
+
+            completed_step = max(1, min(steps, completed_step))
+            sampling_state["last_completed_step"] = completed_step
+
+            fraction = completed_step / float(max(steps, 1))
+            progress = sampling_progress_start + int(round((sampling_progress_end - sampling_progress_start) * fraction))
+            progress = max(sampling_progress_start, min(sampling_progress_end, progress))
+
+            if progress > sampling_state["last_progress"]:
+                sampling_state["last_progress"] = progress
+                _report_generation_progress(progress_callback, progress, "sampling")
+
+        skw["callback"] = _sampling_step_callback
+
+    start_time = time.time()
+    with resource_cleanup():
+        maybe_empty_cache(device)
+        with autocast_ctx(device):
+            output = generate_diffusion_cond(
+                model,
+                steps=steps,
+                cfg_scale=cfg_scale,
+                conditioning=conditioning,
+                negative_conditioning=negative_conditioning,
+                sample_size=generation_sample_size,
+                device=device,
+                seed=seed,
+                **skw
+            )
+
+    generation_time = time.time() - start_time
+
+    _report_generation_progress(progress_callback, 95, "postprocessing")
+    output = rearrange(output, "b d n -> d (b n)")
+    output = output.to(torch.float32).div(torch.max(torch.abs(output))).clamp(-1, 1)
+
+    loop_samples = int(calculated_loop_duration * sample_rate)
+    available_samples = output.shape[1]
+    available_duration = available_samples / sample_rate
+    loop_duration = calculated_loop_duration
+
+    if loop_samples > available_samples:
+        loop_samples = available_samples
+        loop_duration = available_duration
+
+    loop_output = output[:, :loop_samples]
+    loop_output_int16 = loop_output.mul(32767).to(torch.int16).cpu()
+
+    metadata = {
+        "prompt": enhanced_prompt,
+        "original_prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "loop_type": loop_type,
+        "detected_bpm": detected_bpm,
+        "bars": bars,
+        "loop_duration_seconds": round(loop_duration, 2),
+        "calculated_duration_seconds": round(calculated_loop_duration, 2),
+        "available_audio_seconds": round(available_duration, 2),
+        "seconds_per_bar": round(seconds_per_bar, 2),
+        "style_transfer": False,
+        "style_strength": None,
+        "model_type": model_type,
+        "steps": steps,
+        "cfg_scale": cfg_scale,
+        "seed": seed,
+        "sample_rate": sample_rate,
+        "generation_time": round(generation_time, 2),
+        "device": device
+    }
+
+    print(f"✅ Loop generated: {loop_duration:.2f}s ({bars} bars at {detected_bpm}bpm)")
+
+    _report_generation_progress(progress_callback, 98, "encoding_audio")
+    buffer = io.BytesIO()
+    save_audio(buffer, loop_output_int16, sample_rate)
+    wav_bytes = buffer.getvalue()
+    audio_b64 = base64.b64encode(wav_bytes).decode()
+    del output, loop_output, loop_output_int16
+
+    _report_generation_progress(progress_callback, 100, "completed")
+    return {
+        "audio_base64": audio_b64,
+        "wav_bytes": wav_bytes,
+        "metadata": metadata
+    }
+
 @app.route('/generate', methods=['POST'])
 def generate_audio():
     try:
         data = request.get_json()
         if not data:
             return jsonify({"error": "JSON body required"}), 400
-        
-        
 
-        # ---- Model selection ----
-        model_type = data.get('model_type', 'standard')
-        finetune_repo = data.get('finetune_repo')
-        finetune_checkpoint = data.get('finetune_checkpoint')
-
-        # ---- Prompt ----
-        prompt = data.get('prompt')
-        if not prompt:
-            return jsonify({"error": "prompt is required"}), 400
-
-        # ---- Load model (returns model, config dict, device) ----
-        model, config, device = get_model(model_type, finetune_repo, finetune_checkpoint)
-
-        # ---- Per-model timing derived from config ----
-        sample_rate = int(config.get("sample_rate", 44100))
-        model_sample_size = int(config.get("sample_size", 524288))
-        model_seconds_max = max(1, model_sample_size // sample_rate)  # guard
-
-        # Detect model family
-        model_family = detect_model_family(config)
-
-        # Client may request seconds_total; default to model max
-        req_seconds_total = data.get("seconds_total")
-        if req_seconds_total is None:
-            seconds_total = model_seconds_max
-        else:
-            # clamp to model capability
-            try:
-                seconds_total = int(req_seconds_total)
-            except Exception:
-                return jsonify({"error": "seconds_total must be an integer number of seconds"}), 400
-            if seconds_total < 1:
-                return jsonify({"error": "seconds_total must be >= 1"}), 400
-            if seconds_total > model_seconds_max:
-                # clamp + inform
-                seconds_total = model_seconds_max
-
-        # ---- Steps default depends on diffusion objective ----
-        diffusion_objective = getattr(model, "diffusion_objective", None)
-        steps = data.get('steps')
-        # Default steps based on model
-        if steps is None:
-            if model_family == "sao1.0":
-                steps = 100  # SAO 1.0 default
-            elif diffusion_objective == "rectified_flow":
-                steps = 50
-            else:
-                steps = 8
-        # validate steps
-        if not isinstance(steps, int) or steps < 1 or steps > 250:
-            return jsonify({"error": "steps must be integer between 1-250"}), 400
-
-        # ---- CFG scale (same as before) ----
-        cfg_scale = data.get('cfg_scale', 1.0)
-        if not isinstance(cfg_scale, (int, float)) or cfg_scale < 0 or cfg_scale > 20:
-            return jsonify({"error": "cfg_scale must be number between 0-20"}), 400
-
-        negative_prompt = data.get('negative_prompt')
-        return_format = data.get('return_format', 'file')
-        if return_format not in ['file', 'base64']:
+        return_format = data.get("return_format", "file")
+        if return_format not in ["file", "base64"]:
             return jsonify({"error": "return_format must be 'file' or 'base64'"}), 400
 
-        # ---- Seed ----
-        seed = data.get('seed', -1)
-        if seed != -1:
-            torch.manual_seed(seed)
-            if device == "cuda":
-                torch.cuda.manual_seed(seed)
-        else:
-            seed = torch.randint(0, 2**32 - 1, (1,)).item()
-            torch.manual_seed(seed)
-            if device == "cuda":
-                torch.cuda.manual_seed(seed)
-
-        # ---- Conditioning assembled from request + model config ----
-        conditioning = [{
-            "prompt": prompt,
-            "seconds_total": seconds_total
-        }]
-
-        negative_conditioning = None
-        if negative_prompt:
-            negative_conditioning = [{
-                "prompt": negative_prompt,
-                "seconds_total": seconds_total
-            }]
-        
-        # Add seconds_start if SAO 1.0
-        if model_family == "sao1.0":
-            seconds_start = data.get("seconds_start", 0)
-            conditioning[0]["seconds_start"] = seconds_start
-            if negative_conditioning:  # ← Fix: Add to negative conditioning too
-                negative_conditioning[0]["seconds_start"] = seconds_start
-
-        # ---- Sampler kwargs based on objective (and client override if provided) ----
-        client_sampler_overrides = {}
-        if "sampler_type" in data:
-            client_sampler_overrides["sampler_type"] = data["sampler_type"]
-        # Sampler kwargs (now model-family aware)
-        skw = sampler_kwargs_for_objective(model, config, client_sampler_overrides)
-
-        print(f"Generating with {model_type} model:")
-        print(f"   Prompt: {prompt}")
-        print(f"   Objective: {diffusion_objective}")
-        print(f"   seconds_total: {seconds_total} (max {model_seconds_max})")
-        print(f"   Steps: {steps}, CFG: {cfg_scale}, Seed: {seed}")
-        print(f"   Negative: {negative_prompt or 'None'}")
-
-        # ---- Generation (unchanged except we pass the per-model sizes) ----
-        start_time = time.time()
-        with resource_cleanup():
-            maybe_empty_cache(device)
-            with autocast_ctx(device):
-                output = generate_diffusion_cond(
-                    model,
-                    steps=steps,
-                    cfg_scale=cfg_scale,
-                    conditioning=conditioning,
-                    negative_conditioning=negative_conditioning,
-                    sample_size=model_sample_size,  # from model config
-                    device=device,
-                    seed=seed,
-                    **skw
-                )
-        generation_time = time.time() - start_time
-
-        
-        # ---- Post-processing ----
-        output = rearrange(output, "b d n -> d (b n)")
-        output = output.to(torch.float32).div(torch.max(torch.abs(output))).clamp(-1, 1)
-
-        # NEW: Trim to requested duration (avoid silence padding)
-        requested_samples = seconds_total * sample_rate
-        actual_samples = output.shape[1]
-        if requested_samples < actual_samples:
-            output = output[:, :requested_samples]
-            print(f"   ✂️  Trimmed from {actual_samples/sample_rate:.1f}s to {seconds_total}s")
-
-        output_int16 = output.mul(32767).to(torch.int16).cpu()
-
-        detected_bpm = extract_bpm(prompt)
-        metadata = {
-            "prompt": prompt,
-            "negative_prompt": negative_prompt,
-            "steps": steps,
-            "cfg_scale": cfg_scale,
-            "seed": seed,
-            "sample_rate": sample_rate,
-            "duration_seconds": seconds_total,
-            "generation_time": round(generation_time, 2),
-            "realtime_factor": round(seconds_total / max(generation_time, 1e-6), 2),
-            "detected_bpm": detected_bpm,
-            "device": device
-        }
-        if device == "cuda":
-            memory_used = torch.cuda.memory_allocated() / 1e9
-            memory_peak = torch.cuda.max_memory_allocated() / 1e9
-            metadata["gpu_memory_used"] = round(memory_used, 2)
-            metadata["gpu_memory_peak"] = round(memory_peak, 2)
-            torch.cuda.reset_peak_memory_stats()
-
-        print(f"✅ Generated in {generation_time:.2f}s ({metadata['realtime_factor']:.1f}x RT)")
-
+        result = _run_generate_request(data)
         if return_format == "file":
-            buffer = io.BytesIO()
-            save_audio(buffer, output_int16, sample_rate)
+            filename = f"stable_audio_{result['metadata'].get('seed', 'na')}_{int(time.time())}.wav"
+            buffer = io.BytesIO(result["wav_bytes"])
             buffer.seek(0)
-            filename = f"stable_audio_{seed}_{int(time.time())}.wav"
-            del output, output_int16
-            return send_file(buffer, mimetype='audio/wav', as_attachment=True, download_name=filename)
+            return send_file(buffer, mimetype="audio/wav", as_attachment=True, download_name=filename)
 
-        else:
-            buffer = io.BytesIO()
-            save_audio(buffer, output_int16, sample_rate)
-            audio_b64 = base64.b64encode(buffer.getvalue()).decode()
-            del output, output_int16
-            return jsonify({"success": True, "audio_base64": audio_b64, "metadata": metadata})
+        return jsonify({
+            "success": True,
+            "audio_base64": result["audio_base64"],
+            "metadata": result["metadata"]
+        })
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
     except Exception as e:
         print(f"❌ Generation error: {str(e)}")
@@ -1040,6 +1457,259 @@ def generate_audio():
         with resource_cleanup():
             pass
         return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/generate/async', methods=['POST'])
+def generate_audio_async():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "JSON body required"}), 400
+
+        request_id = str(data.get("request_id") or uuid.uuid4()).strip()
+        if not request_id:
+            request_id = str(uuid.uuid4())
+
+        payload = dict(data)
+        payload["return_format"] = "base64"
+
+        _cleanup_jerry_jobs()
+        _set_jerry_job_state(
+            request_id,
+            status="queued",
+            stage="queued",
+            progress=0,
+            generation_in_progress=True,
+            transform_in_progress=False,
+            audio_data="",
+            metadata={},
+            error=""
+        )
+
+        def progress_callback(progress, stage):
+            status = "queued" if stage == "queued" else "processing"
+            _set_jerry_job_state(
+                request_id,
+                status=status,
+                stage=stage,
+                progress=progress,
+                generation_in_progress=True,
+                transform_in_progress=False
+            )
+
+        def worker():
+            try:
+                with jerry_generation_worker_lock:
+                    _set_jerry_job_state(
+                        request_id,
+                        status="processing",
+                        stage="starting",
+                        progress=5,
+                        generation_in_progress=True,
+                        transform_in_progress=False
+                    )
+
+                    result = _run_generate_request(payload, progress_callback=progress_callback)
+
+                _set_jerry_job_state(
+                    request_id,
+                    status="completed",
+                    stage="done",
+                    progress=100,
+                    generation_in_progress=False,
+                    transform_in_progress=False,
+                    audio_data=result["audio_base64"],
+                    metadata=result["metadata"],
+                    error=""
+                )
+            except ValueError as e:
+                _set_jerry_job_state(
+                    request_id,
+                    status="failed",
+                    stage="failed",
+                    generation_in_progress=False,
+                    transform_in_progress=False,
+                    error=str(e)
+                )
+            except Exception as e:
+                print(f"❌ Async generation error [{request_id}]: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                _set_jerry_job_state(
+                    request_id,
+                    status="failed",
+                    stage="failed",
+                    generation_in_progress=False,
+                    transform_in_progress=False,
+                    error=str(e)
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        return jsonify({
+            "success": True,
+            "session_id": request_id,
+            "status": "queued"
+        })
+
+    except Exception as e:
+        print(f"❌ Async generate endpoint error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/generate/loop/async', methods=['POST'])
+def generate_loop_async():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "JSON body required"}), 400
+
+        request_id = str(data.get("request_id") or uuid.uuid4()).strip()
+        if not request_id:
+            request_id = str(uuid.uuid4())
+
+        payload = dict(data)
+        payload["return_format"] = "base64"
+
+        _cleanup_jerry_jobs()
+        _set_jerry_job_state(
+            request_id,
+            status="queued",
+            stage="queued",
+            progress=0,
+            generation_in_progress=True,
+            transform_in_progress=False,
+            audio_data="",
+            metadata={},
+            error=""
+        )
+
+        def progress_callback(progress, stage):
+            status = "queued" if stage == "queued" else "processing"
+            _set_jerry_job_state(
+                request_id,
+                status=status,
+                stage=stage,
+                progress=progress,
+                generation_in_progress=True,
+                transform_in_progress=False
+            )
+
+        def worker():
+            try:
+                with jerry_generation_worker_lock:
+                    _set_jerry_job_state(
+                        request_id,
+                        status="processing",
+                        stage="starting",
+                        progress=5,
+                        generation_in_progress=True,
+                        transform_in_progress=False
+                    )
+
+                    result = _run_generate_loop_request(payload, progress_callback=progress_callback)
+
+                _set_jerry_job_state(
+                    request_id,
+                    status="completed",
+                    stage="done",
+                    progress=100,
+                    generation_in_progress=False,
+                    transform_in_progress=False,
+                    audio_data=result["audio_base64"],
+                    metadata=result["metadata"],
+                    error=""
+                )
+            except ValueError as e:
+                _set_jerry_job_state(
+                    request_id,
+                    status="failed",
+                    stage="failed",
+                    generation_in_progress=False,
+                    transform_in_progress=False,
+                    error=str(e)
+                )
+            except Exception as e:
+                print(f"❌ Async loop generation error [{request_id}]: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                _set_jerry_job_state(
+                    request_id,
+                    status="failed",
+                    stage="failed",
+                    generation_in_progress=False,
+                    transform_in_progress=False,
+                    error=str(e)
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        return jsonify({
+            "success": True,
+            "session_id": request_id,
+            "status": "queued"
+        })
+
+    except Exception as e:
+        print(f"❌ Async loop endpoint error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/juce/poll_status/<request_id>', methods=['GET'])
+def poll_jerry_generation_status(request_id):
+    _cleanup_jerry_jobs()
+    state = _get_jerry_job_state(request_id)
+    if state is None:
+        return jsonify({
+            "success": False,
+            "status": "failed",
+            "error": "request_id not found",
+            "generation_in_progress": False,
+            "transform_in_progress": False,
+            "progress": 0
+        })
+
+    status = state.get("status", "queued")
+    stage = state.get("stage", "")
+    progress = int(state.get("progress", 0))
+
+    if status in ("queued", "processing"):
+        queue_status = {
+            "status": "queued" if status == "queued" else "processing",
+            "message": stage or ("queued" if status == "queued" else "processing"),
+            "position": 1 if status == "queued" else 0,
+            "estimated_time": "",
+            "estimated_seconds": 0
+        }
+        return jsonify({
+            "success": True,
+            "status": "processing",
+            "generation_in_progress": True,
+            "transform_in_progress": False,
+            "progress": progress,
+            "queue_status": queue_status
+        })
+
+    if status == "completed":
+        return jsonify({
+            "success": True,
+            "status": "completed",
+            "generation_in_progress": False,
+            "transform_in_progress": False,
+            "progress": 100,
+            "audio_data": state.get("audio_data", ""),
+            "metadata": state.get("metadata", {})
+        })
+
+    return jsonify({
+        "success": False,
+        "status": "failed",
+        "error": state.get("error", "generation failed"),
+        "generation_in_progress": False,
+        "transform_in_progress": False,
+        "progress": progress
+    })
 
 
 @app.route('/generate/style-transfer', methods=['POST'])
@@ -1251,24 +1921,30 @@ def generate_loop():
             data = request.get_json()
             if not data:
                 return jsonify({"error": "JSON body required"}), 400
-            
-            # ---- NEW: Model selection parameters ----
-            model_type = data.get('model_type', 'standard')
-            finetune_repo = data.get('finetune_repo')
-            finetune_checkpoint = data.get('finetune_checkpoint')
-            
-            # Parse JSON parameters
-            prompt = data.get('prompt')
-            loop_type = data.get('loop_type', 'auto')
-            bars = data.get('bars')
-            style_strength = float(data.get('style_strength', 0.8))
-            steps = int(data.get('steps', 8))
-            cfg_scale = float(data.get('cfg_scale', 6.0))
-            seed = int(data.get('seed', -1))
+
             return_format = data.get('return_format', 'file')
-            
-            audio_file = None
-            
+            if return_format not in ['file', 'base64']:
+                return jsonify({"error": "return_format must be 'file' or 'base64'"}), 400
+
+            result = _run_generate_loop_request(data)
+            if return_format == "file":
+                metadata = result.get("metadata", {})
+                loop_type = metadata.get("loop_type", "auto")
+                detected_bpm = metadata.get("detected_bpm", "na")
+                bars = metadata.get("bars", "na")
+                seed = metadata.get("seed", "na")
+                filename = f"loop_{loop_type}_{detected_bpm}bpm_{bars}bars_{seed}.wav"
+
+                buffer = io.BytesIO(result["wav_bytes"])
+                buffer.seek(0)
+                return send_file(buffer, mimetype='audio/wav', as_attachment=True, download_name=filename)
+
+            return jsonify({
+                "success": True,
+                "audio_base64": result["audio_base64"],
+                "metadata": result["metadata"]
+            })
+
         else:
             # Form data input
             # ---- NEW: Model selection from form ----
@@ -1383,6 +2059,12 @@ def generate_loop():
         sample_rate = int(config.get("sample_rate", 44100))
         model_sample_size = int(config.get("sample_size", 524288))
         seconds_total = max(1, model_sample_size // sample_rate)
+        model_family = detect_model_family(config)
+        seconds_start = data.get("seconds_start", 0) if 'application/json' in content_type else request.form.get('seconds_start', 0)
+        try:
+            seconds_start = float(seconds_start)
+        except Exception:
+            seconds_start = 0.0
         
         # Prepare conditioning
         conditioning = [{
@@ -1396,10 +2078,15 @@ def generate_loop():
                 "prompt": negative_prompt,
                 "seconds_total": seconds_total
             }]
+
+        if model_family == "sao1.0":
+            conditioning[0]["seconds_start"] = seconds_start
+            if negative_conditioning:
+                negative_conditioning[0]["seconds_start"] = seconds_start
         
         # ---- NEW: Dynamic sampler selection ----
         client_sampler_overrides = {}
-        skw = sampler_kwargs_for_objective(model, client_sampler_overrides)
+        skw = sampler_kwargs_for_objective(model, config, client_sampler_overrides)
         
         print(f"   Using sampler kwargs: {skw}")
         
