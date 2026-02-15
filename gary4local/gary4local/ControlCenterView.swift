@@ -34,6 +34,9 @@ struct ControlCenterView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .sheet(isPresented: $viewModel.isModelDownloadSheetPresented) {
+            ModelDownloadSheet(viewModel: viewModel)
+        }
     }
 
     @ViewBuilder
@@ -54,6 +57,10 @@ struct ControlCenterView: View {
                     manager.rebuildAllEnvironments()
                 }
                 .disabled(manager.isRebuildingAllEnvironments || manager.services.isEmpty)
+                Button("Download Models...") {
+                    viewModel.openModelDownloadSheet()
+                }
+                .disabled(manager.services.first(where: { $0.id == "audiocraft_mlx" }) == nil)
                 Spacer()
             }
 
@@ -89,13 +96,12 @@ struct ControlCenterView: View {
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
 
-                ScrollView {
-                    Text(viewModel.selectedLogText.isEmpty ? "(no log output yet)" : viewModel.selectedLogText)
-                        .font(.system(size: 11, weight: .regular, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                        .padding(8)
-                }
+                LogTextView(
+                    text: viewModel.selectedLogText,
+                    placeholder: "(no log output yet)",
+                    isPinnedToBottom: viewModel.isLogViewerPinnedToBottom,
+                    onPinnedToBottomChanged: viewModel.updateLogViewerPinnedToBottom
+                )
                 .background(Color(NSColor.textBackgroundColor))
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
@@ -129,6 +135,23 @@ struct ControlCenterView: View {
             )
             .font(.caption)
             .foregroundStyle(viewModel.stableAudioTokenConfigured ? .green : .orange)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Generation Backend")
+                    .font(.subheadline)
+                Picker("Generation Backend", selection: Binding(
+                    get: { viewModel.stableAudioBackendEngine },
+                    set: { viewModel.setStableAudioBackendEngine($0) }
+                )) {
+                    ForEach(StableAudioBackendEngine.allCases) { backend in
+                        Text(backend.displayName).tag(backend)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text("Applies to localhost generation default. Changing this restarts Stable Audio if it's running.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             if !viewModel.stableAudioTokenConfigured {
                 stepRow(
@@ -202,6 +225,136 @@ struct ControlCenterView: View {
             Spacer()
             Button(buttonTitle, action: action)
                 .disabled(!isEnabled)
+        }
+    }
+}
+
+private struct ModelDownloadSheet: View {
+    @ObservedObject var viewModel: ControlCenterViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Download Models")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Button("Close") { dismiss() }
+            }
+
+            Text("Pre-download models for offline use in gary4juce.")
+                .font(.subheadline)
+            Text("Models also download the first time you use them inside gary4juce.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if !viewModel.modelDownloadStatusMessage.isEmpty {
+                Text(viewModel.modelDownloadStatusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Button("Refresh Statuses") {
+                    viewModel.refreshModelCatalogAndStatuses()
+                }
+                .disabled(viewModel.isModelCatalogLoading || viewModel.isModelDownloadInProgress)
+
+                if viewModel.isModelCatalogLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Spacer()
+            }
+
+            if viewModel.downloadableModels.isEmpty, !viewModel.isModelCatalogLoading {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("No models available.")
+                        .foregroundStyle(.secondary)
+                    if !viewModel.canManageModelDownloads {
+                        Text("Start the Audiocraft MLX service, then refresh statuses.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else {
+                List {
+                    ForEach(viewModel.modelDownloadSections) { section in
+                        Section(section.title) {
+                            ForEach(section.models) { model in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(alignment: .firstTextBaseline) {
+                                        Text(model.displayName)
+                                            .font(.system(.body, design: .monospaced))
+                                        Spacer()
+                                        statusPill(for: model)
+                                        Button(
+                                            model.isDownloading ? "Downloading..." : "Download"
+                                        ) {
+                                            viewModel.startModelDownload(model.path)
+                                        }
+                                        .disabled(
+                                            model.isDownloading
+                                            || model.downloaded
+                                            || viewModel.isModelDownloadInProgress
+                                            || !viewModel.canManageModelDownloads
+                                        )
+                                    }
+
+                                    Text(model.path)
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(.secondary)
+
+                                    if model.isDownloading {
+                                        ProgressView(value: model.progress)
+                                            .controlSize(.small)
+                                    }
+
+                                    Text(model.statusMessage)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.vertical, 4)
+                            }
+                        }
+                    }
+                }
+                .listStyle(.inset)
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 760, minHeight: 520)
+        .onAppear {
+            if viewModel.downloadableModels.isEmpty {
+                viewModel.refreshModelCatalogAndStatuses()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func statusPill(for model: DownloadableModel) -> some View {
+        if model.downloaded {
+            Text("Downloaded")
+                .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Color.green.opacity(0.18))
+                .clipShape(Capsule())
+        } else if model.isDownloading {
+            Text("\(Int((model.progress * 100).rounded()))%")
+                .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Color.orange.opacity(0.18))
+                .clipShape(Capsule())
+        } else {
+            Text("Not downloaded")
+                .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Color.gray.opacity(0.16))
+                .clipShape(Capsule())
         }
     }
 }
@@ -371,6 +524,172 @@ private struct DetachedScreenshotContent: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.white.opacity(0.15))
         )
+    }
+}
+
+private struct LogTextView: NSViewRepresentable {
+    let text: String
+    let placeholder: String
+    let isPinnedToBottom: Bool
+    let onPinnedToBottomChanged: (Bool) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onPinnedToBottomChanged: onPinnedToBottomChanged)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+
+        let textView = NSTextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.allowsUndo = false
+        textView.usesFontPanel = false
+        textView.usesFindPanel = true
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.drawsBackground = false
+        textView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        textView.textContainerInset = NSSize(width: 8, height: 8)
+        textView.minSize = .zero
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+
+        scrollView.documentView = textView
+        context.coordinator.attach(scrollView: scrollView, textView: textView)
+        context.coordinator.applyDisplayedText(
+            displayedText,
+            in: scrollView,
+            forceScrollToBottom: isPinnedToBottom
+        )
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.onPinnedToBottomChanged = onPinnedToBottomChanged
+        context.coordinator.applyDisplayedText(
+            displayedText,
+            in: scrollView,
+            forceScrollToBottom: isPinnedToBottom
+        )
+        context.coordinator.reportPinnedStateIfNeeded(for: scrollView, force: true)
+    }
+
+    private var displayedText: String {
+        text.isEmpty ? placeholder : text
+    }
+
+    final class Coordinator: NSObject {
+        var onPinnedToBottomChanged: (Bool) -> Void
+        private weak var textView: NSTextView?
+        private var boundsObserver: NSObjectProtocol?
+        private var lastKnownPinnedToBottom = true
+
+        init(onPinnedToBottomChanged: @escaping (Bool) -> Void) {
+            self.onPinnedToBottomChanged = onPinnedToBottomChanged
+        }
+
+        deinit {
+            if let boundsObserver {
+                NotificationCenter.default.removeObserver(boundsObserver)
+            }
+        }
+
+        func attach(scrollView: NSScrollView, textView: NSTextView) {
+            self.textView = textView
+            scrollView.contentView.postsBoundsChangedNotifications = true
+
+            if let boundsObserver {
+                NotificationCenter.default.removeObserver(boundsObserver)
+            }
+
+            boundsObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification,
+                object: scrollView.contentView,
+                queue: .main
+            ) { [weak self, weak scrollView] _ in
+                guard let self, let scrollView else { return }
+                self.reportPinnedStateIfNeeded(for: scrollView)
+            }
+        }
+
+        func applyDisplayedText(
+            _ nextText: String,
+            in scrollView: NSScrollView,
+            forceScrollToBottom: Bool
+        ) {
+            guard let textView else { return }
+            guard textView.string != nextText else {
+                if forceScrollToBottom {
+                    scrollToBottom(scrollView)
+                }
+                return
+            }
+
+            let wasPinnedToBottom = isPinnedToBottom(scrollView)
+            let previousY = scrollView.contentView.bounds.origin.y
+
+            textView.string = nextText
+            if let textContainer = textView.textContainer {
+                textView.layoutManager?.ensureLayout(for: textContainer)
+            }
+
+            if forceScrollToBottom || wasPinnedToBottom {
+                scrollToBottom(scrollView)
+            } else {
+                restoreScrollPosition(previousY, in: scrollView)
+            }
+        }
+
+        func reportPinnedStateIfNeeded(for scrollView: NSScrollView, force: Bool = false) {
+            let pinned = isPinnedToBottom(scrollView)
+            guard force || pinned != lastKnownPinnedToBottom else { return }
+            lastKnownPinnedToBottom = pinned
+            onPinnedToBottomChanged(pinned)
+        }
+
+        private func restoreScrollPosition(_ previousY: CGFloat, in scrollView: NSScrollView) {
+            guard let documentHeight = scrollView.documentView?.bounds.height else { return }
+            let viewportHeight = scrollView.contentView.bounds.height
+            let maxY = max(0, documentHeight - viewportHeight)
+            let newY = min(previousY, maxY)
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: newY))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        }
+
+        private func scrollToBottom(_ scrollView: NSScrollView) {
+            guard let documentHeight = scrollView.documentView?.bounds.height else { return }
+            let viewportHeight = scrollView.contentView.bounds.height
+            let bottomY = max(0, documentHeight - viewportHeight)
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: bottomY))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        }
+
+        private func isPinnedToBottom(_ scrollView: NSScrollView) -> Bool {
+            guard let documentHeight = scrollView.documentView?.bounds.height else {
+                return true
+            }
+            let visibleMaxY = scrollView.contentView.bounds.maxY
+            return documentHeight - visibleMaxY <= 24
+        }
     }
 }
 

@@ -18,10 +18,13 @@ import threading
 import gc
 import sys
 import types
+import json
+import hashlib
 from einops import rearrange
-from huggingface_hub import login
+from huggingface_hub import login, hf_hub_download
 from contextlib import contextmanager
 import contextlib
+from pathlib import Path
 
 # Compatibility shim:
 # Some transitive dependencies (e.g. clip) still import
@@ -42,6 +45,7 @@ except ModuleNotFoundError:
 
 from stable_audio_tools import get_pretrained_model
 from stable_audio_tools.inference.generation import generate_diffusion_cond
+from stable_audio_tools.models.utils import load_ckpt_state_dict
 
 from riff_manager import RiffManager
 
@@ -384,6 +388,13 @@ jerry_generation_jobs_lock = threading.Lock()
 jerry_generation_worker_lock = threading.Lock()
 JERRY_JOB_TTL_SECONDS = 30 * 60
 
+_MLX_GENERATE_FN = None
+_MLX_FINETUNE_LOCK = threading.Lock()
+_MLX_FINETUNE_MERGED_CACHE: dict[tuple[str, str, str], dict[str, str]] = {}
+_MLX_CACHE_DIR = Path(__file__).resolve().parent / ".mlx_cache"
+_MLX_MERGED_CHECKPOINT_DIR = _MLX_CACHE_DIR / "merged_checkpoints"
+_MLX_STATUS_LOCK = threading.Lock()
+_MLX_MODEL_STATUS: dict[str, dict] = {}
 
 
 @contextmanager
@@ -469,11 +480,28 @@ def process_input_audio(audio_file, target_sr):
 def health_check():
     """Health check endpoint."""
     try:
+        backend_engine = _default_backend_engine()
+        if backend_engine == "mlx":
+            standard_status = _ensure_mlx_standard_status()
+            return jsonify({
+                "status": "healthy",
+                "model_loaded": bool(standard_status and standard_status.get("warmed")),
+                "device": "mlx",
+                "backend_engine": "mlx",
+                "cuda_available": torch.cuda.is_available(),
+                "model_info": {
+                    "sample_rate": int(standard_status.get("sample_rate", 44100)) if standard_status else 44100,
+                    "sample_size": int(standard_status.get("sample_size", 524288)) if standard_status else 524288,
+                    "diffusion_objective": "mlx-runtime"
+                }
+            })
+
         model, config, device = load_model()
         return jsonify({
             "status": "healthy",
             "model_loaded": True,
             "device": device,
+            "backend_engine": "mps",
             "cuda_available": torch.cuda.is_available(),
             "model_info": {
                 "sample_rate": config["sample_rate"],
@@ -589,17 +617,70 @@ def switch_model():
                     "error": "finetune_repo and finetune_checkpoint required for finetune models"
                 }), 400
         
+        backend_engine, default_backend, requested_backend = _resolve_backend_engine_from_request(data)
+        print(
+            "🎛 Backend selection (/models/switch):"
+            f" request={requested_backend!r},"
+            f" default={default_backend},"
+            f" effective={backend_engine}"
+        )
+        warmup = _coerce_bool(data.get("warmup", True), default=True)
+
+        if backend_engine == "mlx":
+            print(f"Switching to {model_type} model (mlx)...")
+            model_spec = _resolve_mlx_model_spec(
+                model_type=model_type,
+                finetune_repo=finetune_repo,
+                finetune_checkpoint=finetune_checkpoint,
+                base_repo=data.get("base_repo"),
+                model_id=data.get("model_id"),
+            )
+
+            if warmup:
+                try:
+                    _prewarm_mlx_model_spec(model_spec, model_type)
+                    warmed = True
+                except Exception as warmup_error:
+                    warmed = False
+                    print(f"⚠️ MLX warmup failed during /models/switch: {warmup_error}")
+            else:
+                warmed = False
+
+            source = model_spec.get("source", {})
+            _record_mlx_model_status(model_type, source, model_spec["model_config"], warmed=warmed)
+            mlx_snapshot = _snapshot_mlx_model_status()
+            return jsonify({
+                "success": True,
+                "model_type": model_type,
+                "device": "mlx",
+                "backend_engine": "mlx",
+                "config": {
+                    "sample_rate": int(model_spec["model_config"].get("sample_rate", 44100)),
+                    "sample_size": int(model_spec["model_config"].get("sample_size", 524288))
+                },
+                "cache_status": {
+                    "loaded_models": list(mlx_snapshot.keys()),
+                    "usage_order": list(mlx_snapshot.keys()),
+                    "cache_utilization": f"{len(mlx_snapshot)}/mlx-runtime",
+                },
+                "message": (
+                    f"Successfully switched to {model_type} model (mlx)"
+                    + (" and warmed caches" if warmed else "")
+                )
+            })
+
         # Load the requested model (this will cache it)
-        print(f"Switching to {model_type} model...")
+        print(f"Switching to {model_type} model (mps)...")
         model, config, device = get_model(model_type, finetune_repo, finetune_checkpoint)
-        
+
         # Get cache status
         cache_info = model_manager.list_loaded_models()
-        
+
         return jsonify({
             "success": True,
             "model_type": model_type,
             "device": device,
+            "backend_engine": "mps",
             "config": {
                 "sample_rate": config["sample_rate"],
                 "sample_size": config["sample_size"]
@@ -621,6 +702,22 @@ def switch_model():
 def models_status():
     """Get status of loaded models"""
     try:
+        if _default_backend_engine() == "mlx":
+            _ensure_mlx_standard_status()
+            mlx_snapshot = _snapshot_mlx_model_status()
+            usage_order = list(mlx_snapshot.keys())
+            return jsonify({
+                "cache_status": {
+                    "loaded_models": usage_order,
+                    "usage_order": usage_order,
+                    "cache_utilization": f"{len(usage_order)}/mlx-runtime",
+                },
+                "model_details": mlx_snapshot,
+                "max_models": "mlx-runtime",
+                "backend_engine": "mlx",
+                "cuda_available": torch.cuda.is_available()
+            })
+
         cache_info = model_manager.list_loaded_models()
         
         # Get detailed info about each loaded model
@@ -640,6 +737,7 @@ def models_status():
             "cache_status": cache_info,
             "model_details": detailed_info,
             "max_models": model_manager.max_models,
+            "backend_engine": "mps",
             "cuda_available": torch.cuda.is_available()
         })
         
@@ -909,11 +1007,747 @@ def _cleanup_jerry_jobs():
         for request_id in stale_ids:
             jerry_generation_jobs.pop(request_id, None)
 
+
+def _normalize_backend_engine(raw_backend):
+    if raw_backend is None:
+        return "mps"
+    backend = str(raw_backend).strip().lower()
+    if backend in ("", "mps", "torch"):
+        return "mps"
+    if backend == "mlx":
+        return "mlx"
+    raise ValueError("backend_engine must be 'mps' or 'mlx'")
+
+
+def _default_backend_engine():
+    configured = os.getenv("STABLE_AUDIO_BACKEND_ENGINE", "mps")
+    try:
+        return _normalize_backend_engine(configured)
+    except Exception:
+        print(
+            f"⚠️ Invalid STABLE_AUDIO_BACKEND_ENGINE='{configured}', falling back to 'mps'"
+        )
+        return "mps"
+
+
+def _resolve_backend_engine_from_request(data):
+    default_backend = _default_backend_engine()
+    requested_backend = None
+
+    if isinstance(data, dict) and "backend_engine" in data:
+        requested_backend = data.get("backend_engine")
+        if requested_backend is None:
+            return default_backend, default_backend, requested_backend
+        if isinstance(requested_backend, str) and requested_backend.strip() == "":
+            return default_backend, default_backend, requested_backend
+        return _normalize_backend_engine(requested_backend), default_backend, requested_backend
+
+    return default_backend, default_backend, requested_backend
+
+
+def _coerce_bool(value, default=True):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "yes", "y", "on"):
+            return True
+        if normalized in ("0", "false", "no", "n", "off"):
+            return False
+    return default
+
+
+def _get_mlx_generate_fn():
+    global _MLX_GENERATE_FN
+    if _MLX_GENERATE_FN is not None:
+        return _MLX_GENERATE_FN
+
+    try:
+        from saomlx.pipeline import generate_diffusion_cond_mlx
+    except Exception as exc:
+        raise RuntimeError(
+            "MLX backend is unavailable. Ensure dependencies are installed and saomlx is importable."
+        ) from exc
+
+    _MLX_GENERATE_FN = generate_diffusion_cond_mlx
+    return _MLX_GENERATE_FN
+
+
+def _load_json(path):
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _torch_load_any(path):
+    try:
+        return torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+
+
+def _resolve_mlx_finetune_assets(finetune_repo, finetune_checkpoint, base_repo):
+    cache_key = (finetune_repo, finetune_checkpoint, base_repo)
+
+    with _MLX_FINETUNE_LOCK:
+        cached = _MLX_FINETUNE_MERGED_CACHE.get(cache_key)
+        if cached:
+            cached_ckpt = cached.get("merged_ckpt_path")
+            cached_config = cached.get("config_path")
+            if cached_ckpt and cached_config and os.path.exists(cached_ckpt) and os.path.exists(cached_config):
+                print(
+                    f"🎯 Using cached MLX finetune assets: {finetune_repo}/{finetune_checkpoint}"
+                )
+                model_config = _load_json(cached_config)
+                return {
+                    "model_id": None,
+                    "model_config_path": cached_config,
+                    "model_ckpt_path": cached_ckpt,
+                    "model_config": model_config,
+                    "source": {
+                        "type": "finetune",
+                        "repo": finetune_repo,
+                        "checkpoint": finetune_checkpoint,
+                        "base_repo": base_repo,
+                    },
+                }
+
+        os.makedirs(_MLX_MERGED_CHECKPOINT_DIR, exist_ok=True)
+        digest_input = f"{finetune_repo}|{finetune_checkpoint}|{base_repo}"
+        digest = hashlib.sha256(digest_input.encode("utf-8")).hexdigest()[:24]
+        merged_ckpt_path = str((_MLX_MERGED_CHECKPOINT_DIR / f"{digest}.ckpt").resolve())
+
+        config_path = model_manager._detect_config_from_checkpoint(finetune_checkpoint, finetune_repo)
+        if config_path is None:
+            config_path = hf_hub_download(repo_id=base_repo, filename="base_model_config.json", repo_type="model")
+
+        base_ckpt_path = hf_hub_download(repo_id=base_repo, filename="base_model.ckpt", repo_type="model")
+        finetune_ckpt_path = hf_hub_download(repo_id=finetune_repo, filename=finetune_checkpoint, repo_type="model")
+
+        if not os.path.exists(merged_ckpt_path):
+            print(f"🔧 Preparing merged MLX finetune checkpoint: {finetune_repo}/{finetune_checkpoint}")
+
+            base_state_dict = load_ckpt_state_dict(base_ckpt_path)
+            finetune_payload = _torch_load_any(finetune_ckpt_path)
+            finetune_state_dict = finetune_payload.get("state_dict", finetune_payload)
+            if not isinstance(finetune_state_dict, dict):
+                raise ValueError("Unsupported finetune checkpoint format: expected state_dict dictionary")
+
+            ema_prefix = "diffusion_ema.ema_model."
+            ema_keys = [k for k in finetune_state_dict.keys() if str(k).startswith(ema_prefix)]
+
+            if ema_keys:
+                overlay = {}
+                for key in ema_keys:
+                    mapped_key = str(key).replace(ema_prefix, "diffusion.model.")
+                    overlay[mapped_key] = finetune_state_dict[key]
+                for key, value in finetune_state_dict.items():
+                    if str(key).startswith("diffusion.pretransform"):
+                        overlay[key] = value
+            else:
+                overlay = {
+                    key: value
+                    for key, value in finetune_state_dict.items()
+                    if not str(key).startswith("pretransform.")
+                }
+
+            merged_state_dict = dict(base_state_dict)
+            merged_state_dict.update(overlay)
+            torch.save({"state_dict": merged_state_dict}, merged_ckpt_path)
+        else:
+            print(
+                f"🎯 Reusing merged MLX finetune checkpoint: {finetune_repo}/{finetune_checkpoint}"
+            )
+
+        _MLX_FINETUNE_MERGED_CACHE[cache_key] = {
+            "config_path": str(config_path),
+            "merged_ckpt_path": merged_ckpt_path,
+        }
+
+        model_config = _load_json(config_path)
+        return {
+            "model_id": None,
+            "model_config_path": str(config_path),
+            "model_ckpt_path": merged_ckpt_path,
+            "model_config": model_config,
+            "source": {
+                "type": "finetune",
+                "repo": finetune_repo,
+                "checkpoint": finetune_checkpoint,
+                "base_repo": base_repo,
+            },
+        }
+
+
+def _resolve_mlx_model_spec(model_type, finetune_repo, finetune_checkpoint, base_repo=None, model_id=None):
+    if model_id:
+        config_path = hf_hub_download(repo_id=model_id, filename="model_config.json", repo_type="model")
+        return {
+            "model_id": model_id,
+            "model_config_path": str(config_path),
+            "model_ckpt_path": None,
+            "model_config": _load_json(config_path),
+            "source": {"type": "pretrained", "model_id": model_id},
+        }
+
+    if model_type == "standard":
+        pretrained_id = "stabilityai/stable-audio-open-small"
+        config_path = hf_hub_download(repo_id=pretrained_id, filename="model_config.json", repo_type="model")
+        return {
+            "model_id": pretrained_id,
+            "model_config_path": str(config_path),
+            "model_ckpt_path": None,
+            "model_config": _load_json(config_path),
+            "source": {"type": "pretrained", "model_id": pretrained_id},
+        }
+
+    if model_type == "finetune":
+        if not finetune_repo or not finetune_checkpoint:
+            raise ValueError("finetune_repo and finetune_checkpoint required for finetune models")
+        resolved_base_repo = base_repo or "stabilityai/stable-audio-open-small"
+        return _resolve_mlx_finetune_assets(finetune_repo, finetune_checkpoint, resolved_base_repo)
+
+    raise ValueError("model_type must be 'standard' or 'finetune'")
+
+
+def _mlx_cache_key(model_type, source):
+    if model_type == "standard":
+        return "standard_saos"
+    repo = str(source.get("repo", "")).replace("/", "_")
+    checkpoint = str(source.get("checkpoint", "")).replace("/", "_").replace(".", "_")
+    return f"finetune_{repo}_{checkpoint}"
+
+
+def _record_mlx_model_status(model_type, source, config, *, warmed=False):
+    key = _mlx_cache_key(model_type, source)
+    entry = {
+        "type": model_type,
+        "source": source.get("model_id") if model_type == "standard" else f"{source.get('repo', '')}/{source.get('checkpoint', '')}",
+        "device": "mlx",
+        "sample_rate": int(config.get("sample_rate", 44100)),
+        "sample_size": int(config.get("sample_size", 524288)),
+        "warmed": bool(warmed),
+    }
+    with _MLX_STATUS_LOCK:
+        previous = _MLX_MODEL_STATUS.get(key, {})
+        if previous.get("warmed"):
+            entry["warmed"] = True
+        _MLX_MODEL_STATUS[key] = entry
+    return key
+
+
+def _snapshot_mlx_model_status():
+    with _MLX_STATUS_LOCK:
+        return dict(_MLX_MODEL_STATUS)
+
+
+def _ensure_mlx_standard_status():
+    snapshot = _snapshot_mlx_model_status()
+    if "standard_saos" in snapshot:
+        return snapshot["standard_saos"]
+
+    spec = _resolve_mlx_model_spec("standard", None, None)
+    source = spec.get("source", {"type": "pretrained", "model_id": "stabilityai/stable-audio-open-small"})
+    _record_mlx_model_status("standard", source, spec["model_config"], warmed=False)
+    snapshot = _snapshot_mlx_model_status()
+    return snapshot.get("standard_saos")
+
+
+def _prewarm_mlx_model_spec(spec, model_type):
+    generate_diffusion_cond_mlx = _get_mlx_generate_fn()
+    config = spec["model_config"]
+    model_family = detect_model_family(config)
+    extra_cond = {}
+    if model_family == "sao1.0":
+        extra_cond["seconds_start"] = 0.0
+
+    print(f"🔥 MLX warmup start ({model_type})...")
+    generate_diffusion_cond_mlx(
+        model_id=spec["model_id"],
+        model_config_path=spec["model_config_path"],
+        model_ckpt_path=spec["model_ckpt_path"],
+        prompt="warmup tone",
+        negative_prompt="",
+        seed=123,
+        steps=1,
+        seconds=1.0,
+        cfg_scale=1.0,
+        conditioning_backend="torch",
+        out_dir=None,
+        extra_cond=extra_cond,
+    )
+    print(f"✅ MLX warmup complete ({model_type})")
+
+
+def _encode_audio_np(audio_tc, sample_rate):
+    buffer = io.BytesIO()
+    sf.write(buffer, audio_tc, sample_rate, format="WAV", subtype="PCM_16")
+    wav_bytes = buffer.getvalue()
+    audio_b64 = base64.b64encode(wav_bytes).decode()
+    return wav_bytes, audio_b64
+
+
+def _run_generate_request_mlx(data, progress_callback=None):
+    if not isinstance(data, dict):
+        raise ValueError("JSON body required")
+
+    _report_generation_progress(progress_callback, 2, "validating")
+
+    model_type = data.get("model_type", "standard")
+    finetune_repo = data.get("finetune_repo")
+    finetune_checkpoint = data.get("finetune_checkpoint")
+    base_repo = data.get("base_repo")
+    model_id = data.get("model_id")
+
+    prompt = data.get("prompt")
+    if not prompt:
+        raise ValueError("prompt is required")
+
+    _report_generation_progress(progress_callback, 10, "loading_model")
+    mlx_model_spec = _resolve_mlx_model_spec(
+        model_type=model_type,
+        finetune_repo=finetune_repo,
+        finetune_checkpoint=finetune_checkpoint,
+        base_repo=base_repo,
+        model_id=model_id,
+    )
+    config = mlx_model_spec["model_config"]
+    model_family = detect_model_family(config)
+    _record_mlx_model_status(model_type, mlx_model_spec.get("source", {}), config, warmed=True)
+    print("🟢 Backend engine: mlx")
+    print(f"   Model type: {model_type}")
+    print(f"   Model source: {mlx_model_spec.get('source')}")
+
+    sample_rate = int(config.get("sample_rate", 44100))
+    model_sample_size = int(config.get("sample_size", 524288))
+    model_seconds_max = max(1, model_sample_size // sample_rate)
+
+    req_seconds_total = data.get("seconds_total")
+    if req_seconds_total is None:
+        seconds_total = model_seconds_max
+    else:
+        try:
+            seconds_total = int(req_seconds_total)
+        except Exception as exc:
+            raise ValueError("seconds_total must be an integer number of seconds") from exc
+        if seconds_total < 1:
+            raise ValueError("seconds_total must be >= 1")
+        if seconds_total > model_seconds_max:
+            seconds_total = model_seconds_max
+
+    steps = data.get("steps")
+    if steps is None:
+        steps = 100 if model_family == "sao1.0" else 8
+    if not isinstance(steps, int) or steps < 1 or steps > 250:
+        raise ValueError("steps must be integer between 1-250")
+
+    cfg_default = 7.0 if model_family == "sao1.0" else 1.0
+    cfg_scale = data.get("cfg_scale", cfg_default)
+    if not isinstance(cfg_scale, (int, float)) or cfg_scale < 0 or cfg_scale > 20:
+        raise ValueError("cfg_scale must be number between 0-20")
+
+    negative_prompt = data.get("negative_prompt", "")
+    seed = data.get("seed", -1)
+    try:
+        seed = int(seed)
+    except Exception as exc:
+        raise ValueError("seed must be an integer") from exc
+
+    sampler_type = data.get("sampler_type")
+    if not sampler_type and model_family == "sao1.0":
+        sampler_type = "k-heun"
+
+    mlx_conditioning_backend = str(data.get("mlx_conditioning_backend", "torch")).strip().lower()
+    if mlx_conditioning_backend not in ("torch", "mlx"):
+        raise ValueError("mlx_conditioning_backend must be 'torch' or 'mlx'")
+
+    _report_generation_progress(progress_callback, 25, "preparing_conditioning")
+    sampling_progress_start = 22
+    sampling_progress_end = 92
+    sampling_state = {
+        "last_progress": sampling_progress_start - 1,
+        "last_completed_step": 0,
+        "saw_zero_index": False,
+    }
+    if progress_callback is not None:
+        _report_generation_progress(progress_callback, sampling_progress_start, "sampling")
+
+    def _mlx_sampling_step_callback(payload):
+        if progress_callback is None or not isinstance(payload, dict):
+            return
+
+        raw_index = payload.get("i")
+        if not isinstance(raw_index, (int, float)):
+            return
+
+        step_index = int(raw_index)
+        if step_index < 0:
+            return
+
+        if step_index == 0:
+            sampling_state["saw_zero_index"] = True
+
+        if sampling_state["saw_zero_index"]:
+            completed_step = step_index + 1
+        else:
+            cand_from_zero_based = max(1, step_index + 1)
+            cand_from_one_based = max(1, step_index)
+            prev_completed = sampling_state["last_completed_step"]
+            viable = [c for c in (cand_from_zero_based, cand_from_one_based) if c >= prev_completed]
+            completed_step = min(viable) if viable else max(cand_from_zero_based, cand_from_one_based, prev_completed)
+
+        completed_step = max(1, min(steps, completed_step))
+        sampling_state["last_completed_step"] = completed_step
+
+        fraction = completed_step / float(max(steps, 1))
+        progress = sampling_progress_start + int(round((sampling_progress_end - sampling_progress_start) * fraction))
+        progress = max(sampling_progress_start, min(sampling_progress_end, progress))
+
+        if progress > sampling_state["last_progress"]:
+            sampling_state["last_progress"] = progress
+            _report_generation_progress(progress_callback, progress, "sampling")
+
+    extra_cond = {}
+    if model_family == "sao1.0":
+        try:
+            extra_cond["seconds_start"] = float(data.get("seconds_start", 0))
+        except Exception:
+            extra_cond["seconds_start"] = 0.0
+
+    _report_generation_progress(progress_callback, 35, "configuring_sampler")
+    generate_diffusion_cond_mlx = _get_mlx_generate_fn()
+    result = generate_diffusion_cond_mlx(
+        model_id=mlx_model_spec["model_id"],
+        model_config_path=mlx_model_spec["model_config_path"],
+        model_ckpt_path=mlx_model_spec["model_ckpt_path"],
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        seed=seed,
+        steps=steps,
+        seconds=float(seconds_total),
+        cfg_scale=float(cfg_scale),
+        sampler_type=sampler_type,
+        conditioning_backend=mlx_conditioning_backend,
+        out_dir=None,
+        extra_cond=extra_cond,
+        step_callback=_mlx_sampling_step_callback,
+    )
+
+    generation_time = float(result.get("stats", {}).get("timings_sec", {}).get("total", 0.0))
+    cache_info = result.get("stats", {}).get("cache", {})
+    if cache_info:
+        print(
+            "   MLX cache hits:"
+            f" torch_model={cache_info.get('torch_model_cache_hit')},"
+            f" conditioner={cache_info.get('conditioner_cache_hit')},"
+            f" converted={cache_info.get('converted_model_cache_hit')}"
+        )
+    print(f"   MLX conditioning backend: {mlx_conditioning_backend}")
+
+    _report_generation_progress(progress_callback, 95, "postprocessing")
+    output = np.asarray(result["audio"][0], dtype=np.float32)  # [T, C]
+    peak = float(np.max(np.abs(output))) if output.size else 0.0
+    if peak > 0:
+        output = output / peak
+    output = np.clip(output, -1.0, 1.0)
+
+    requested_samples = seconds_total * sample_rate
+    if output.shape[0] > requested_samples:
+        output = output[:requested_samples, :]
+        print(f"   ✂️  Trimmed from {result['audio'][0].shape[0]/sample_rate:.1f}s to {seconds_total}s")
+
+    _report_generation_progress(progress_callback, 98, "encoding_audio")
+    wav_bytes, audio_b64 = _encode_audio_np(output, sample_rate)
+
+    detected_bpm = extract_bpm(prompt)
+    sampler_used = result.get("stats", {}).get("sampler_type", sampler_type)
+    metadata = {
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "steps": steps,
+        "cfg_scale": cfg_scale,
+        "seed": seed,
+        "sample_rate": sample_rate,
+        "duration_seconds": seconds_total,
+        "generation_time": round(generation_time, 2),
+        "wall_time_sec": round(generation_time, 2),
+        "realtime_factor": round(seconds_total / max(generation_time, 1e-6), 2),
+        "detected_bpm": detected_bpm,
+        "device": "mlx",
+        "backend_engine": "mlx",
+        "sampler_type": sampler_used,
+        "model_type": model_type,
+    }
+
+    print(f"✅ MLX generated in {generation_time:.2f}s ({metadata['realtime_factor']:.1f}x RT)")
+    _report_generation_progress(progress_callback, 100, "completed")
+    return {
+        "audio_base64": audio_b64,
+        "wav_bytes": wav_bytes,
+        "metadata": metadata,
+    }
+
+
+def _run_generate_loop_request_mlx(data, progress_callback=None):
+    if not isinstance(data, dict):
+        raise ValueError("JSON body required")
+
+    _report_generation_progress(progress_callback, 2, "validating")
+
+    model_type = data.get("model_type", "standard")
+    finetune_repo = data.get("finetune_repo")
+    finetune_checkpoint = data.get("finetune_checkpoint")
+    base_repo = data.get("base_repo")
+    model_id = data.get("model_id")
+
+    prompt = data.get("prompt")
+    if not prompt:
+        raise ValueError("prompt is required")
+
+    loop_type = str(data.get("loop_type", "auto")).strip().lower()
+    if loop_type not in ("auto", "drums", "instruments"):
+        raise ValueError("loop_type must be auto, drums, or instruments")
+
+    bars = data.get("bars")
+    steps = data.get("steps", 8)
+    cfg_scale = data.get("cfg_scale", 6.0)
+    seed = data.get("seed", -1)
+
+    try:
+        steps = int(steps)
+    except Exception as exc:
+        raise ValueError("steps must be an integer") from exc
+    if steps < 1 or steps > 250:
+        raise ValueError("steps must be integer between 1-250")
+
+    try:
+        cfg_scale = float(cfg_scale)
+    except Exception as exc:
+        raise ValueError("cfg_scale must be a number") from exc
+    if cfg_scale < 0 or cfg_scale > 20:
+        raise ValueError("cfg_scale must be number between 0-20")
+
+    try:
+        seed = int(seed)
+    except Exception as exc:
+        raise ValueError("seed must be an integer") from exc
+
+    detected_bpm = extract_bpm(prompt)
+    if not detected_bpm:
+        raise ValueError("BPM must be specified in prompt (e.g., '120bpm')")
+
+    _report_generation_progress(progress_callback, 10, "loading_model")
+    mlx_model_spec = _resolve_mlx_model_spec(
+        model_type=model_type,
+        finetune_repo=finetune_repo,
+        finetune_checkpoint=finetune_checkpoint,
+        base_repo=base_repo,
+        model_id=model_id,
+    )
+    config = mlx_model_spec["model_config"]
+    model_family = detect_model_family(config)
+    _record_mlx_model_status(model_type, mlx_model_spec.get("source", {}), config, warmed=True)
+    print("🟢 Backend engine: mlx (loop)")
+    print(f"   Model type: {model_type}")
+    print(f"   Model source: {mlx_model_spec.get('source')}")
+
+    sample_rate = int(config.get("sample_rate", 44100))
+    model_sample_size = int(config.get("sample_size", 524288))
+    max_duration = model_sample_size / sample_rate
+
+    if bars is not None and str(bars).strip() != "" and str(bars).lower() != "auto":
+        try:
+            bars = int(bars)
+        except Exception as exc:
+            raise ValueError("bars must be 1, 2, 4, or 8") from exc
+    else:
+        seconds_per_beat = 60.0 / detected_bpm
+        seconds_per_bar = seconds_per_beat * 4
+        max_loop_duration = max_duration - 1.0
+        possible_bars = [8, 4, 2, 1]
+        bars = 1
+        for bar_count in possible_bars:
+            loop_duration = seconds_per_bar * bar_count
+            if loop_duration <= max_loop_duration:
+                bars = bar_count
+                break
+
+    if bars not in [1, 2, 4, 8]:
+        raise ValueError("bars must be 1, 2, 4, or 8")
+
+    seconds_per_beat = 60.0 / detected_bpm
+    seconds_per_bar = seconds_per_beat * 4
+    calculated_loop_duration = seconds_per_bar * bars
+    if calculated_loop_duration > max_duration:
+        if calculated_loop_duration > (max_duration + 1.0):
+            bars = max(1, bars // 2)
+            calculated_loop_duration = seconds_per_bar * bars
+
+    enhanced_prompt = prompt
+    negative_prompt = ""
+    if loop_type == "drums":
+        if "drum" not in prompt.lower():
+            enhanced_prompt = f"{prompt} drum loop"
+        negative_prompt = "melody, harmony, pitched instruments, vocals, singing"
+    elif loop_type == "instruments":
+        if "drum" in prompt.lower():
+            enhanced_prompt = prompt.replace("drum", "").replace("drums", "").strip()
+        negative_prompt = "drums, percussion, kick, snare, hi-hat"
+
+    seconds_total = max(1.0, min(max_duration, float(calculated_loop_duration)))
+    sampler_type = data.get("sampler_type")
+    if not sampler_type and model_family == "sao1.0":
+        sampler_type = "k-heun"
+
+    mlx_conditioning_backend = str(data.get("mlx_conditioning_backend", "torch")).strip().lower()
+    if mlx_conditioning_backend not in ("torch", "mlx"):
+        raise ValueError("mlx_conditioning_backend must be 'torch' or 'mlx'")
+
+    sampling_progress_start = 22
+    sampling_progress_end = 92
+    sampling_state = {
+        "last_progress": sampling_progress_start - 1,
+        "last_completed_step": 0,
+        "saw_zero_index": False,
+    }
+    if progress_callback is not None:
+        _report_generation_progress(progress_callback, sampling_progress_start, "sampling")
+
+    def _mlx_sampling_step_callback(payload):
+        if progress_callback is None or not isinstance(payload, dict):
+            return
+        raw_index = payload.get("i")
+        if not isinstance(raw_index, (int, float)):
+            return
+        step_index = int(raw_index)
+        if step_index < 0:
+            return
+        if step_index == 0:
+            sampling_state["saw_zero_index"] = True
+        if sampling_state["saw_zero_index"]:
+            completed_step = step_index + 1
+        else:
+            cand_from_zero_based = max(1, step_index + 1)
+            cand_from_one_based = max(1, step_index)
+            prev_completed = sampling_state["last_completed_step"]
+            viable = [c for c in (cand_from_zero_based, cand_from_one_based) if c >= prev_completed]
+            completed_step = min(viable) if viable else max(cand_from_zero_based, cand_from_one_based, prev_completed)
+        completed_step = max(1, min(steps, completed_step))
+        sampling_state["last_completed_step"] = completed_step
+        fraction = completed_step / float(max(steps, 1))
+        progress = sampling_progress_start + int(round((sampling_progress_end - sampling_progress_start) * fraction))
+        progress = max(sampling_progress_start, min(sampling_progress_end, progress))
+        if progress > sampling_state["last_progress"]:
+            sampling_state["last_progress"] = progress
+            _report_generation_progress(progress_callback, progress, "sampling")
+
+    extra_cond = {}
+    if model_family == "sao1.0":
+        try:
+            extra_cond["seconds_start"] = float(data.get("seconds_start", 0))
+        except Exception:
+            extra_cond["seconds_start"] = 0.0
+
+    _report_generation_progress(progress_callback, 35, "configuring_sampler")
+    generate_diffusion_cond_mlx = _get_mlx_generate_fn()
+    result = generate_diffusion_cond_mlx(
+        model_id=mlx_model_spec["model_id"],
+        model_config_path=mlx_model_spec["model_config_path"],
+        model_ckpt_path=mlx_model_spec["model_ckpt_path"],
+        prompt=enhanced_prompt,
+        negative_prompt=negative_prompt,
+        seed=seed,
+        steps=steps,
+        seconds=float(seconds_total),
+        cfg_scale=float(cfg_scale),
+        sampler_type=sampler_type,
+        conditioning_backend=mlx_conditioning_backend,
+        out_dir=None,
+        extra_cond=extra_cond,
+        step_callback=_mlx_sampling_step_callback,
+    )
+
+    generation_time = float(result.get("stats", {}).get("timings_sec", {}).get("total", 0.0))
+    cache_info = result.get("stats", {}).get("cache", {})
+    if cache_info:
+        print(
+            "   MLX cache hits:"
+            f" torch_model={cache_info.get('torch_model_cache_hit')},"
+            f" conditioner={cache_info.get('conditioner_cache_hit')},"
+            f" converted={cache_info.get('converted_model_cache_hit')}"
+        )
+    print(f"   MLX conditioning backend: {mlx_conditioning_backend}")
+
+    _report_generation_progress(progress_callback, 95, "postprocessing")
+    output = np.asarray(result["audio"][0], dtype=np.float32)  # [T, C]
+    peak = float(np.max(np.abs(output))) if output.size else 0.0
+    if peak > 0:
+        output = output / peak
+    output = np.clip(output, -1.0, 1.0)
+
+    loop_samples = int(calculated_loop_duration * sample_rate)
+    available_samples = output.shape[0]
+    available_duration = available_samples / sample_rate
+    loop_duration = calculated_loop_duration
+    if loop_samples > available_samples:
+        loop_samples = available_samples
+        loop_duration = available_duration
+
+    loop_output = output[:loop_samples, :]
+    _report_generation_progress(progress_callback, 98, "encoding_audio")
+    wav_bytes, audio_b64 = _encode_audio_np(loop_output, sample_rate)
+
+    sampler_used = result.get("stats", {}).get("sampler_type", sampler_type)
+    metadata = {
+        "prompt": enhanced_prompt,
+        "original_prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "loop_type": loop_type,
+        "detected_bpm": detected_bpm,
+        "bars": bars,
+        "loop_duration_seconds": round(loop_duration, 2),
+        "calculated_duration_seconds": round(calculated_loop_duration, 2),
+        "available_audio_seconds": round(available_duration, 2),
+        "seconds_per_bar": round(seconds_per_bar, 2),
+        "style_transfer": False,
+        "style_strength": None,
+        "model_type": model_type,
+        "steps": steps,
+        "cfg_scale": cfg_scale,
+        "seed": seed,
+        "sample_rate": sample_rate,
+        "generation_time": round(generation_time, 2),
+        "wall_time_sec": round(generation_time, 2),
+        "device": "mlx",
+        "backend_engine": "mlx",
+        "sampler_type": sampler_used,
+    }
+
+    _report_generation_progress(progress_callback, 100, "completed")
+    return {
+        "audio_base64": audio_b64,
+        "wav_bytes": wav_bytes,
+        "metadata": metadata,
+    }
+
 def _run_generate_request(data, progress_callback=None):
     if not isinstance(data, dict):
         raise ValueError("JSON body required")
 
     _report_generation_progress(progress_callback, 2, "validating")
+    backend_engine, default_backend_engine, requested_backend_engine = _resolve_backend_engine_from_request(data)
+    print(
+        "🎛 Backend selection (/generate):"
+        f" request={requested_backend_engine!r},"
+        f" default={default_backend_engine},"
+        f" effective={backend_engine}"
+    )
+    if backend_engine == "mlx":
+        return _run_generate_request_mlx(data, progress_callback=progress_callback)
+    print("🟠 Backend engine: mps")
 
     model_type = data.get("model_type", "standard")
     finetune_repo = data.get("finetune_repo")
@@ -1103,9 +1937,13 @@ def _run_generate_request(data, progress_callback=None):
         "sample_rate": sample_rate,
         "duration_seconds": seconds_total,
         "generation_time": round(generation_time, 2),
+        "wall_time_sec": round(generation_time, 2),
         "realtime_factor": round(seconds_total / max(generation_time, 1e-6), 2),
         "detected_bpm": detected_bpm,
-        "device": device
+        "device": device,
+        "backend_engine": "mps",
+        "sampler_type": skw.get("sampler_type"),
+        "model_type": model_type,
     }
     if device == "cuda":
         memory_used = torch.cuda.memory_allocated() / 1e9
@@ -1135,6 +1973,16 @@ def _run_generate_loop_request(data, progress_callback=None):
         raise ValueError("JSON body required")
 
     _report_generation_progress(progress_callback, 2, "validating")
+    backend_engine, default_backend_engine, requested_backend_engine = _resolve_backend_engine_from_request(data)
+    print(
+        "🎛 Backend selection (/generate/loop):"
+        f" request={requested_backend_engine!r},"
+        f" default={default_backend_engine},"
+        f" effective={backend_engine}"
+    )
+    if backend_engine == "mlx":
+        return _run_generate_loop_request_mlx(data, progress_callback=progress_callback)
+    print("🟠 Backend engine: mps (loop)")
 
     model_type = data.get("model_type", "standard")
     finetune_repo = data.get("finetune_repo")
@@ -1405,7 +2253,10 @@ def _run_generate_loop_request(data, progress_callback=None):
         "seed": seed,
         "sample_rate": sample_rate,
         "generation_time": round(generation_time, 2),
-        "device": device
+        "wall_time_sec": round(generation_time, 2),
+        "device": device,
+        "backend_engine": "mps",
+        "sampler_type": skw.get("sampler_type"),
     }
 
     print(f"✅ Loop generated: {loop_duration:.2f}s ({bars} bars at {detected_bpm}bpm)")
@@ -3476,8 +4327,17 @@ if __name__ == '__main__':
     # Pre-load model on startup
     print("🚀 Starting Enhanced Stable Audio API...")
     try:
-        load_model()
-        print("✅ Model pre-loaded successfully")
+        startup_backend = _default_backend_engine()
+        print(f"🎛 Startup backend default: {startup_backend}")
+        if startup_backend == "mlx":
+            standard_spec = _resolve_mlx_model_spec("standard", None, None)
+            _record_mlx_model_status("standard", standard_spec.get("source", {}), standard_spec["model_config"], warmed=False)
+            _prewarm_mlx_model_spec(standard_spec, "standard")
+            _record_mlx_model_status("standard", standard_spec.get("source", {}), standard_spec["model_config"], warmed=True)
+            print("✅ MLX warmup pre-load completed")
+        else:
+            load_model()
+            print("✅ Model pre-loaded successfully")
     except Exception as e:
         print(f"❌ Failed to pre-load model: {e}")
         print("Will attempt to load on first request...")

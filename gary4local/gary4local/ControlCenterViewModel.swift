@@ -3,22 +3,163 @@ import SwiftUI
 import Combine
 import AppKit
 
+enum StableAudioBackendEngine: String, CaseIterable, Identifiable {
+    case mps
+    case mlx
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .mps:
+            return "MPS"
+        case .mlx:
+            return "MLX"
+        }
+    }
+
+    static func from(rawValue: String) -> StableAudioBackendEngine {
+        StableAudioBackendEngine(rawValue: rawValue.lowercased()) ?? .mps
+    }
+}
+
+struct DownloadableModel: Identifiable {
+    let id: String
+    let size: String
+    let displayName: String
+    let path: String
+    var downloaded: Bool
+    var isDownloading: Bool
+    var progress: Double
+    var statusMessage: String
+}
+
+struct DownloadModelSection: Identifiable {
+    let id: String
+    let title: String
+    let models: [DownloadableModel]
+}
+
 @MainActor
 final class ControlCenterViewModel: ObservableObject {
+    private static let stableAudioBackendDefaultsKey = "stableAudioBackendEngine"
+
     @Published var manager: ServiceManager?
     @Published var startupError: String?
     @Published var manifestPath: String = ""
     @Published var selectedServiceID: String?
     @Published var selectedLogText: String = ""
+    @Published var isLogViewerPinnedToBottom: Bool = true
     @Published var stableAudioTokenInput: String = ""
     @Published var stableAudioTokenConfigured: Bool = false
     @Published var stableAudioTokenStatus: String = ""
     @Published var stableAudioStep2ScreenshotPath: String?
+    @Published var isModelDownloadSheetPresented: Bool = false
+    @Published var downloadableModels: [DownloadableModel] = []
+    @Published var modelDownloadStatusMessage: String = ""
+    @Published var isModelCatalogLoading: Bool = false
+    @Published var isModelDownloadInProgress: Bool = false
+    @Published var stableAudioBackendEngine: StableAudioBackendEngine = .mps
 
     private var logRefreshTask: Task<Void, Never>?
+    private var modelDownloadPollTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
+    private var isLogRefreshInFlight = false
+    private var pendingForcedLogRefresh = false
+    private var lastLogMetadataByService: [String: LogMetadata] = [:]
+    private let logRefreshIntervalNanoseconds: UInt64 = 300_000_000
+    private let modelDownloadPollIntervalNanoseconds: UInt64 = 1_250_000_000
+    private var activeModelDownloadPath: String?
+    private var activeModelDownloadSessionID: String?
+
+    private struct LogMetadata: Equatable {
+        let fileSize: UInt64
+        let modificationDate: Date?
+    }
+
+    private struct RemoteModelsResponse: Decodable {
+        let success: Bool
+        let models: [String: [RemoteModelEntry]]
+    }
+
+    private struct RemoteModelEntry: Decodable {
+        let name: String
+        let path: String?
+        let type: String
+        let checkpoints: [RemoteModelCheckpoint]?
+    }
+
+    private struct RemoteModelCheckpoint: Decodable {
+        let name: String
+        let path: String
+        let epoch: Int?
+    }
+
+    private struct RemoteDownloadStatusResponse: Decodable {
+        let success: Bool
+        let models: [String: RemoteDownloadStatus]
+    }
+
+    private struct RemoteDownloadStatus: Decodable {
+        let downloaded: Bool
+        let missing: [String]?
+    }
+
+    private struct RemotePredownloadStartResponse: Decodable {
+        let success: Bool
+        let sessionID: String
+        let modelName: String
+        let message: String?
+
+        enum CodingKeys: String, CodingKey {
+            case success
+            case sessionID = "session_id"
+            case modelName = "model_name"
+            case message
+        }
+    }
+
+    private struct RemotePredownloadStatusResponse: Decodable {
+        let success: Bool
+        let sessionID: String
+        let modelName: String?
+        let status: String
+        let progress: Int
+        let queueStatus: RemoteQueueStatus?
+        let error: String?
+
+        enum CodingKeys: String, CodingKey {
+            case success
+            case sessionID = "session_id"
+            case modelName = "model_name"
+            case status
+            case progress
+            case queueStatus = "queue_status"
+            case error
+        }
+    }
+
+    private struct RemoteQueueStatus: Decodable {
+        let message: String?
+        let repoID: String?
+        let stageName: String?
+        let stageIndex: Int?
+        let stageTotal: Int?
+        let downloadPercent: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case message
+            case repoID = "repo_id"
+            case stageName = "stage_name"
+            case stageIndex = "stage_index"
+            case stageTotal = "stage_total"
+            case downloadPercent = "download_percent"
+        }
+    }
 
     init() {
+        let savedBackend = UserDefaults.standard.string(forKey: Self.stableAudioBackendDefaultsKey) ?? StableAudioBackendEngine.mps.rawValue
+        stableAudioBackendEngine = StableAudioBackendEngine.from(rawValue: savedBackend)
         observeApplicationTermination()
         refreshStableAudioTokenState()
         loadManifest()
@@ -26,9 +167,38 @@ final class ControlCenterViewModel: ObservableObject {
 
     deinit {
         logRefreshTask?.cancel()
+        modelDownloadPollTask?.cancel()
+    }
+
+    var modelDownloadSections: [DownloadModelSection] {
+        let grouped = Dictionary(grouping: downloadableModels, by: \.size)
+        let order = ["small", "medium", "large"]
+        return order.compactMap { size in
+            guard let models = grouped[size], !models.isEmpty else { return nil }
+            return DownloadModelSection(
+                id: size,
+                title: size.capitalized,
+                models: models.sorted { lhs, rhs in
+                    lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+                }
+            )
+        }
+    }
+
+    var canManageModelDownloads: Bool {
+        guard let runtime = manager?.services.first(where: { $0.id == "audiocraft_mlx" }) else {
+            return false
+        }
+        return runtime.processState == .running
     }
 
     func loadManifest() {
+        modelDownloadPollTask?.cancel()
+        modelDownloadPollTask = nil
+        isModelDownloadInProgress = false
+        activeModelDownloadPath = nil
+        activeModelDownloadSessionID = nil
+
         let defaultURL = ManifestLoader.defaultManifestURL()
         manifestPath = defaultURL.path
         reloadHFScreenshots()
@@ -37,29 +207,209 @@ final class ControlCenterViewModel: ObservableObject {
         do {
             let manifest = try ManifestLoader.load(from: defaultURL)
             let manager = ServiceManager(manifest: manifest)
+            manager.setStableAudioBackendEngine(stableAudioBackendEngine.rawValue, restartIfRunning: false)
             self.manager = manager
             startupError = nil
             selectedServiceID = manager.services.first?.id
-            selectedLogText = selectedServiceID.map { manager.readLogTail(serviceID: $0) } ?? ""
+            selectedLogText = ""
+            isLogViewerPinnedToBottom = true
+            lastLogMetadataByService.removeAll()
             manager.startAutoStartServices()
             startLogRefreshLoop()
+            requestLogRefresh(force: true)
         } catch {
             self.manager = nil
             startupError = error.localizedDescription
+            selectedLogText = ""
+            lastLogMetadataByService.removeAll()
+            logRefreshTask?.cancel()
+            logRefreshTask = nil
+            downloadableModels = []
+            modelDownloadStatusMessage = ""
+            isModelCatalogLoading = false
         }
     }
 
     func selectService(_ serviceID: String) {
+        guard selectedServiceID != serviceID else { return }
         selectedServiceID = serviceID
-        refreshLog()
+        selectedLogText = ""
+        isLogViewerPinnedToBottom = true
+        requestLogRefresh(force: true)
     }
 
     func refreshLog() {
-        guard let manager, let selectedServiceID else {
+        guard manager != nil, selectedServiceID != nil else {
             selectedLogText = ""
             return
         }
-        selectedLogText = manager.readLogTail(serviceID: selectedServiceID)
+        requestLogRefresh(force: true)
+    }
+
+    func setStableAudioBackendEngine(_ backend: StableAudioBackendEngine) {
+        guard stableAudioBackendEngine != backend else { return }
+        stableAudioBackendEngine = backend
+        UserDefaults.standard.set(backend.rawValue, forKey: Self.stableAudioBackendDefaultsKey)
+        manager?.setStableAudioBackendEngine(backend.rawValue, restartIfRunning: true)
+        if manager?.services.first(where: { $0.id == "stable_audio" })?.isRunning == true {
+            stableAudioTokenStatus = "Stable Audio backend set to \(backend.displayName). Service restarting..."
+        } else {
+            stableAudioTokenStatus = "Stable Audio backend set to \(backend.displayName)."
+        }
+    }
+
+    func updateLogViewerPinnedToBottom(_ pinnedToBottom: Bool) {
+        guard isLogViewerPinnedToBottom != pinnedToBottom else { return }
+        isLogViewerPinnedToBottom = pinnedToBottom
+        if pinnedToBottom {
+            requestLogRefresh(force: true)
+        }
+    }
+
+    func openModelDownloadSheet() {
+        isModelDownloadSheetPresented = true
+        refreshModelCatalogAndStatuses()
+    }
+
+    func refreshModelCatalogAndStatuses() {
+        if isModelDownloadInProgress {
+            modelDownloadStatusMessage = "A model download is already in progress."
+            return
+        }
+
+        modelDownloadPollTask?.cancel()
+        modelDownloadPollTask = nil
+        activeModelDownloadSessionID = nil
+        activeModelDownloadPath = nil
+        isModelDownloadInProgress = false
+
+        guard let baseURL = audiocraftAPIBaseURL() else {
+            downloadableModels = []
+            modelDownloadStatusMessage = "Start Audiocraft MLX to manage model downloads."
+            isModelCatalogLoading = false
+            return
+        }
+
+        isModelCatalogLoading = true
+        modelDownloadStatusMessage = "Loading model catalog..."
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let decoder = JSONDecoder()
+
+                let catalogURL = baseURL.appendingPathComponent("api/models")
+                let (catalogData, catalogResponse) = try await URLSession.shared.data(from: catalogURL)
+                try self.ensureHTTP200(response: catalogResponse, body: catalogData)
+                let remoteCatalog = try decoder.decode(RemoteModelsResponse.self, from: catalogData)
+                guard remoteCatalog.success else {
+                    throw NSError(
+                        domain: "ControlCenterViewModel",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "Failed to load model catalog."]
+                    )
+                }
+
+                let statusURL = baseURL.appendingPathComponent("api/models/download_status")
+                let (statusData, statusResponse) = try await URLSession.shared.data(from: statusURL)
+                try self.ensureHTTP200(response: statusResponse, body: statusData)
+                let remoteStatuses = try decoder.decode(RemoteDownloadStatusResponse.self, from: statusData)
+                guard remoteStatuses.success else {
+                    throw NSError(
+                        domain: "ControlCenterViewModel",
+                        code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Failed to load download statuses."]
+                    )
+                }
+
+                var models = self.flattenRemoteModels(remoteCatalog.models)
+                for index in models.indices {
+                    if let status = remoteStatuses.models[models[index].path] {
+                        models[index].downloaded = status.downloaded
+                        if status.downloaded {
+                            models[index].statusMessage = "Downloaded"
+                        } else if let missing = status.missing, !missing.isEmpty {
+                            models[index].statusMessage = "Missing \(missing.count) dependency\(missing.count == 1 ? "" : "ies")"
+                        } else {
+                            models[index].statusMessage = "Not downloaded"
+                        }
+                    } else {
+                        models[index].statusMessage = "Unknown"
+                    }
+                }
+
+                self.downloadableModels = models
+                self.modelDownloadStatusMessage = "Pick a model to pre-download for offline usage."
+            } catch {
+                self.downloadableModels = []
+                self.modelDownloadStatusMessage = error.localizedDescription
+            }
+            self.isModelCatalogLoading = false
+        }
+    }
+
+    func startModelDownload(_ modelPath: String) {
+        guard let baseURL = audiocraftAPIBaseURL() else {
+            modelDownloadStatusMessage = "Start Audiocraft MLX to download models."
+            return
+        }
+        guard !isModelDownloadInProgress else {
+            modelDownloadStatusMessage = "A model download is already running."
+            return
+        }
+
+        setModelDownloadState(
+            for: modelPath,
+            isDownloading: true,
+            downloaded: false,
+            progress: 0,
+            statusMessage: "Starting download..."
+        )
+        isModelDownloadInProgress = true
+        activeModelDownloadPath = modelPath
+        modelDownloadStatusMessage = "Starting \(modelPath)..."
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                var request = URLRequest(url: baseURL.appendingPathComponent("api/models/predownload"))
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONSerialization.data(withJSONObject: ["model_name": modelPath])
+
+                let (data, response) = try await URLSession.shared.data(for: request)
+                try self.ensureHTTP200(response: response, body: data)
+                let decoder = JSONDecoder()
+                let startResponse = try decoder.decode(RemotePredownloadStartResponse.self, from: data)
+                guard startResponse.success else {
+                    throw NSError(
+                        domain: "ControlCenterViewModel",
+                        code: 3,
+                        userInfo: [NSLocalizedDescriptionKey: "Unable to start model download."]
+                    )
+                }
+
+                self.activeModelDownloadSessionID = startResponse.sessionID
+                self.modelDownloadStatusMessage = startResponse.message ?? "Downloading \(modelPath)..."
+                self.startModelDownloadPolling(
+                    sessionID: startResponse.sessionID,
+                    modelPath: modelPath,
+                    baseURL: baseURL
+                )
+            } catch {
+                self.isModelDownloadInProgress = false
+                self.activeModelDownloadPath = nil
+                self.activeModelDownloadSessionID = nil
+                self.setModelDownloadState(
+                    for: modelPath,
+                    isDownloading: false,
+                    downloaded: false,
+                    progress: 0,
+                    statusMessage: "Download failed"
+                )
+                self.modelDownloadStatusMessage = error.localizedDescription
+            }
+        }
     }
 
     func saveStableAudioToken() {
@@ -166,13 +516,295 @@ final class ControlCenterViewModel: ObservableObject {
 
     private func startLogRefreshLoop() {
         logRefreshTask?.cancel()
+        let interval = logRefreshIntervalNanoseconds
         logRefreshTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                try? await Task.sleep(nanoseconds: interval)
                 await MainActor.run {
-                    self?.refreshLog()
+                    self?.requestLogRefresh(force: false)
                 }
             }
+        }
+    }
+
+    private func requestLogRefresh(force: Bool) {
+        guard force || isLogViewerPinnedToBottom else {
+            return
+        }
+
+        guard !isLogRefreshInFlight else {
+            pendingForcedLogRefresh = pendingForcedLogRefresh || force
+            return
+        }
+
+        guard let manager, let selectedServiceID,
+              let runtime = manager.services.first(where: { $0.id == selectedServiceID }) else {
+            selectedLogText = ""
+            return
+        }
+
+        let logFile = runtime.service.logFile
+        let previousMetadata = force ? nil : lastLogMetadataByService[selectedServiceID]
+
+        isLogRefreshInFlight = true
+        Task { [weak self] in
+            let snapshot = await Task.detached(priority: .utility) {
+                ServiceManager.readLogTailSnapshot(
+                    at: logFile,
+                    maxLines: 220,
+                    maxBytes: 192_000
+                )
+            }.value
+
+            await MainActor.run {
+                guard let self else { return }
+                defer {
+                    self.isLogRefreshInFlight = false
+                    let shouldForceRefresh = self.pendingForcedLogRefresh
+                    self.pendingForcedLogRefresh = false
+                    if shouldForceRefresh {
+                        self.requestLogRefresh(force: true)
+                    }
+                }
+
+                guard self.selectedServiceID == selectedServiceID else {
+                    return
+                }
+
+                let metadata = LogMetadata(
+                    fileSize: snapshot.fileSize,
+                    modificationDate: snapshot.modificationDate
+                )
+
+                if !force, let previousMetadata, previousMetadata == metadata {
+                    return
+                }
+
+                self.lastLogMetadataByService[selectedServiceID] = metadata
+                if self.selectedLogText != snapshot.text {
+                    self.selectedLogText = snapshot.text
+                }
+            }
+        }
+    }
+
+    private func startModelDownloadPolling(
+        sessionID: String,
+        modelPath: String,
+        baseURL: URL
+    ) {
+        modelDownloadPollTask?.cancel()
+        let statusURL = baseURL
+            .appendingPathComponent("api/models/predownload_status")
+            .appendingPathComponent(sessionID)
+        modelDownloadPollTask = Task { [weak self] in
+            guard let self else { return }
+            let decoder = JSONDecoder()
+
+            while !Task.isCancelled {
+                do {
+                    let (data, response) = try await URLSession.shared.data(from: statusURL)
+                    try self.ensureHTTP200(response: response, body: data)
+                    let pollResponse = try decoder.decode(RemotePredownloadStatusResponse.self, from: data)
+                    if !pollResponse.success {
+                        throw NSError(
+                            domain: "ControlCenterViewModel",
+                            code: 4,
+                            userInfo: [NSLocalizedDescriptionKey: "Model download polling failed."]
+                        )
+                    }
+
+                    let normalizedProgress = self.derivedPredownloadProgress(from: pollResponse)
+                    let progress = Double(normalizedProgress) / 100.0
+
+                    let queueMessage = pollResponse.queueStatus?.message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let fallbackMessage: String
+                    switch pollResponse.status {
+                    case "completed":
+                        fallbackMessage = "Downloaded"
+                    case "failed":
+                        fallbackMessage = pollResponse.error ?? "Download failed"
+                    case "warming", "processing":
+                        fallbackMessage = "Downloading..."
+                    default:
+                        fallbackMessage = pollResponse.status.capitalized
+                    }
+                    let statusMessage = queueMessage.isEmpty ? fallbackMessage : queueMessage
+
+                    self.setModelDownloadState(
+                        for: modelPath,
+                        isDownloading: pollResponse.status == "warming" || pollResponse.status == "processing",
+                        downloaded: pollResponse.status == "completed",
+                        progress: progress,
+                        statusMessage: statusMessage
+                    )
+                    self.modelDownloadStatusMessage = statusMessage
+
+                    if pollResponse.status == "completed" {
+                        self.isModelDownloadInProgress = false
+                        self.activeModelDownloadPath = nil
+                        self.activeModelDownloadSessionID = nil
+                        self.modelDownloadPollTask = nil
+                        self.refreshModelCatalogAndStatuses()
+                        return
+                    }
+
+                    if pollResponse.status == "failed" {
+                        self.isModelDownloadInProgress = false
+                        self.activeModelDownloadPath = nil
+                        self.activeModelDownloadSessionID = nil
+                        self.modelDownloadPollTask = nil
+                        return
+                    }
+                } catch {
+                    self.isModelDownloadInProgress = false
+                    self.activeModelDownloadPath = nil
+                    self.activeModelDownloadSessionID = nil
+                    self.setModelDownloadState(
+                        for: modelPath,
+                        isDownloading: false,
+                        downloaded: false,
+                        progress: 0,
+                        statusMessage: "Download polling failed"
+                    )
+                    self.modelDownloadStatusMessage = error.localizedDescription
+                    self.modelDownloadPollTask = nil
+                    return
+                }
+
+                try? await Task.sleep(nanoseconds: self.modelDownloadPollIntervalNanoseconds)
+            }
+        }
+    }
+
+    private func derivedPredownloadProgress(from response: RemotePredownloadStatusResponse) -> Int {
+        if response.status == "completed" {
+            return 100
+        }
+
+        var normalized = max(0, min(100, response.progress))
+        guard
+            let queue = response.queueStatus,
+            let stageIndex = queue.stageIndex,
+            let stageTotal = queue.stageTotal,
+            stageIndex > 0,
+            stageTotal > 0
+        else {
+            return normalized
+        }
+
+        let stagePercent = max(0, min(100, queue.downloadPercent ?? 0))
+        let derivedRaw = (
+            (Double(stageIndex - 1) + (Double(stagePercent) / 100.0))
+            / Double(stageTotal)
+        ) * 100.0
+        var derived = Int(derivedRaw.rounded(.up))
+        derived = max(0, min(99, derived))
+        if stagePercent > 0 {
+            derived = max(1, derived)
+        }
+        normalized = max(normalized, derived)
+        return normalized
+    }
+
+    private func flattenRemoteModels(_ source: [String: [RemoteModelEntry]]) -> [DownloadableModel] {
+        let sizeOrder = ["small", "medium", "large"]
+        var flattened: [DownloadableModel] = []
+
+        for size in sizeOrder {
+            guard let entries = source[size] else { continue }
+            for entry in entries {
+                if entry.type == "single", let path = entry.path {
+                    flattened.append(
+                        DownloadableModel(
+                            id: path,
+                            size: size,
+                            displayName: entry.name,
+                            path: path,
+                            downloaded: false,
+                            isDownloading: false,
+                            progress: 0,
+                            statusMessage: "Not downloaded"
+                        )
+                    )
+                    continue
+                }
+
+                guard entry.type == "group", let checkpoints = entry.checkpoints else {
+                    continue
+                }
+                for checkpoint in checkpoints {
+                    flattened.append(
+                        DownloadableModel(
+                            id: checkpoint.path,
+                            size: size,
+                            displayName: checkpoint.name,
+                            path: checkpoint.path,
+                            downloaded: false,
+                            isDownloading: false,
+                            progress: 0,
+                            statusMessage: "Not downloaded"
+                        )
+                    )
+                }
+            }
+        }
+
+        return flattened
+    }
+
+    private func setModelDownloadState(
+        for modelPath: String,
+        isDownloading: Bool,
+        downloaded: Bool,
+        progress: Double,
+        statusMessage: String
+    ) {
+        guard let index = downloadableModels.firstIndex(where: { $0.path == modelPath }) else { return }
+        downloadableModels[index].isDownloading = isDownloading
+        downloadableModels[index].downloaded = downloaded
+        downloadableModels[index].progress = max(0, min(1, progress))
+        downloadableModels[index].statusMessage = statusMessage
+    }
+
+    private func audiocraftAPIBaseURL() -> URL? {
+        guard let runtime = manager?.services.first(where: { $0.id == "audiocraft_mlx" }) else {
+            return nil
+        }
+        guard runtime.processState == .running else {
+            return nil
+        }
+        guard var components = URLComponents(
+            url: runtime.service.healthCheck.url,
+            resolvingAgainstBaseURL: false
+        ) else {
+            return nil
+        }
+        components.path = ""
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+
+    private func ensureHTTP200(response: URLResponse, body: Data) throws {
+        guard let http = response as? HTTPURLResponse else {
+            throw NSError(
+                domain: "ControlCenterViewModel",
+                code: 5,
+                userInfo: [NSLocalizedDescriptionKey: "Unexpected response from backend."]
+            )
+        }
+        guard (200...299).contains(http.statusCode) else {
+            if let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+               let message = json["error"] as? String,
+               !message.isEmpty {
+                throw NSError(domain: "ControlCenterViewModel", code: http.statusCode, userInfo: [
+                    NSLocalizedDescriptionKey: message
+                ])
+            }
+            throw NSError(domain: "ControlCenterViewModel", code: http.statusCode, userInfo: [
+                NSLocalizedDescriptionKey: "Backend returned HTTP \(http.statusCode)."
+            ])
         }
     }
 
@@ -191,6 +823,7 @@ final class ControlCenterViewModel: ObservableObject {
         NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)
             .sink { [weak self] _ in
                 self?.logRefreshTask?.cancel()
+                self?.modelDownloadPollTask?.cancel()
                 self?.manager?.shutdownForApplicationTermination()
             }
             .store(in: &cancellables)

@@ -34,12 +34,19 @@ private enum ServiceStartError: LocalizedError {
     }
 }
 
+struct LogTailSnapshot {
+    let text: String
+    let fileSize: UInt64
+    let modificationDate: Date?
+}
+
 @MainActor
 final class ServiceManager: ObservableObject {
     @Published private(set) var services: [ServiceRuntime]
     @Published private(set) var isRebuildingAllEnvironments = false
 
     private let manifest: ResolvedManifest
+    private var stableAudioBackendEngine = "mps"
     private var processes: [String: Process] = [:]
     private var outputPipes: [String: Pipe] = [:]
     private var logHandles: [String: FileHandle] = [:]
@@ -51,6 +58,28 @@ final class ServiceManager: ObservableObject {
     init(manifest: ResolvedManifest) {
         self.manifest = manifest
         self.services = manifest.services.map { ServiceRuntime(service: $0) }
+    }
+
+    func setStableAudioBackendEngine(_ backend: String, restartIfRunning: Bool) {
+        let normalized = Self.normalizeStableAudioBackendEngine(backend)
+        guard stableAudioBackendEngine != normalized else { return }
+        stableAudioBackendEngine = normalized
+
+        guard restartIfRunning else { return }
+        guard let runtime = services.first(where: { $0.id == "stable_audio" }) else { return }
+        if runtime.processState == .running || runtime.processState == .starting {
+            restart(serviceID: "stable_audio")
+        }
+    }
+
+    nonisolated private static func normalizeStableAudioBackendEngine(_ value: String) -> String {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch normalized {
+        case "mlx":
+            return "mlx"
+        default:
+            return "mps"
+        }
     }
 
     deinit {
@@ -351,35 +380,47 @@ final class ServiceManager: ObservableObject {
         guard let service = services.first(where: { $0.id == serviceID })?.service else {
             return ""
         }
+        return Self.readLogTailSnapshot(
+            at: service.logFile,
+            maxLines: maxLines,
+            maxBytes: maxBytes
+        ).text
+    }
+
+    nonisolated static func readLogTailSnapshot(
+        at logFile: URL,
+        maxLines: Int = 220,
+        maxBytes: Int = 256_000
+    ) -> LogTailSnapshot {
         guard maxLines > 0, maxBytes > 0 else {
-            return ""
+            return LogTailSnapshot(text: "", fileSize: 0, modificationDate: nil)
         }
 
         let fileManager = FileManager.default
-        guard let attributes = try? fileManager.attributesOfItem(atPath: service.logFile.path),
+        guard let attributes = try? fileManager.attributesOfItem(atPath: logFile.path),
               let fileSizeNumber = attributes[.size] as? NSNumber else {
-            return ""
+            return LogTailSnapshot(text: "", fileSize: 0, modificationDate: nil)
         }
 
-        let fileSize = fileSizeNumber.intValue
+        let fileSize = fileSizeNumber.uint64Value
+        let modificationDate = attributes[.modificationDate] as? Date
         if fileSize == 0 {
-            return ""
+            return LogTailSnapshot(text: "", fileSize: 0, modificationDate: modificationDate)
         }
 
-        let readSize = min(maxBytes, fileSize)
-
-        guard let handle = try? FileHandle(forReadingFrom: service.logFile) else {
-            return ""
+        let readSize = min(UInt64(maxBytes), fileSize)
+        guard let handle = try? FileHandle(forReadingFrom: logFile) else {
+            return LogTailSnapshot(text: "", fileSize: fileSize, modificationDate: modificationDate)
         }
         defer { try? handle.close() }
 
         if fileSize > readSize {
-            try? handle.seek(toOffset: UInt64(fileSize - readSize))
+            try? handle.seek(toOffset: fileSize - readSize)
         }
 
-        guard let data = try? handle.read(upToCount: readSize),
+        guard let data = try? handle.read(upToCount: Int(readSize)),
               !data.isEmpty else {
-            return ""
+            return LogTailSnapshot(text: "", fileSize: fileSize, modificationDate: modificationDate)
         }
 
         var text = String(decoding: data, as: UTF8.self)
@@ -388,8 +429,8 @@ final class ServiceManager: ObservableObject {
         }
 
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-        let tail = lines.suffix(maxLines)
-        return tail.joined(separator: "\n")
+        let tail = lines.suffix(maxLines).joined(separator: "\n")
+        return LogTailSnapshot(text: tail, fileSize: fileSize, modificationDate: modificationDate)
     }
 
     nonisolated private static func runBootstrap(
@@ -768,6 +809,9 @@ final class ServiceManager: ObservableObject {
            let token = StableAudioAuthKeychain.readToken(),
            !token.isEmpty {
             env["HF_TOKEN"] = token
+        }
+        if service.id == "stable_audio" {
+            env["STABLE_AUDIO_BACKEND_ENGINE"] = stableAudioBackendEngine
         }
         return env
     }

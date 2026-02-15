@@ -26,6 +26,7 @@ It pairs with [gary4juce](https://github.com/betweentwomidnights/gary4juce) and 
 - Log viewer uses a bounded tail window to keep UI/resource usage stable.
 - Stable Audio setup supports Hugging Face token save/read/delete in macOS Keychain.
 - Stable Audio start is gated on token presence, with setup links and Step 2 hover screenshot reference.
+- Stable Audio now includes optional MLX backend support (toggleable with MPS in `gary4local`), implemented from [stable-audio-mlx](https://github.com/betweentwomidnights/stable-audio-mlx).
 - Audiocraft MLX + MelodyFlow rebuild/run have been validated from this repo with the JUCE plugin flow.
 - App icon asset set now uses the repository-provided Gary icon.
 
