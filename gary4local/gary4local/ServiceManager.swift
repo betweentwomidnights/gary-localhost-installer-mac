@@ -14,7 +14,7 @@ private enum BootstrapError: LocalizedError {
         switch self {
         case .pythonNotFound(let executable, let searchedPaths):
             let paths = searchedPaths.joined(separator: ", ")
-            return "Python executable '\(executable)' was not found. Searched: \(paths)"
+            return "python executable '\(executable)' was not found. searched: \(paths)"
         }
     }
 }
@@ -27,9 +27,9 @@ private enum ServiceStartError: LocalizedError {
         switch self {
         case .portStillInUse(let port, let pids):
             let pidList = pids.map(String.init).joined(separator: ", ")
-            return "Port \(port) is still in use by PID(s): \(pidList)"
+            return "port \(port) is still in use by pid(s): \(pidList)"
         case .missingStableAudioToken:
-            return "Stable Audio requires Hugging Face access token. Open Stable Audio setup and save your token."
+            return "stable audio requires hugging face access token. open stable audio setup and save your token."
         }
     }
 }
@@ -179,7 +179,7 @@ final class ServiceManager: ObservableObject {
         for (serviceID, process) in processes where process.isRunning {
             _ = kill(process.processIdentifier, SIGKILL)
             if let index = indexForService(serviceID) {
-                services[index].lastError = "Forced stop during app shutdown."
+                services[index].lastError = "forced stop during app shutdown."
             }
         }
 
@@ -219,7 +219,7 @@ final class ServiceManager: ObservableObject {
         guard let index = indexForService(serviceID) else { return }
         guard processes[serviceID]?.isRunning != true else { return }
         guard bootstrapTasks[serviceID] == nil else {
-            services[index].lastError = "Environment rebuild in progress."
+            services[index].lastError = "environment rebuild in progress."
             return
         }
 
@@ -343,20 +343,20 @@ final class ServiceManager: ObservableObject {
 
         guard processes[serviceID]?.isRunning != true else {
             services[index].bootstrapState = .failed
-            services[index].bootstrapMessage = "Stop the service before rebuilding its environment."
+            services[index].bootstrapMessage = "stop the service before rebuilding its environment."
             return
         }
 
         guard let bootstrap = services[index].service.bootstrap else {
             services[index].bootstrapState = .notConfigured
-            services[index].bootstrapMessage = "No bootstrap configuration found in manifest."
+            services[index].bootstrapMessage = "no bootstrap configuration found in manifest."
             return
         }
 
         services[index].bootstrapState = .running
         services[index].bootstrapMessage = forceRecreateVenv
-            ? "Running clean environment repair..."
-            : "Rebuilding environment..."
+            ? "running clean environment repair..."
+            : "rebuilding environment..."
         services[index].lastError = nil
 
         let service = services[index].service
@@ -559,14 +559,14 @@ final class ServiceManager: ObservableObject {
                 logHandle: logHandle
             )
             if versionCheckStatus != 0 {
-                let message = "Python 3.11+ is required. Update bootstrap.python_executable for this service."
+                let message = "python 3.11+ is required. update bootstrap.python_executable for this service."
                 writeLogLine(message, to: logHandle)
                 writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
                 return BootstrapRunResult(success: false, message: message)
             }
 
             if !FileManager.default.fileExists(atPath: bootstrap.requirementsFile.path) {
-                let message = "Requirements file not found: \(bootstrap.requirementsFile.path)"
+                let message = "requirements file not found: \(bootstrap.requirementsFile.path)"
                 writeLogLine(message, to: logHandle)
                 writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
                 return BootstrapRunResult(success: false, message: message)
@@ -582,7 +582,7 @@ final class ServiceManager: ObservableObject {
                 do {
                     try fileManager.removeItem(at: bootstrap.venvDirectory)
                 } catch {
-                    let message = "Failed to remove existing venv: \(error.localizedDescription)"
+                    let message = "failed to remove existing venv: \(error.localizedDescription)"
                     writeLogLine(message, to: logHandle)
                     writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
                     return BootstrapRunResult(success: false, message: message)
@@ -624,7 +624,7 @@ final class ServiceManager: ObservableObject {
                     logHandle: logHandle
                 )
                 if createStatus != 0 {
-                    let message = "Failed to create venv (exit \(createStatus))."
+                    let message = "failed to create venv (exit \(createStatus))."
                     writeLogLine(message, to: logHandle)
                     writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
                     return BootstrapRunResult(success: false, message: message)
@@ -647,7 +647,7 @@ final class ServiceManager: ObservableObject {
                     logHandle: logHandle
                 )
                 if upgradeStatus != 0 {
-                    let message = "Failed to upgrade pip/setuptools/wheel (exit \(upgradeStatus))."
+                    let message = "failed to upgrade pip/setuptools/wheel (exit \(upgradeStatus))."
                     writeLogLine(message, to: logHandle)
                     writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
                     return BootstrapRunResult(success: false, message: message)
@@ -667,7 +667,7 @@ final class ServiceManager: ObservableObject {
                 logHandle: logHandle
             )
             if installStatus != 0 {
-                let message = "Dependency install failed (exit \(installStatus))."
+                let message = "dependency install failed (exit \(installStatus))."
                 writeLogLine(message, to: logHandle)
                 writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
                 return BootstrapRunResult(success: false, message: message)
@@ -676,7 +676,7 @@ final class ServiceManager: ObservableObject {
             writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild succeeded ----", to: logHandle)
             return BootstrapRunResult(
                 success: true,
-                message: "Environment rebuilt successfully at \(timestamp())."
+                message: "environment rebuilt successfully at \(timestamp())."
             )
         } catch {
             return BootstrapRunResult(success: false, message: error.localizedDescription)
@@ -941,7 +941,7 @@ final class ServiceManager: ObservableObject {
             services[index].lastError = nil
         } else {
             services[index].processState = .failed
-            services[index].lastError = "Exited with status \(status)"
+            services[index].lastError = "exited with status \(status)"
             if services[index].service.restartOnCrash {
                 restart(serviceID: serviceID)
             }

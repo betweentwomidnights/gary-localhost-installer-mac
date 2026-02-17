@@ -27,7 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         let menu = NSMenu()
         let openItem = NSMenuItem(
-            title: "Open Control Center",
+            title: "open control center",
             action: #selector(openMainWindowFromMenu(_:)),
             keyEquivalent: ""
         )

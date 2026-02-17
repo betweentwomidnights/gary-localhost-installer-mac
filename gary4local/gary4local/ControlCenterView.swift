@@ -30,7 +30,7 @@ struct ControlCenterView: View {
                         .frame(minWidth: 420)
                 }
             } else {
-                ProgressView("Loading...")
+                ProgressView("loading...")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -134,8 +134,8 @@ struct ControlCenterView: View {
                 .font(.headline)
             Text(
                 viewModel.stableAudioTokenConfigured
-                ? "Hugging Face token is configured in Keychain."
-                : "Hugging Face token is missing."
+                ? "hugging face token is configured in keychain."
+                : "hugging face token is missing."
             )
             .font(.caption)
             .foregroundStyle(viewModel.stableAudioTokenConfigured ? .green : .orange)
@@ -143,7 +143,7 @@ struct ControlCenterView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("generation backend")
                     .font(.subheadline)
-                Picker("Generation Backend", selection: Binding(
+                Picker("generation backend", selection: Binding(
                     get: { viewModel.stableAudioBackendEngine },
                     set: { viewModel.setStableAudioBackendEngine($0) }
                 )) {
@@ -153,7 +153,7 @@ struct ControlCenterView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                Text("Applies to localhost generation default. Changing this restarts Stable Audio if it's running.")
+                Text("applies to localhost generation default. changing this restarts stable audio if it's running.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -161,7 +161,7 @@ struct ControlCenterView: View {
             if !viewModel.stableAudioTokenConfigured {
                 stepRow(
                     number: 1,
-                    title: "Open model page and click 'Agree and access repository'",
+                    title: "open model page and click 'agree and access repository'",
                     buttonTitle: "open stable audio page",
                     isEnabled: true
                 ) {
@@ -170,7 +170,7 @@ struct ControlCenterView: View {
 
                 stepRow(
                     number: 2,
-                    title: "Create a read token on Hugging Face",
+                    title: "create a read token on hugging face",
                     buttonTitle: "open token settings",
                     isEnabled: true
                 ) {
@@ -180,12 +180,12 @@ struct ControlCenterView: View {
                 if let screenshotPath = viewModel.stableAudioStep2ScreenshotPath {
                     HoverExpandableScreenshot(
                         screenshotPath: screenshotPath,
-                        caption: "Step 2 reference: check 'Read access to contents of all public gated repos you can access' (hover to zoom)"
+                        caption: "step 2 reference: check 'read access to contents of all public gated repos you can access' (hover to zoom)"
                     )
                 }
 
                 HStack {
-                    Text("3. Paste token here")
+                    Text("3. paste token here")
                         .font(.subheadline)
                     Spacer()
                 }
@@ -225,7 +225,7 @@ struct ControlCenterView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("generation backend")
                     .font(.subheadline)
-                Picker("Generation Backend", selection: Binding(
+                Picker("generation backend", selection: Binding(
                     get: { viewModel.melodyFlowBackendEngine },
                     set: { viewModel.setMelodyFlowBackendEngine($0) }
                 )) {
@@ -236,8 +236,8 @@ struct ControlCenterView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 Text(
-                    "MPS is the quality baseline. MLX+Torch keeps MLX flow with torch codec. "
-                    + "MLX End-to-End uses native MLX codec and may differ in output quality."
+                    "mps is the quality baseline. mlx+torch keeps mlx flow with torch codec. "
+                    + "mlx end-to-end uses native mlx codec and may differ in output quality."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -305,9 +305,9 @@ private struct RebuildFailureSheet: View {
                             .foregroundStyle(.secondary)
                         HStack {
                             Button("repair again") { viewModel.retryRebuildFailure() }
-                                .help("Rerun dependency repair using the current environment.")
+                                .help("rerun dependency repair using the current environment.")
                             Button("repair from scratch") { viewModel.cleanRepairRebuildFailure() }
-                                .help("Recreate the environment and install dependencies with --no-cache-dir.")
+                                .help("recreate the environment and install dependencies with --no-cache-dir.")
                             Spacer()
                         }
                     }
@@ -502,9 +502,9 @@ private struct ModelDownloadSheet: View {
                 Button("close") { dismiss() }
             }
 
-            Text("Pre-download models for offline use in gary4juce.")
+            Text("pre-download models for offline use in gary4juce.")
                 .font(.subheadline)
-            Text("Models also download the first time you use them inside gary4juce.")
+            Text("models also download the first time you use them inside gary4juce.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -529,10 +529,10 @@ private struct ModelDownloadSheet: View {
 
             if viewModel.downloadableModels.isEmpty, !viewModel.isModelCatalogLoading {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("No models available.")
+                    Text("no models available.")
                         .foregroundStyle(.secondary)
                     if !viewModel.canManageModelDownloads {
-                        Text("Start the Audiocraft MLX service, then refresh statuses.")
+                        Text("start the audiocraft mlx service, then refresh statuses.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -595,7 +595,7 @@ private struct ModelDownloadSheet: View {
     @ViewBuilder
     private func statusPill(for model: DownloadableModel) -> some View {
         if model.downloaded {
-            Text("Downloaded")
+            Text("downloaded")
                 .font(.caption2.weight(.semibold))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
@@ -609,7 +609,7 @@ private struct ModelDownloadSheet: View {
                 .background(Color.orange.opacity(0.18))
                 .clipShape(Capsule())
         } else {
-            Text("Not downloaded")
+            Text("not downloaded")
                 .font(.caption2.weight(.semibold))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
@@ -649,7 +649,7 @@ private struct HoverExpandableScreenshot: View {
                             isHoveringScreenshot = true
                             previewWindow.show(
                                 image: screenshot,
-                                title: "Step 2 detailed preview"
+                                title: "step 2 detailed preview"
                             )
                         case .ended:
                             isHoveringScreenshot = false
@@ -775,7 +775,7 @@ private struct DetachedScreenshotContent: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .font(.headline)
-            Text("Check: 'Read access to contents of all public gated repos you can access'")
+            Text("check: 'read access to contents of all public gated repos you can access'")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Image(nsImage: image)
@@ -1032,7 +1032,7 @@ private struct ServiceRow: View {
                                 onDownloadModels()
                             }
                             .controlSize(.small)
-                            .disabled(runtime.isBootstrapping)
+                            .disabled(!runtime.isRunning || runtime.isBootstrapping)
                         }
                     }
                     Text("id: \(runtime.id)")
@@ -1041,7 +1041,7 @@ private struct ServiceRow: View {
                 }
                 Spacer()
                 if let pid = runtime.pid {
-                    Text("PID \(pid)")
+                    Text("pid \(pid)")
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
                 }

@@ -7,9 +7,9 @@ enum ManifestLoaderError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingManifest(let path):
-            return "Manifest not found at \(path)"
+            return "manifest not found at \(path)"
         case .invalidHealthURL(let url, let serviceID):
-            return "Invalid health URL '\(url)' for service '\(serviceID)'"
+            return "invalid health url '\(url)' for service '\(serviceID)'"
         }
     }
 }

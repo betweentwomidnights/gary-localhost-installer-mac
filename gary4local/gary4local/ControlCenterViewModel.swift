@@ -12,9 +12,9 @@ enum StableAudioBackendEngine: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .mps:
-            return "MPS"
+            return "mps"
         case .mlx:
-            return "MLX"
+            return "mlx"
         }
     }
 
@@ -33,22 +33,22 @@ enum MelodyFlowBackendEngine: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .mps:
-            return "MPS"
+            return "mps"
         case .mlxNativeTorchCodec:
-            return "MLX + Torch Codec"
+            return "mlx + torch codec"
         case .mlxNativeMlxCodec:
-            return "MLX End-to-End"
+            return "mlx end-to-end"
         }
     }
 
     var shortDisplayName: String {
         switch self {
         case .mps:
-            return "MPS"
+            return "mps"
         case .mlxNativeTorchCodec:
-            return "MLX+Torch"
+            return "mlx+torch"
         case .mlxNativeMlxCodec:
-            return "MLX E2E"
+            return "mlx e2e"
         }
     }
 
@@ -433,9 +433,9 @@ final class ControlCenterViewModel: ObservableObject {
         UserDefaults.standard.set(backend.rawValue, forKey: Self.stableAudioBackendDefaultsKey)
         manager?.setStableAudioBackendEngine(backend.rawValue, restartIfRunning: true)
         if manager?.services.first(where: { $0.id == "stable_audio" })?.isRunning == true {
-            stableAudioTokenStatus = "Stable Audio backend set to \(backend.displayName). Service restarting..."
+            stableAudioTokenStatus = "stable audio backend set to \(backend.displayName). service restarting..."
         } else {
-            stableAudioTokenStatus = "Stable Audio backend set to \(backend.displayName)."
+            stableAudioTokenStatus = "stable audio backend set to \(backend.displayName)."
         }
     }
 
@@ -445,9 +445,9 @@ final class ControlCenterViewModel: ObservableObject {
         UserDefaults.standard.set(backend.rawValue, forKey: Self.melodyFlowBackendDefaultsKey)
         manager?.setMelodyFlowBackendEngine(backend.rawValue, restartIfRunning: true)
         if manager?.services.first(where: { $0.id == "melodyflow" })?.isRunning == true {
-            melodyFlowBackendStatus = "MelodyFlow backend set to \(backend.displayName). Service restarting..."
+            melodyFlowBackendStatus = "melodyflow backend set to \(backend.displayName). service restarting..."
         } else {
-            melodyFlowBackendStatus = "MelodyFlow backend set to \(backend.displayName)."
+            melodyFlowBackendStatus = "melodyflow backend set to \(backend.displayName)."
         }
     }
 
@@ -466,7 +466,7 @@ final class ControlCenterViewModel: ObservableObject {
 
     func refreshModelCatalogAndStatuses() {
         if isModelDownloadInProgress {
-            modelDownloadStatusMessage = "A model download is already in progress."
+            modelDownloadStatusMessage = "a model download is already in progress."
             return
         }
 
@@ -478,13 +478,13 @@ final class ControlCenterViewModel: ObservableObject {
 
         guard let baseURL = audiocraftAPIBaseURL() else {
             downloadableModels = []
-            modelDownloadStatusMessage = "Start Audiocraft MLX to manage model downloads."
+            modelDownloadStatusMessage = "start audiocraft mlx to manage model downloads."
             isModelCatalogLoading = false
             return
         }
 
         isModelCatalogLoading = true
-        modelDownloadStatusMessage = "Loading model catalog..."
+        modelDownloadStatusMessage = "loading model catalog..."
 
         Task { [weak self] in
             guard let self else { return }
@@ -499,7 +499,7 @@ final class ControlCenterViewModel: ObservableObject {
                     throw NSError(
                         domain: "ControlCenterViewModel",
                         code: 1,
-                        userInfo: [NSLocalizedDescriptionKey: "Failed to load model catalog."]
+                        userInfo: [NSLocalizedDescriptionKey: "failed to load model catalog."]
                     )
                 }
 
@@ -511,7 +511,7 @@ final class ControlCenterViewModel: ObservableObject {
                     throw NSError(
                         domain: "ControlCenterViewModel",
                         code: 2,
-                        userInfo: [NSLocalizedDescriptionKey: "Failed to load download statuses."]
+                        userInfo: [NSLocalizedDescriptionKey: "failed to load download statuses."]
                     )
                 }
 
@@ -520,19 +520,19 @@ final class ControlCenterViewModel: ObservableObject {
                     if let status = remoteStatuses.models[models[index].path] {
                         models[index].downloaded = status.downloaded
                         if status.downloaded {
-                            models[index].statusMessage = "Downloaded"
+                            models[index].statusMessage = "downloaded"
                         } else if let missing = status.missing, !missing.isEmpty {
-                            models[index].statusMessage = "Missing \(missing.count) dependency\(missing.count == 1 ? "" : "ies")"
+                            models[index].statusMessage = "missing \(missing.count) dependency\(missing.count == 1 ? "" : "ies")"
                         } else {
-                            models[index].statusMessage = "Not downloaded"
+                            models[index].statusMessage = "not downloaded"
                         }
                     } else {
-                        models[index].statusMessage = "Unknown"
+                        models[index].statusMessage = "unknown"
                     }
                 }
 
                 self.downloadableModels = models
-                self.modelDownloadStatusMessage = "Pick a model to pre-download for offline usage."
+                self.modelDownloadStatusMessage = "pick a model to pre-download for offline usage."
             } catch {
                 self.downloadableModels = []
                 self.modelDownloadStatusMessage = error.localizedDescription
@@ -543,11 +543,11 @@ final class ControlCenterViewModel: ObservableObject {
 
     func startModelDownload(_ modelPath: String) {
         guard let baseURL = audiocraftAPIBaseURL() else {
-            modelDownloadStatusMessage = "Start Audiocraft MLX to download models."
+            modelDownloadStatusMessage = "start audiocraft mlx to download models."
             return
         }
         guard !isModelDownloadInProgress else {
-            modelDownloadStatusMessage = "A model download is already running."
+            modelDownloadStatusMessage = "a model download is already running."
             return
         }
 
@@ -556,11 +556,11 @@ final class ControlCenterViewModel: ObservableObject {
             isDownloading: true,
             downloaded: false,
             progress: 0,
-            statusMessage: "Starting download..."
+            statusMessage: "starting download..."
         )
         isModelDownloadInProgress = true
         activeModelDownloadPath = modelPath
-        modelDownloadStatusMessage = "Starting \(modelPath)..."
+        modelDownloadStatusMessage = "starting \(modelPath)..."
 
         Task { [weak self] in
             guard let self else { return }
@@ -578,12 +578,12 @@ final class ControlCenterViewModel: ObservableObject {
                     throw NSError(
                         domain: "ControlCenterViewModel",
                         code: 3,
-                        userInfo: [NSLocalizedDescriptionKey: "Unable to start model download."]
+                        userInfo: [NSLocalizedDescriptionKey: "unable to start model download."]
                     )
                 }
 
                 self.activeModelDownloadSessionID = startResponse.sessionID
-                self.modelDownloadStatusMessage = startResponse.message ?? "Downloading \(modelPath)..."
+                self.modelDownloadStatusMessage = startResponse.message ?? "downloading \(modelPath)..."
                 self.startModelDownloadPolling(
                     sessionID: startResponse.sessionID,
                     modelPath: modelPath,
@@ -598,7 +598,7 @@ final class ControlCenterViewModel: ObservableObject {
                     isDownloading: false,
                     downloaded: false,
                     progress: 0,
-                    statusMessage: "Download failed"
+                    statusMessage: "download failed"
                 )
                 self.modelDownloadStatusMessage = error.localizedDescription
             }
@@ -608,11 +608,11 @@ final class ControlCenterViewModel: ObservableObject {
     func saveStableAudioToken() {
         let token = stableAudioTokenInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty else {
-            stableAudioTokenStatus = "Paste your Hugging Face token first."
+            stableAudioTokenStatus = "paste your hugging face token first."
             return
         }
 
-        stableAudioTokenStatus = "Saving token..."
+        stableAudioTokenStatus = "saving token..."
         DispatchQueue.global(qos: .utility).async { [weak self] in
             do {
                 try StableAudioAuthKeychain.saveToken(token)
@@ -620,7 +620,7 @@ final class ControlCenterViewModel: ObservableObject {
                     guard let self else { return }
                     self.stableAudioTokenInput = ""
                     self.applyStableAudioTokenState(configured: true)
-                    self.stableAudioTokenStatus = "Token saved in Keychain."
+                    self.stableAudioTokenStatus = "token saved in keychain."
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -631,7 +631,7 @@ final class ControlCenterViewModel: ObservableObject {
     }
 
     func clearStableAudioToken() {
-        stableAudioTokenStatus = "Removing token..."
+        stableAudioTokenStatus = "removing token..."
         DispatchQueue.global(qos: .utility).async { [weak self] in
             do {
                 try StableAudioAuthKeychain.deleteToken()
@@ -639,7 +639,7 @@ final class ControlCenterViewModel: ObservableObject {
                     guard let self else { return }
                     self.stableAudioTokenInput = ""
                     self.applyStableAudioTokenState(configured: false)
-                    self.stableAudioTokenStatus = "Saved token removed."
+                    self.stableAudioTokenStatus = "saved token removed."
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -963,7 +963,7 @@ final class ControlCenterViewModel: ObservableObject {
                         throw NSError(
                             domain: "ControlCenterViewModel",
                             code: 4,
-                            userInfo: [NSLocalizedDescriptionKey: "Model download polling failed."]
+                            userInfo: [NSLocalizedDescriptionKey: "model download polling failed."]
                         )
                     }
 
@@ -974,13 +974,13 @@ final class ControlCenterViewModel: ObservableObject {
                     let fallbackMessage: String
                     switch pollResponse.status {
                     case "completed":
-                        fallbackMessage = "Downloaded"
+                        fallbackMessage = "downloaded"
                     case "failed":
-                        fallbackMessage = pollResponse.error ?? "Download failed"
+                        fallbackMessage = pollResponse.error ?? "download failed"
                     case "warming", "processing":
-                        fallbackMessage = "Downloading..."
+                        fallbackMessage = "downloading..."
                     default:
-                        fallbackMessage = pollResponse.status.capitalized
+                        fallbackMessage = pollResponse.status
                     }
                     let statusMessage = queueMessage.isEmpty ? fallbackMessage : queueMessage
 
@@ -1018,7 +1018,7 @@ final class ControlCenterViewModel: ObservableObject {
                         isDownloading: false,
                         downloaded: false,
                         progress: 0,
-                        statusMessage: "Download polling failed"
+                        statusMessage: "download polling failed"
                     )
                     self.modelDownloadStatusMessage = error.localizedDescription
                     self.modelDownloadPollTask = nil
@@ -1077,7 +1077,7 @@ final class ControlCenterViewModel: ObservableObject {
                             downloaded: false,
                             isDownloading: false,
                             progress: 0,
-                            statusMessage: "Not downloaded"
+                            statusMessage: "not downloaded"
                         )
                     )
                     continue
@@ -1096,7 +1096,7 @@ final class ControlCenterViewModel: ObservableObject {
                             downloaded: false,
                             isDownloading: false,
                             progress: 0,
-                            statusMessage: "Not downloaded"
+                            statusMessage: "not downloaded"
                         )
                     )
                 }
@@ -1144,7 +1144,7 @@ final class ControlCenterViewModel: ObservableObject {
             throw NSError(
                 domain: "ControlCenterViewModel",
                 code: 5,
-                userInfo: [NSLocalizedDescriptionKey: "Unexpected response from backend."]
+                userInfo: [NSLocalizedDescriptionKey: "unexpected response from backend."]
             )
         }
         guard (200...299).contains(http.statusCode) else {
@@ -1156,7 +1156,7 @@ final class ControlCenterViewModel: ObservableObject {
                 ])
             }
             throw NSError(domain: "ControlCenterViewModel", code: http.statusCode, userInfo: [
-                NSLocalizedDescriptionKey: "Backend returned HTTP \(http.statusCode)."
+                NSLocalizedDescriptionKey: "backend returned http \(http.statusCode)."
             ])
         }
     }
@@ -1165,9 +1165,9 @@ final class ControlCenterViewModel: ObservableObject {
         stableAudioTokenConfigured = configured
         if configured {
             if stableAudioTokenStatus.isEmpty {
-                stableAudioTokenStatus = "Token already saved in Keychain."
+                stableAudioTokenStatus = "token already saved in keychain."
             }
-        } else if stableAudioTokenStatus == "Token already saved in Keychain." {
+        } else if stableAudioTokenStatus == "token already saved in keychain." {
             stableAudioTokenStatus = ""
         }
     }
