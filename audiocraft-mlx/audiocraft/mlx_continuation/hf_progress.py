@@ -109,7 +109,8 @@ def make_hf_tqdm_class(
             self._last_emit_bytes = downloaded
 
             desc = getattr(self, "desc", "") or ""
-            done = "complete" in desc.lower()
+            desc_l = desc.lower().strip()
+            done = desc_l.startswith("download complete")
             self._on_progress(
                 {
                     "repo_id": self._repo_id,

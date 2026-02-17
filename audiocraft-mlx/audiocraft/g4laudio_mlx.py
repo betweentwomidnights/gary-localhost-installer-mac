@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import os
 import threading
+from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
 
 import mlx.core as mx
@@ -32,6 +34,18 @@ _MODEL_CACHE: dict[tuple[str, Optional[str], str], MusicGenContinuation] = {}
 
 # For now, we serialize generation to keep MLX state/threading simple.
 _GEN_LOCK = threading.Lock()
+
+_MODEL_SNAPSHOT_PATTERNS = ["*.json", "state_dict.bin"]
+_CONFIG_SNAPSHOT_PATTERNS = ["config.json"]
+_COMPONENT_SNAPSHOT_PATTERNS = ["*.json", "*.safetensors", "*.model"]
+_TOKENIZER_SNAPSHOT_PATTERNS = [
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "spiece.model",
+    "*.model",
+    "*.json",
+]
 
 DEFAULT_QUANTIZATION_MODE = os.environ.get(
     "G4L_MLX_QUANTIZATION_DEFAULT",
@@ -420,6 +434,572 @@ def _get_model(
         _apply_quantization_preset(model, resolved_quantization_mode)
         _MODEL_CACHE[(model_name, base_model, resolved_quantization_mode)] = model
         return model
+
+
+def _snapshot_repo(
+    repo_or_path: str,
+    allow_patterns: list[str],
+    *,
+    local_files_only: bool,
+    download_progress_callback: Optional[Callable[[dict], None]] = None,
+) -> Path:
+    path = Path(repo_or_path)
+    if path.exists():
+        return path
+
+    from huggingface_hub import snapshot_download
+
+    tqdm_class = None
+    if (not local_files_only) and download_progress_callback is not None:
+        from mlx_continuation.hf_progress import make_hf_tqdm_class
+
+        tqdm_class = make_hf_tqdm_class(
+            repo_id=repo_or_path,
+            on_progress=download_progress_callback,
+        )
+
+    snapshot_path = snapshot_download(
+        repo_id=repo_or_path,
+        allow_patterns=allow_patterns,
+        local_files_only=local_files_only,
+        tqdm_class=tqdm_class,
+    )
+    return Path(snapshot_path)
+
+
+def _emit_download_event(
+    callback: Optional[Callable[[dict], None]],
+    payload: dict[str, Any],
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(payload)
+    except Exception:
+        # Download status callbacks are best-effort only.
+        return
+
+
+def _make_stage_progress_callback(
+    *,
+    model_name: str,
+    stage_index: int,
+    stage_total: int,
+    stage_name: str,
+    on_progress: Optional[Callable[[dict], None]],
+) -> Callable[[dict], None]:
+    last_stage_percent = 0
+    last_downloaded_bytes = 0
+    heuristic_bytes_accumulator = 0
+
+    def _stage_progress(evt: dict) -> None:
+        nonlocal last_stage_percent, last_downloaded_bytes, heuristic_bytes_accumulator
+
+        downloaded = int(evt.get("downloaded_bytes") or 0)
+        total = int(evt.get("total_bytes") or 0)
+        reported_percent = int(evt.get("percent") or 0)
+        done = bool(evt.get("done") or False)
+        unit = str(evt.get("unit") or "").strip().lower()
+        is_item_counter = unit in {"it", "item", "items", "file", "files"}
+        is_byte_counter = not is_item_counter
+        byte_delta = 0
+
+        if is_byte_counter:
+            if downloaded >= last_downloaded_bytes:
+                byte_delta = downloaded - last_downloaded_bytes
+            elif downloaded > 0:
+                # `tqdm` counters can reset between files inside one snapshot.
+                byte_delta = downloaded
+            if downloaded >= 0:
+                last_downloaded_bytes = downloaded
+
+        reliable_total_bytes = 8 * 1024 * 1024
+
+        if done:
+            stage_percent = 100
+        elif (
+            is_byte_counter
+            and total >= reliable_total_bytes
+            and downloaded <= total
+        ):
+            # Treat this as authoritative only for byte counters. Item counters
+            # from snapshot orchestration can misrepresent large file progress.
+            stage_percent = max(0, min(100, reported_percent))
+        elif is_byte_counter and byte_delta > 0:
+            stage_percent = max(1, last_stage_percent)
+            heuristic_bytes_accumulator += byte_delta
+            heuristic_step = 32 * 1024 * 1024
+            while heuristic_bytes_accumulator >= heuristic_step and stage_percent < 90:
+                stage_percent += 1
+                heuristic_bytes_accumulator -= heuristic_step
+        else:
+            stage_percent = last_stage_percent
+
+        if done:
+            stage_percent = 100
+        else:
+            stage_percent = min(99, max(last_stage_percent, stage_percent))
+
+        last_stage_percent = stage_percent
+
+        overall_raw = (
+            ((stage_index - 1) + (stage_percent / 100.0)) / max(stage_total, 1)
+        ) * 100.0
+        if done:
+            overall_percent = 100
+        else:
+            capped_raw = max(0.0, min(99.0, overall_raw))
+            if stage_percent > 0 or byte_delta > 0 or downloaded > 0:
+                # Avoid long-lived 0% when total bytes are not reported.
+                overall_percent = max(1, int(capped_raw + 0.9999))
+            else:
+                overall_percent = int(capped_raw)
+        payload = {
+            "model_name": model_name,
+            "phase": "download",
+            "stage_index": stage_index,
+            "stage_total": stage_total,
+            "stage_name": stage_name,
+            "stage_percent": stage_percent,
+            "percent": max(0, min(100, overall_percent)),
+            "repo_id": str(evt.get("repo_id") or ""),
+            "downloaded_bytes": downloaded,
+            "total_bytes": total,
+            "desc": str(evt.get("desc") or ""),
+            "done": done,
+            "unit": str(evt.get("unit") or ""),
+            "progress_name": str(evt.get("progress_name") or ""),
+        }
+        _emit_download_event(on_progress, payload)
+
+    return _stage_progress
+
+
+def _infer_model_component_repos(config_path: Path) -> tuple[str, str]:
+    with open(config_path, "r", encoding="utf-8") as f:
+        config_data = json.load(f)
+
+    text_encoder = config_data.get("text_encoder", {}) or {}
+    audio_encoder = config_data.get("audio_encoder", {}) or {}
+
+    text_repo = str(text_encoder.get("_name_or_path") or "").strip()
+    audio_repo_raw = str(audio_encoder.get("_name_or_path") or "").strip()
+    if not text_repo:
+        raise AudioProcessingError(
+            f"Missing text_encoder._name_or_path in config: {config_path}"
+        )
+    if not audio_repo_raw:
+        raise AudioProcessingError(
+            f"Missing audio_encoder._name_or_path in config: {config_path}"
+        )
+
+    encodec_name = audio_repo_raw.split("/")[-1].replace("_", "-")
+    encodec_repo = f"mlx-community/{encodec_name}-float32"
+    return text_repo, encodec_repo
+
+
+def _resolve_model_config_path(
+    model_name: str,
+    *,
+    local_files_only: bool,
+    download_progress_callback: Optional[Callable[[dict], None]] = None,
+) -> tuple[Path, str]:
+    base_model = get_base_model_for_finetune(model_name)
+    prefer_base_config = has_explicit_base_model_override(model_name)
+
+    model_path = _snapshot_repo(
+        model_name,
+        _MODEL_SNAPSHOT_PATTERNS,
+        local_files_only=local_files_only,
+        download_progress_callback=download_progress_callback,
+    )
+
+    model_config_path = model_path / "config.json"
+    if (not prefer_base_config) and model_config_path.exists():
+        return model_config_path, base_model
+
+    base_path = _snapshot_repo(
+        base_model,
+        _CONFIG_SNAPSHOT_PATTERNS,
+        local_files_only=local_files_only,
+        download_progress_callback=download_progress_callback,
+    )
+    base_config_path = base_path / "config.json"
+    if not base_config_path.exists():
+        raise AudioProcessingError(
+            f"Missing config.json for base model '{base_model}'."
+        )
+    return base_config_path, base_model
+
+
+def predownload_model(
+    model_name: str,
+    download_progress_callback: Optional[Callable[[dict], None]] = None,
+) -> dict[str, Any]:
+    """
+    Download all assets needed for offline generation for a given finetune:
+    - finetune checkpoint/config snapshot
+    - base config snapshot when required
+    - text encoder weights
+    - EnCodec decoder weights
+    - tokenizer assets used by runtime tokenizer ("t5-base")
+    """
+    base_model = get_base_model_for_finetune(model_name)
+    prefer_base_config = has_explicit_base_model_override(model_name)
+
+    # Step 1: model checkpoint snapshot (always required).
+    step_count = 5
+
+    step_index = 1
+    _emit_download_event(
+        download_progress_callback,
+        {
+            "model_name": model_name,
+            "phase": "download",
+            "stage_index": step_index,
+            "stage_total": step_count,
+            "stage_name": "Model checkpoint",
+            "stage_percent": 0,
+            "percent": 0,
+            "repo_id": model_name,
+            "desc": "Starting model checkpoint download",
+            "done": False,
+        },
+    )
+    model_snapshot_path = _snapshot_repo(
+        model_name,
+        _MODEL_SNAPSHOT_PATTERNS,
+        local_files_only=False,
+        download_progress_callback=_make_stage_progress_callback(
+            model_name=model_name,
+            stage_index=step_index,
+            stage_total=step_count,
+            stage_name="Model checkpoint",
+            on_progress=download_progress_callback,
+        ),
+    )
+    _emit_download_event(
+        download_progress_callback,
+        {
+            "model_name": model_name,
+            "phase": "download",
+            "stage_index": step_index,
+            "stage_total": step_count,
+            "stage_name": "Model checkpoint",
+            "stage_percent": 100,
+            "percent": int((step_index / step_count) * 100),
+            "repo_id": model_name,
+            "desc": "Model checkpoint ready",
+            "done": True,
+        },
+    )
+
+    step_index += 1
+
+    # Step 2 (optional): base config stage.
+    needs_base_config = prefer_base_config or not (model_snapshot_path / "config.json").exists()
+    if needs_base_config:
+        _emit_download_event(
+            download_progress_callback,
+            {
+                "model_name": model_name,
+                "phase": "download",
+                "stage_index": step_index,
+                "stage_total": step_count,
+                "stage_name": "Base model config",
+                "stage_percent": 0,
+                "percent": int(((step_index - 1) / step_count) * 100),
+                "repo_id": base_model,
+                "desc": "Starting base config download",
+                "done": False,
+            },
+        )
+        _snapshot_repo(
+            base_model,
+            _CONFIG_SNAPSHOT_PATTERNS,
+            local_files_only=False,
+            download_progress_callback=_make_stage_progress_callback(
+                model_name=model_name,
+                stage_index=step_index,
+                stage_total=step_count,
+                stage_name="Base model config",
+                on_progress=download_progress_callback,
+            ),
+        )
+        _emit_download_event(
+            download_progress_callback,
+            {
+                "model_name": model_name,
+                "phase": "download",
+                "stage_index": step_index,
+                "stage_total": step_count,
+                "stage_name": "Base model config",
+                "stage_percent": 100,
+                "percent": int((step_index / step_count) * 100),
+                "repo_id": base_model,
+                "desc": "Base model config ready",
+                "done": True,
+            },
+        )
+    else:
+        _emit_download_event(
+            download_progress_callback,
+            {
+                "model_name": model_name,
+                "phase": "download",
+                "stage_index": step_index,
+                "stage_total": step_count,
+                "stage_name": "Base model config",
+                "stage_percent": 100,
+                "percent": int((step_index / step_count) * 100),
+                "repo_id": base_model,
+                "desc": "Base model config not required",
+                "done": True,
+            },
+        )
+    step_index += 1
+
+    # Resolve config path (downloads base config when finetune config is absent).
+    config_path, _ = _resolve_model_config_path(
+        model_name,
+        local_files_only=True,
+        download_progress_callback=None,
+    )
+    text_repo, encodec_repo = _infer_model_component_repos(config_path)
+
+    # Step: text encoder.
+    _emit_download_event(
+        download_progress_callback,
+        {
+            "model_name": model_name,
+            "phase": "download",
+            "stage_index": step_index,
+            "stage_total": step_count,
+            "stage_name": "Text encoder",
+            "stage_percent": 0,
+            "percent": int(((step_index - 1) / step_count) * 100),
+            "repo_id": text_repo,
+            "desc": "Starting text encoder download",
+            "done": False,
+        },
+    )
+    _snapshot_repo(
+        text_repo,
+        _COMPONENT_SNAPSHOT_PATTERNS,
+        local_files_only=False,
+        download_progress_callback=_make_stage_progress_callback(
+            model_name=model_name,
+            stage_index=step_index,
+            stage_total=step_count,
+            stage_name="Text encoder",
+            on_progress=download_progress_callback,
+        ),
+    )
+    _emit_download_event(
+        download_progress_callback,
+        {
+            "model_name": model_name,
+            "phase": "download",
+            "stage_index": step_index,
+            "stage_total": step_count,
+            "stage_name": "Text encoder",
+            "stage_percent": 100,
+            "percent": int((step_index / step_count) * 100),
+            "repo_id": text_repo,
+            "desc": "Text encoder ready",
+            "done": True,
+        },
+    )
+    step_index += 1
+
+    # Step: EnCodec audio decoder.
+    _emit_download_event(
+        download_progress_callback,
+        {
+            "model_name": model_name,
+            "phase": "download",
+            "stage_index": step_index,
+            "stage_total": step_count,
+            "stage_name": "Audio decoder",
+            "stage_percent": 0,
+            "percent": int(((step_index - 1) / step_count) * 100),
+            "repo_id": encodec_repo,
+            "desc": "Starting audio decoder download",
+            "done": False,
+        },
+    )
+    _snapshot_repo(
+        encodec_repo,
+        _COMPONENT_SNAPSHOT_PATTERNS,
+        local_files_only=False,
+        download_progress_callback=_make_stage_progress_callback(
+            model_name=model_name,
+            stage_index=step_index,
+            stage_total=step_count,
+            stage_name="Audio decoder",
+            on_progress=download_progress_callback,
+        ),
+    )
+    _emit_download_event(
+        download_progress_callback,
+        {
+            "model_name": model_name,
+            "phase": "download",
+            "stage_index": step_index,
+            "stage_total": step_count,
+            "stage_name": "Audio decoder",
+            "stage_percent": 100,
+            "percent": int((step_index / step_count) * 100),
+            "repo_id": encodec_repo,
+            "desc": "Audio decoder ready",
+            "done": True,
+        },
+    )
+    step_index += 1
+
+    # Step: tokenizer assets used by Tokenizer(..., "t5-base").
+    tokenizer_repo = "t5-base"
+    _emit_download_event(
+        download_progress_callback,
+        {
+            "model_name": model_name,
+            "phase": "download",
+            "stage_index": step_index,
+            "stage_total": step_count,
+            "stage_name": "Tokenizer",
+            "stage_percent": 0,
+            "percent": int(((step_index - 1) / step_count) * 100),
+            "repo_id": tokenizer_repo,
+            "desc": "Starting tokenizer download",
+            "done": False,
+        },
+    )
+    _snapshot_repo(
+        tokenizer_repo,
+        _TOKENIZER_SNAPSHOT_PATTERNS,
+        local_files_only=False,
+        download_progress_callback=_make_stage_progress_callback(
+            model_name=model_name,
+            stage_index=step_index,
+            stage_total=step_count,
+            stage_name="Tokenizer",
+            on_progress=download_progress_callback,
+        ),
+    )
+    _emit_download_event(
+        download_progress_callback,
+        {
+            "model_name": model_name,
+            "phase": "download",
+            "stage_index": step_index,
+            "stage_total": step_count,
+            "stage_name": "Tokenizer",
+            "stage_percent": 100,
+            "percent": 100,
+            "repo_id": tokenizer_repo,
+            "desc": "Tokenizer ready",
+            "done": True,
+        },
+    )
+
+    return {
+        "success": True,
+        "model_name": model_name,
+        "base_model": base_model,
+        "text_repo": text_repo,
+        "encodec_repo": encodec_repo,
+        "tokenizer_repo": tokenizer_repo,
+    }
+
+
+def get_model_download_status(model_name: str) -> dict[str, Any]:
+    """
+    Check whether a model can run fully offline by verifying required snapshots
+    are already present in local HF cache.
+    """
+    missing: list[str] = []
+
+    def _require_snapshot(
+        repo_or_path: str,
+        allow_patterns: list[str],
+        label: str,
+    ) -> Optional[Path]:
+        try:
+            return _snapshot_repo(
+                repo_or_path,
+                allow_patterns,
+                local_files_only=True,
+                download_progress_callback=None,
+            )
+        except Exception:
+            missing.append(label)
+            return None
+
+    model_path = _require_snapshot(
+        model_name,
+        _MODEL_SNAPSHOT_PATTERNS,
+        f"{model_name} (model checkpoint)",
+    )
+
+    base_model = None
+    config_path: Optional[Path] = None
+    if model_path is not None:
+        try:
+            base_model = get_base_model_for_finetune(model_name)
+            prefer_base_config = has_explicit_base_model_override(model_name)
+            model_config_path = model_path / "config.json"
+            if (not prefer_base_config) and model_config_path.exists():
+                config_path = model_config_path
+            else:
+                base_path = _require_snapshot(
+                    base_model,
+                    _CONFIG_SNAPSHOT_PATTERNS,
+                    f"{base_model} (base config)",
+                )
+                if base_path is not None:
+                    candidate = base_path / "config.json"
+                    if candidate.exists():
+                        config_path = candidate
+                    else:
+                        missing.append(f"{base_model} (base config)")
+        except Exception as e:
+            missing.append(f"{model_name} (config resolution: {e})")
+
+    text_repo = None
+    encodec_repo = None
+    if config_path is not None:
+        try:
+            text_repo, encodec_repo = _infer_model_component_repos(config_path)
+        except Exception as e:
+            missing.append(f"{model_name} (config parse: {e})")
+
+    if text_repo:
+        _require_snapshot(
+            text_repo,
+            _COMPONENT_SNAPSHOT_PATTERNS,
+            f"{text_repo} (text encoder)",
+        )
+    if encodec_repo:
+        _require_snapshot(
+            encodec_repo,
+            _COMPONENT_SNAPSHOT_PATTERNS,
+            f"{encodec_repo} (audio decoder)",
+        )
+    _require_snapshot(
+        "t5-base",
+        _TOKENIZER_SNAPSHOT_PATTERNS,
+        "t5-base (tokenizer)",
+    )
+
+    unique_missing = sorted(set(missing))
+    return {
+        "downloaded": len(unique_missing) == 0,
+        "missing": unique_missing,
+        "base_model": base_model,
+        "text_repo": text_repo,
+        "encodec_repo": encodec_repo,
+        "tokenizer_repo": "t5-base",
+    }
 
 
 def _generate_with_prompt(

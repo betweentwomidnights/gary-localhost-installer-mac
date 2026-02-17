@@ -27,7 +27,12 @@ from flask_cors import CORS
 from pydantic import BaseModel, ValidationError, Field
 
 # Import our audio processing functions (MLX MusicGen)
-from g4laudio_mlx import process_audio, continue_music
+from g4laudio_mlx import (
+    continue_music,
+    get_model_download_status,
+    predownload_model,
+    process_audio,
+)
 from g4l_models import MODEL_CATALOG
 
 # In both g4l_localhost.py AND localhost_melodyflow.py
@@ -142,6 +147,10 @@ class TransformRequest(BaseModel):
     flowstep: Optional[float] = Field(None, ge=0)
     solver: Optional[str] = None
     custom_prompt: Optional[str] = None
+
+
+class ModelPredownloadRequest(BaseModel):
+    model_name: str
 
 # =============================================================================
 # GPU CLEANUP UTILITIES (Keep for memory management)
@@ -317,6 +326,40 @@ def get_stored_queue_status(session_id: str):
     data = redis_client.get(f"queue_status:{session_id}")
     return json.loads(data) if data else None
 
+
+def _derive_progress_from_queue_status(
+    progress: int,
+    status: str,
+    qstatus: dict,
+) -> int:
+    if status == "completed":
+        return 100
+
+    normalized = max(0, min(100, int(progress)))
+    if normalized > 0:
+        return normalized
+
+    if not isinstance(qstatus, dict):
+        return normalized
+
+    try:
+        stage_total = int(qstatus.get("stage_total") or 0)
+        stage_index = int(qstatus.get("stage_index") or 0)
+        stage_percent = int(qstatus.get("download_percent") or 0)
+    except Exception:
+        return normalized
+
+    if stage_total <= 0 or stage_index <= 0:
+        return normalized
+
+    stage_percent = max(0, min(100, stage_percent))
+    derived = int(
+        (((stage_index - 1) + (stage_percent / 100.0)) / stage_total) * 100
+    )
+    if stage_percent > 0:
+        derived = max(1, derived)
+    return max(normalized, min(99, derived))
+
 # =============================================================================
 # ADDITIONAL REDIS FUNCTIONS FOR LAST INPUT AUDIO
 # =============================================================================
@@ -328,6 +371,133 @@ def store_last_input_audio(session_id: str, audio_base64: str):
 def get_last_input_audio(session_id: str):
     """Get last input audio for retry."""
     return redis_client.get(f"last_input:{session_id}")
+
+
+def all_catalog_models() -> list[str]:
+    ordered: list[str] = []
+    for size in ("small", "medium", "large"):
+        ordered.extend(MODEL_CATALOG.get(size, []))
+    return ordered
+
+
+def _fmt_bytes(n: int) -> str:
+    f = float(max(0, int(n)))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if f < 1024.0 or unit == "TB":
+            return f"{f:.1f}{unit}" if unit != "B" else f"{int(f)}B"
+        f /= 1024.0
+    return f"{f:.1f}TB"
+
+
+def run_model_predownload(session_id: str, model_name: str):
+    """Background task to pre-download all assets required for offline model usage."""
+    def progress_callback(evt: dict):
+        try:
+            stage_name = str(evt.get("stage_name") or "download")
+            repo_id = str(evt.get("repo_id") or model_name)
+            downloaded = int(evt.get("downloaded_bytes") or 0)
+            total = int(evt.get("total_bytes") or 0)
+            stage_percent = int(evt.get("stage_percent") or 0)
+            stage_total = int(evt.get("stage_total") or 0)
+            stage_index = int(evt.get("stage_index") or 0)
+            unit = str(evt.get("unit") or "").strip().lower()
+            progress_name = str(evt.get("progress_name") or "").strip()
+            progress = int(evt.get("percent") or 0)
+            if progress <= 0 and stage_total > 0 and stage_index > 0:
+                derived = int(
+                    (((stage_index - 1) + (max(0, min(100, stage_percent)) / 100.0))
+                     / max(stage_total, 1))
+                    * 100
+                )
+                if stage_percent > 0:
+                    derived = max(1, derived)
+                progress = max(progress, derived)
+            progress = max(0, min(100, progress))
+            store_session_progress(session_id, progress)
+
+            stage_prefix = f"Stage {stage_index}/{stage_total} {stage_name}" if stage_total > 0 else stage_name
+            if unit in {"it", "item", "items", "file", "files"} and total > 0:
+                message = (
+                    f"{stage_prefix}: {repo_id} "
+                    f"({downloaded}/{total} files • {stage_percent}%)"
+                )
+            elif total >= 4 * 1024 or downloaded >= 4 * 1024:
+                message = (
+                    f"{stage_prefix}: {repo_id} "
+                    f"({_fmt_bytes(downloaded)}/{_fmt_bytes(total)} • {stage_percent}%)"
+                )
+            elif progress_name:
+                message = f"{stage_prefix}: {repo_id} ({stage_percent}% • {progress_name})"
+            else:
+                message = f"{stage_prefix}: {repo_id} ({stage_percent}%)"
+
+            store_session_status(session_id, "warming" if progress < 100 else "processing")
+            store_queue_status_update(session_id, {
+                "status": "warming" if progress < 100 else "processing",
+                "message": message,
+                "position": 0,
+                "total_queued": 0,
+                "estimated_time": None,
+                "estimated_seconds": 0,
+                "source": "localhost",
+                "phase": "download",
+                "repo_id": repo_id,
+                "download_percent": stage_percent,
+                "downloaded_bytes": downloaded,
+                "total_bytes": total,
+                "stage_name": stage_name,
+                "stage_index": stage_index,
+                "stage_total": stage_total,
+                "unit": unit,
+                "progress_name": progress_name,
+            })
+        except Exception:
+            # Progress updates should never fail the actual download.
+            return
+
+    def worker():
+        try:
+            store_session_status(session_id, "warming")
+            store_session_progress(session_id, 0)
+            store_queue_status_update(session_id, {
+                "status": "warming",
+                "message": f"Preparing download for {model_name}",
+                "position": 0,
+                "total_queued": 0,
+                "estimated_time": None,
+                "estimated_seconds": 0,
+                "source": "localhost",
+                "phase": "download",
+            })
+
+            predownload_model(
+                model_name=model_name,
+                download_progress_callback=progress_callback,
+            )
+
+            store_session_status(session_id, "completed")
+            store_session_progress(session_id, 100)
+            store_queue_status_update(session_id, {
+                "status": "completed",
+                "message": f"{model_name} is ready for offline use.",
+                "source": "localhost",
+                "phase": "download",
+                "model_name": model_name,
+            })
+        except Exception as e:
+            error_message = str(e)
+            print(f"[ERROR] Model predownload failed for {model_name}: {error_message}")
+            print(traceback.format_exc())
+            store_session_status(session_id, "failed", error_message)
+            store_queue_status_update(session_id, {
+                "status": "failed",
+                "message": error_message,
+                "source": "localhost",
+                "phase": "download",
+                "model_name": model_name,
+            })
+
+    threading.Thread(target=worker, daemon=True).start()
 
 # =============================================================================
 # CORE PROCESSING FUNCTIONS
@@ -1102,6 +1272,111 @@ def get_available_models():
         return jsonify({
             'success': False,
             'error': str(e)
+        }), 500
+
+
+@app.route('/api/models/download_status', methods=['GET'])
+def get_models_download_status():
+    """Return offline-download availability for all catalog models (or one model)."""
+    try:
+        requested_model = request.args.get("model_name", type=str)
+        catalog_models = all_catalog_models()
+        catalog_set = set(catalog_models)
+
+        if requested_model:
+            if requested_model not in catalog_set:
+                return jsonify({
+                    "success": False,
+                    "error": f"Unknown model '{requested_model}'",
+                }), 404
+            model_paths = [requested_model]
+        else:
+            model_paths = catalog_models
+
+        status_payload = {
+            model_path: get_model_download_status(model_path)
+            for model_path in model_paths
+        }
+
+        return jsonify({
+            "success": True,
+            "models": status_payload,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
+
+
+@app.route('/api/models/predownload', methods=['POST'])
+def start_model_predownload():
+    """Start background pre-download for a selected model."""
+    try:
+        payload = request.json or {}
+        req = ModelPredownloadRequest(**payload)
+
+        catalog_set = set(all_catalog_models())
+        if req.model_name not in catalog_set:
+            return jsonify({
+                "success": False,
+                "error": f"Unknown model '{req.model_name}'",
+            }), 404
+
+        session_id = generate_session_id()
+        store_session_data(session_id, {
+            "session_id": session_id,
+            "model_name": req.model_name,
+            "task": "model_predownload",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        run_model_predownload(session_id, req.model_name)
+
+        return jsonify({
+            "success": True,
+            "session_id": session_id,
+            "model_name": req.model_name,
+            "message": f"Started pre-download for {req.model_name}",
+        })
+    except ValidationError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 400
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
+
+
+@app.route('/api/models/predownload_status/<session_id>', methods=['GET'])
+def get_model_predownload_status(session_id: str):
+    """Poll status for an active/completed pre-download task."""
+    try:
+        status_data = get_session_status(session_id)
+        progress = get_session_progress(session_id)
+        qstatus = get_stored_queue_status(session_id) or {}
+        session_data = get_session_data(session_id) or {}
+        status_value = status_data.get("status", "unknown")
+        progress = _derive_progress_from_queue_status(progress, status_value, qstatus)
+
+        response = {
+            "success": True,
+            "session_id": session_id,
+            "model_name": session_data.get("model_name"),
+            "status": status_value,
+            "progress": progress,
+            "queue_status": qstatus,
+        }
+        if status_value == "failed":
+            response["error"] = status_data.get("error", "Unknown error")
+        return jsonify(response)
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
         }), 500
 
 
