@@ -46,14 +46,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 @main
 struct GaryControlCenterApp: App {
+    private enum MenuBarIconStyle {
+        case brandColor
+        case monochrome
+    }
+
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var viewModel = ControlCenterViewModel()
+    private let menuBarIconName = "MenuBarIcon"
+    private let menuBarFallbackSymbolName = "waveform"
+    private let menuBarIconStyle: MenuBarIconStyle = .brandColor
 
     private func openMainWindow() {
         NSApp.activate(ignoringOtherApps: true)
         let opened = NSApp.sendAction(Selector(("newWindow:")), to: nil, from: nil)
         if !opened {
             NSApp.sendAction(#selector(NSApplication.arrangeInFront(_:)), to: nil, from: nil)
+        }
+    }
+
+    @ViewBuilder
+    private var menuBarIconLabel: some View {
+        if NSImage(named: NSImage.Name(menuBarIconName)) != nil {
+            switch menuBarIconStyle {
+            case .brandColor:
+                Image(menuBarIconName)
+                    .renderingMode(.original)
+                    .interpolation(.high)
+            case .monochrome:
+                Image(menuBarIconName)
+                    .renderingMode(.template)
+                    .interpolation(.high)
+            }
+        } else {
+            Image(systemName: menuBarFallbackSymbolName)
         }
     }
 
@@ -64,11 +90,14 @@ struct GaryControlCenterApp: App {
         }
         .defaultSize(width: 1180, height: 720)
 
-        MenuBarExtra("gary4local", systemImage: "slider.horizontal.3") {
+        MenuBarExtra {
             MenuBarContentView(
                 viewModel: viewModel,
                 onOpenMainWindow: openMainWindow
             )
+        } label: {
+            menuBarIconLabel
         }
+        .menuBarExtraStyle(.window)
     }
 }

@@ -687,6 +687,13 @@ final class ControlCenterViewModel: ObservableObject {
     private func bindManager(_ manager: ServiceManager) {
         managerCancellables.removeAll()
 
+        manager.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &managerCancellables)
+
         manager.$latestRebuildFailure
             .receive(on: DispatchQueue.main)
             .sink { [weak self] report in

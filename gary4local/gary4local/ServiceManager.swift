@@ -531,42 +531,75 @@ final class ServiceManager: ObservableObject {
                 writeLogLine("Repair mode: forcing venv recreation.", to: logHandle)
             }
             if !extraPipArguments.isEmpty {
-                writeLogLine("Repair mode: extra pip args: \(extraPipArguments.joined(separator: " "))", to: logHandle)
+                writeLogLine(
+                    "Repair mode: extra installer args: \(extraPipArguments.joined(separator: " "))",
+                    to: logHandle
+                )
             }
 
-            let pythonExecutable = try resolvePythonExecutable(
-                named: bootstrap.pythonExecutable,
-                environment: inheritedEnvironment
-            )
-            writeLogLine("Using python executable: \(pythonExecutable.path)", to: logHandle)
-
-            _ = try runCommand(
-                executable: pythonExecutable,
-                arguments: ["--version"],
-                currentDirectory: service.workingDirectory,
-                environment: inheritedEnvironment,
-                logHandle: logHandle
-            )
-
-            let versionCheckStatus = try runCommand(
-                executable: pythonExecutable,
-                arguments: [
-                    "-c",
-                    "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
-                ],
-                currentDirectory: service.workingDirectory,
-                environment: inheritedEnvironment,
-                logHandle: logHandle
-            )
-            if versionCheckStatus != 0 {
-                let message = "python 3.11+ is required. update bootstrap.python_executable for this service."
+            if !FileManager.default.fileExists(atPath: bootstrap.requirementsFile.path) {
+                let message = "requirements file not found: \(bootstrap.requirementsFile.path)"
                 writeLogLine(message, to: logHandle)
                 writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
                 return BootstrapRunResult(success: false, message: message)
             }
 
-            if !FileManager.default.fileExists(atPath: bootstrap.requirementsFile.path) {
-                let message = "requirements file not found: \(bootstrap.requirementsFile.path)"
+            let uvExecutable = ensureUVExecutable(
+                environment: inheritedEnvironment,
+                currentDirectory: service.workingDirectory,
+                logHandle: logHandle
+            )
+
+            var pythonExecutable: URL?
+            var pythonResolutionError: Error?
+            do {
+                pythonExecutable = try resolvePythonExecutable(
+                    named: bootstrap.pythonExecutable,
+                    environment: inheritedEnvironment
+                )
+            } catch {
+                pythonResolutionError = error
+                writeLogLine(
+                    "python executable not found for '\(bootstrap.pythonExecutable)': \(error.localizedDescription)",
+                    to: logHandle
+                )
+            }
+
+            if let pythonExecutable {
+                writeLogLine("Using python executable: \(pythonExecutable.path)", to: logHandle)
+
+                _ = try runCommand(
+                    executable: pythonExecutable,
+                    arguments: ["--version"],
+                    currentDirectory: service.workingDirectory,
+                    environment: inheritedEnvironment,
+                    logHandle: logHandle
+                )
+
+                let versionCheckStatus = try runCommand(
+                    executable: pythonExecutable,
+                    arguments: [
+                        "-c",
+                        "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
+                    ],
+                    currentDirectory: service.workingDirectory,
+                    environment: inheritedEnvironment,
+                    logHandle: logHandle
+                )
+                if versionCheckStatus != 0 {
+                    let message = "python 3.11+ is required. update bootstrap.python_executable for this service."
+                    writeLogLine(message, to: logHandle)
+                    writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
+                    return BootstrapRunResult(success: false, message: message)
+                }
+            } else if uvExecutable != nil {
+                writeLogLine(
+                    "Proceeding without direct python executable; uv will provision python for venv creation if needed.",
+                    to: logHandle
+                )
+            } else {
+                let message = pythonResolutionError?.localizedDescription
+                    ?? "python executable '\(bootstrap.pythonExecutable)' was not found."
                 writeLogLine(message, to: logHandle)
                 writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
                 return BootstrapRunResult(success: false, message: message)
@@ -616,13 +649,49 @@ final class ServiceManager: ObservableObject {
             }
 
             if shouldCreateVenv {
-                let createStatus = try runCommand(
-                    executable: pythonExecutable,
-                    arguments: ["-m", "venv", bootstrap.venvDirectory.path],
-                    currentDirectory: service.workingDirectory,
-                    environment: inheritedEnvironment,
-                    logHandle: logHandle
-                )
+                let createStatus: Int32
+                if let pythonExecutable {
+                    createStatus = try runCommand(
+                        executable: pythonExecutable,
+                        arguments: ["-m", "venv", bootstrap.venvDirectory.path],
+                        currentDirectory: service.workingDirectory,
+                        environment: inheritedEnvironment,
+                        logHandle: logHandle
+                    )
+                } else if let uvExecutable {
+                    let pythonVersion = requestedPythonVersionSpecifier(
+                        from: bootstrap.pythonExecutable
+                    ) ?? "3.11"
+                    let installStatus = try runCommand(
+                        executable: uvExecutable,
+                        arguments: ["python", "install", pythonVersion],
+                        currentDirectory: service.workingDirectory,
+                        environment: inheritedEnvironment,
+                        logHandle: logHandle
+                    )
+                    if installStatus != 0 {
+                        let message = "failed to install python \(pythonVersion) via uv (exit \(installStatus))."
+                        writeLogLine(message, to: logHandle)
+                        writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
+                        return BootstrapRunResult(success: false, message: message)
+                    }
+                    var createArguments = ["venv", "--python", pythonVersion]
+                    createArguments.append(bootstrap.venvDirectory.path)
+
+                    createStatus = try runCommand(
+                        executable: uvExecutable,
+                        arguments: createArguments,
+                        currentDirectory: service.workingDirectory,
+                        environment: inheritedEnvironment,
+                        logHandle: logHandle
+                    )
+                } else {
+                    let message = pythonResolutionError?.localizedDescription
+                        ?? "python executable '\(bootstrap.pythonExecutable)' was not found."
+                    writeLogLine(message, to: logHandle)
+                    writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
+                    return BootstrapRunResult(success: false, message: message)
+                }
                 if createStatus != 0 {
                     let message = "failed to create venv (exit \(createStatus))."
                     writeLogLine(message, to: logHandle)
@@ -636,6 +705,12 @@ final class ServiceManager: ObservableObject {
                 writeLogLine(message, to: logHandle)
                 writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
                 return BootstrapRunResult(success: false, message: message)
+            }
+
+            if let uvExecutable {
+                writeLogLine("Using uv for dependency installation: \(uvExecutable.path)", to: logHandle)
+            } else {
+                writeLogLine("uv not found; falling back to pip for dependency installation.", to: logHandle)
             }
 
             if bootstrap.upgradeBuildTools {
@@ -654,18 +729,36 @@ final class ServiceManager: ObservableObject {
                 }
             }
 
-            var installArguments = ["-m", "pip", "install"]
-            installArguments.append(contentsOf: bootstrap.pipArguments)
-            installArguments.append(contentsOf: extraPipArguments)
-            installArguments.append(contentsOf: ["-r", bootstrap.requirementsFile.path])
+            let installArgs = bootstrap.pipArguments + extraPipArguments
 
-            let installStatus = try runCommand(
-                executable: venvPython,
-                arguments: installArguments,
-                currentDirectory: service.workingDirectory,
-                environment: inheritedEnvironment,
-                logHandle: logHandle
-            )
+            let installStatus: Int32
+            if let uvExecutable {
+                var uvInstallArguments = ["pip", "install", "--python", venvPython.path]
+                uvInstallArguments.append(
+                    contentsOf: normalizeInstallerArgumentsForUV(installArgs, logHandle: logHandle)
+                )
+                uvInstallArguments.append(contentsOf: ["-r", bootstrap.requirementsFile.path])
+
+                installStatus = try runCommand(
+                    executable: uvExecutable,
+                    arguments: uvInstallArguments,
+                    currentDirectory: service.workingDirectory,
+                    environment: inheritedEnvironment,
+                    logHandle: logHandle
+                )
+            } else {
+                var pipInstallArguments = ["-m", "pip", "install"]
+                pipInstallArguments.append(contentsOf: installArgs)
+                pipInstallArguments.append(contentsOf: ["-r", bootstrap.requirementsFile.path])
+
+                installStatus = try runCommand(
+                    executable: venvPython,
+                    arguments: pipInstallArguments,
+                    currentDirectory: service.workingDirectory,
+                    environment: inheritedEnvironment,
+                    logHandle: logHandle
+                )
+            }
             if installStatus != 0 {
                 let message = "dependency install failed (exit \(installStatus))."
                 writeLogLine(message, to: logHandle)
@@ -681,6 +774,173 @@ final class ServiceManager: ObservableObject {
         } catch {
             return BootstrapRunResult(success: false, message: error.localizedDescription)
         }
+    }
+
+    nonisolated private static func ensureUVExecutable(
+        environment: [String: String],
+        currentDirectory: URL,
+        logHandle: FileHandle
+    ) -> URL? {
+        if let existing = resolveOptionalExecutable(named: "uv", environment: environment) {
+            return existing
+        }
+
+        guard let installDirectory = managedUVInstallDirectory(environment: environment) else {
+            writeLogLine("uv bootstrap skipped: HOME is unavailable.", to: logHandle)
+            return nil
+        }
+
+        do {
+            try FileManager.default.createDirectory(
+                at: installDirectory,
+                withIntermediateDirectories: true
+            )
+        } catch {
+            writeLogLine(
+                "uv bootstrap skipped: failed to create install directory \(installDirectory.path): \(error.localizedDescription)",
+                to: logHandle
+            )
+            return nil
+        }
+
+        var installerEnvironment = environment
+        installerEnvironment["UV_UNMANAGED_INSTALL"] = installDirectory.path
+        installerEnvironment["PATH"] = (environment["PATH"]?.isEmpty == false)
+            ? environment["PATH"]
+            : "/usr/bin:/bin:/usr/sbin:/sbin"
+
+        writeLogLine("uv not found. bootstrapping uv into \(installDirectory.path)...", to: logHandle)
+
+        do {
+            let installStatus = try runCommand(
+                executable: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"],
+                currentDirectory: currentDirectory,
+                environment: installerEnvironment,
+                logHandle: logHandle
+            )
+            guard installStatus == 0 else {
+                writeLogLine("uv bootstrap failed (exit \(installStatus)); using pip fallback.", to: logHandle)
+                return nil
+            }
+        } catch {
+            writeLogLine("uv bootstrap failed: \(error.localizedDescription)", to: logHandle)
+            return nil
+        }
+
+        let directCandidates = [
+            installDirectory.appendingPathComponent("uv"),
+            installDirectory
+                .appendingPathComponent("bin", isDirectory: true)
+                .appendingPathComponent("uv")
+        ]
+        for candidate in directCandidates where FileManager.default.isExecutableFile(atPath: candidate.path) {
+            writeLogLine("uv bootstrap succeeded: \(candidate.path)", to: logHandle)
+            return candidate
+        }
+
+        var environmentWithManagedPath = environment
+        let managedPaths = [
+            installDirectory.path,
+            installDirectory.appendingPathComponent("bin").path
+        ]
+        let existingPath = environmentWithManagedPath["PATH"] ?? ""
+        environmentWithManagedPath["PATH"] = managedPaths.joined(separator: ":")
+            + (existingPath.isEmpty ? "" : ":\(existingPath)")
+
+        if let resolved = resolveOptionalExecutable(named: "uv", environment: environmentWithManagedPath) {
+            writeLogLine("uv bootstrap succeeded: \(resolved.path)", to: logHandle)
+            return resolved
+        }
+
+        writeLogLine("uv bootstrap completed but uv executable was not found in expected locations.", to: logHandle)
+        return nil
+    }
+
+    nonisolated private static func managedUVInstallDirectory(
+        environment: [String: String]
+    ) -> URL? {
+        guard let home = environment["HOME"], !home.isEmpty else { return nil }
+        return URL(fileURLWithPath: home, isDirectory: true)
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Application Support", isDirectory: true)
+            .appendingPathComponent("gary4local", isDirectory: true)
+            .appendingPathComponent("tools", isDirectory: true)
+            .appendingPathComponent("uv", isDirectory: true)
+    }
+
+    nonisolated private static func requestedPythonVersionSpecifier(
+        from executableName: String
+    ) -> String? {
+        let trimmed = executableName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("python") else { return nil }
+        let suffix = String(trimmed.dropFirst("python".count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !suffix.isEmpty else { return nil }
+        return suffix
+    }
+
+    nonisolated private static func resolveOptionalExecutable(
+        named executableName: String,
+        environment: [String: String]
+    ) -> URL? {
+        let expandedExecutable = NSString(string: executableName).expandingTildeInPath
+        let fileManager = FileManager.default
+
+        if expandedExecutable.contains("/") {
+            let directURL = URL(fileURLWithPath: expandedExecutable).standardizedFileURL
+            return fileManager.isExecutableFile(atPath: directURL.path) ? directURL : nil
+        }
+
+        var searchPaths: [String] = []
+        if let rawPath = environment["PATH"], !rawPath.isEmpty {
+            searchPaths.append(contentsOf: rawPath.split(separator: ":").map(String.init))
+        }
+        if let home = environment["HOME"], !home.isEmpty {
+            searchPaths.append("\(home)/.local/bin")
+            searchPaths.append("\(home)/Library/Application Support/gary4local/tools/uv")
+            searchPaths.append("\(home)/Library/Application Support/gary4local/tools/uv/bin")
+        }
+
+        searchPaths.append(contentsOf: [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin"
+        ])
+
+        var seen = Set<String>()
+        let uniquePaths = searchPaths.filter { seen.insert($0).inserted }
+
+        for path in uniquePaths {
+            let candidateURL = URL(fileURLWithPath: path)
+                .appendingPathComponent(expandedExecutable)
+                .standardizedFileURL
+            if fileManager.isExecutableFile(atPath: candidateURL.path) {
+                return candidateURL
+            }
+        }
+
+        return nil
+    }
+
+    nonisolated private static func normalizeInstallerArgumentsForUV(
+        _ arguments: [String],
+        logHandle: FileHandle
+    ) -> [String] {
+        var normalized: [String] = []
+        normalized.reserveCapacity(arguments.count)
+
+        for argument in arguments {
+            if argument == "--no-cache-dir" {
+                normalized.append("--no-cache")
+                writeLogLine("Translated --no-cache-dir to --no-cache for uv.", to: logHandle)
+            } else {
+                normalized.append(argument)
+            }
+        }
+
+        return normalized
     }
 
     nonisolated private static func resolvePythonExecutable(

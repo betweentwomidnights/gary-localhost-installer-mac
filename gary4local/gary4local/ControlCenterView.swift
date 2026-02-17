@@ -307,7 +307,7 @@ private struct RebuildFailureSheet: View {
                             Button("repair again") { viewModel.retryRebuildFailure() }
                                 .help("rerun dependency repair using the current environment.")
                             Button("repair from scratch") { viewModel.cleanRepairRebuildFailure() }
-                                .help("recreate the environment and install dependencies with --no-cache-dir.")
+                                .help("recreate the environment and install dependencies without cache.")
                             Spacer()
                         }
                     }
@@ -968,17 +968,21 @@ struct MenuBarContentView: View {
     let onOpenMainWindow: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
             if let manager = viewModel.manager {
+                Text("services")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 ForEach(manager.services) { runtime in
-                    HStack {
-                        StatusDot(processState: runtime.processState, healthState: runtime.healthState)
-                        Text(displayName(for: runtime))
-                        Spacer()
+                    MenuBarServiceRow(
+                        runtime: runtime,
+                        displayName: displayName(for: runtime)
+                    ) {
                         if runtime.isRunning {
-                            Button("stop") { manager.stop(serviceID: runtime.id) }
+                            manager.stop(serviceID: runtime.id)
                         } else {
-                            Button("start") { manager.start(serviceID: runtime.id) }
+                            manager.start(serviceID: runtime.id)
                         }
                     }
                 }
@@ -990,21 +994,85 @@ struct MenuBarContentView: View {
             }
 
             Divider()
-            Button("open control center", action: onOpenMainWindow)
-            if let manager = viewModel.manager {
-                Button(
-                    manager.isRebuildingAllEnvironments
-                    ? "rebuilding all envs..."
-                    : "rebuild all envs"
-                ) {
-                    manager.rebuildAllEnvironments()
-                }
-                .disabled(manager.isRebuildingAllEnvironments)
+            HStack {
+                Button("open control center", action: onOpenMainWindow)
+                Spacer()
+                Button("quit") { NSApp.terminate(nil) }
             }
-            Button("quit") { NSApp.terminate(nil) }
         }
         .padding(12)
         .frame(minWidth: 360)
+    }
+}
+
+private struct MenuBarServiceRow: View {
+    let runtime: ServiceRuntime
+    let displayName: String
+    let onToggleRunning: () -> Void
+
+    private var actionLabel: String {
+        runtime.isRunning ? "stop" : "start"
+    }
+
+    private var actionRole: ButtonRole? {
+        runtime.isRunning ? .destructive : nil
+    }
+
+    private var actionDisabled: Bool {
+        runtime.isBootstrapping || runtime.processState == .starting || runtime.processState == .stopping
+    }
+
+    private var statusMessage: String {
+        if runtime.bootstrapState == .running {
+            return "rebuilding environment..."
+        }
+        if runtime.bootstrapState == .failed {
+            return "environment rebuild failed"
+        }
+
+        switch runtime.processState {
+        case .running:
+            switch runtime.healthState {
+            case .healthy:
+                return "running / healthy"
+            case .unhealthy:
+                return "running / unhealthy"
+            case .unknown:
+                return "running / checking health"
+            }
+        case .starting:
+            return "starting..."
+        case .stopping:
+            return "stopping..."
+        case .failed:
+            return "failed"
+        case .stopped:
+            return "stopped"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            StatusDot(processState: runtime.processState, healthState: runtime.healthState)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(displayName)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                Text(statusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Button(actionLabel, role: actionRole, action: onToggleRunning)
+                .controlSize(.small)
+                .disabled(actionDisabled)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.primary.opacity(0.08))
+        )
     }
 }
 
