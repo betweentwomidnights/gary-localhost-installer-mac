@@ -97,10 +97,17 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var stableAudioBackendEngine: StableAudioBackendEngine = .mps
     @Published var melodyFlowBackendEngine: MelodyFlowBackendEngine = .mps
     @Published var melodyFlowBackendStatus: String = ""
+    @Published var rebuildFailureReport: RebuildFailureReport?
+    @Published var rebuildDiagnosticsStatusMessage: String = ""
+    @Published var isRequirementsEditorPresented: Bool = false
+    @Published var requirementsEditorPath: String = ""
+    @Published var requirementsEditorText: String = ""
+    @Published var requirementsEditorStatusMessage: String = ""
 
     private var logRefreshTask: Task<Void, Never>?
     private var modelDownloadPollTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
+    private var managerCancellables = Set<AnyCancellable>()
     private var isLogRefreshInFlight = false
     private var pendingForcedLogRefresh = false
     private var lastLogMetadataByService: [String: LogMetadata] = [:]
@@ -239,6 +246,9 @@ final class ControlCenterViewModel: ObservableObject {
         isModelDownloadInProgress = false
         activeModelDownloadPath = nil
         activeModelDownloadSessionID = nil
+        rebuildFailureReport = nil
+        rebuildDiagnosticsStatusMessage = ""
+        managerCancellables.removeAll()
 
         let defaultURL = ManifestLoader.defaultManifestURL()
         manifestPath = defaultURL.path
@@ -251,6 +261,7 @@ final class ControlCenterViewModel: ObservableObject {
             manager.setStableAudioBackendEngine(stableAudioBackendEngine.rawValue, restartIfRunning: false)
             manager.setMelodyFlowBackendEngine(melodyFlowBackendEngine.rawValue, restartIfRunning: false)
             self.manager = manager
+            bindManager(manager)
             startupError = nil
             selectedServiceID = manager.services.first?.id
             selectedLogText = ""
@@ -261,6 +272,7 @@ final class ControlCenterViewModel: ObservableObject {
             requestLogRefresh(force: true)
         } catch {
             self.manager = nil
+            managerCancellables.removeAll()
             startupError = error.localizedDescription
             selectedLogText = ""
             lastLogMetadataByService.removeAll()
@@ -270,6 +282,133 @@ final class ControlCenterViewModel: ObservableObject {
             modelDownloadStatusMessage = ""
             isModelCatalogLoading = false
         }
+    }
+
+    func clearRebuildFailureReport() {
+        manager?.clearLatestRebuildFailure()
+        rebuildFailureReport = nil
+        rebuildDiagnosticsStatusMessage = ""
+        isRequirementsEditorPresented = false
+        requirementsEditorStatusMessage = ""
+    }
+
+    func openRebuildFailureLogFile() {
+        guard let report = rebuildFailureReport else { return }
+        NSWorkspace.shared.open(report.logFile)
+    }
+
+    func openRebuildFailureRequirementsFile() {
+        guard let report = rebuildFailureReport,
+              let requirementsFile = resolvedRequirementsFile(for: report) else { return }
+        NSWorkspace.shared.open(requirementsFile)
+    }
+
+    func copyRebuildFailureDiagnostics() {
+        guard let report = rebuildFailureReport else { return }
+        copyTextToPasteboard(diagnosticsReportText(for: report))
+        rebuildDiagnosticsStatusMessage = "diagnostics copied."
+    }
+
+    func openSupportEmail() {
+        guard let report = rebuildFailureReport else { return }
+        let subject = "gary4local repair help (\(report.serviceID))"
+        let diagnostics = diagnosticsReportText(for: report)
+        let fullBody = """
+        service: \(report.serviceID)
+        summary: \(report.summary)
+
+        diagnostics:
+
+        \(diagnostics)
+        """
+
+        if let url = supportEmailURL(subject: subject, body: fullBody) {
+            NSWorkspace.shared.open(url)
+            return
+        }
+
+        let truncatedBody = String(fullBody.prefix(6000)) + "\n\n[diagnostics truncated in draft]"
+        if let url = supportEmailURL(subject: subject, body: truncatedBody) {
+            copyTextToPasteboard(diagnostics)
+            rebuildDiagnosticsStatusMessage = "email draft opened with shortened diagnostics. full diagnostics copied."
+            NSWorkspace.shared.open(url)
+            return
+        }
+
+        copyTextToPasteboard(diagnostics)
+        rebuildDiagnosticsStatusMessage = "could not open email draft. diagnostics copied."
+    }
+
+    func openSupportDiscord() {
+        guard let url = URL(string: "https://discord.gg/xUkpsKNvM6") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    private func supportEmailURL(subject: String, body: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = "mailto"
+        components.path = "kev@thecollabagepatch.com"
+        components.queryItems = [
+            URLQueryItem(name: "subject", value: subject),
+            URLQueryItem(name: "body", value: body)
+        ]
+        return components.url
+    }
+
+    private func copyTextToPasteboard(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
+    func retryRebuildFailure() {
+        guard let report = rebuildFailureReport else { return }
+        rebuildDiagnosticsStatusMessage = "running repair again..."
+        manager?.rebuildEnvironment(serviceID: report.serviceID)
+    }
+
+    func cleanRepairRebuildFailure() {
+        guard let report = rebuildFailureReport else { return }
+        rebuildDiagnosticsStatusMessage = "starting repair from scratch..."
+        manager?.rebuildEnvironment(
+            serviceID: report.serviceID,
+            forceRecreateVenv: true,
+            extraPipArguments: ["--no-cache-dir"]
+        )
+    }
+
+    func openRebuildFailureRequirementsEditor() {
+        guard let report = rebuildFailureReport,
+              let requirementsFile = resolvedRequirementsFile(for: report) else { return }
+        do {
+            requirementsEditorText = try String(contentsOf: requirementsFile, encoding: .utf8)
+            requirementsEditorPath = requirementsFile.path
+            requirementsEditorStatusMessage = ""
+            isRequirementsEditorPresented = true
+        } catch {
+            rebuildDiagnosticsStatusMessage = "failed to open requirements: \(error.localizedDescription)"
+        }
+    }
+
+    func saveRequirementsEditor() {
+        guard !requirementsEditorPath.isEmpty else { return }
+        do {
+            try requirementsEditorText.write(
+                toFile: requirementsEditorPath,
+                atomically: true,
+                encoding: .utf8
+            )
+            requirementsEditorStatusMessage = ""
+            isRequirementsEditorPresented = false
+            rebuildDiagnosticsStatusMessage = "requirements saved. run repair again."
+        } catch {
+            requirementsEditorStatusMessage = error.localizedDescription
+        }
+    }
+
+    func closeRequirementsEditor() {
+        isRequirementsEditorPresented = false
+        requirementsEditorStatusMessage = ""
     }
 
     func selectService(_ serviceID: String) {
@@ -543,6 +682,166 @@ final class ControlCenterViewModel: ObservableObject {
         .map(\.path) ?? []
 
         stableAudioStep2ScreenshotPath = preferredStep2Screenshot(from: paths)
+    }
+
+    private func bindManager(_ manager: ServiceManager) {
+        managerCancellables.removeAll()
+
+        manager.$latestRebuildFailure
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] report in
+                guard let self else { return }
+                self.rebuildFailureReport = report
+                if report == nil {
+                    self.rebuildDiagnosticsStatusMessage = ""
+                }
+            }
+            .store(in: &managerCancellables)
+    }
+
+    func diagnosticsReportText(for report: RebuildFailureReport) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+
+        var lines: [String] = []
+        lines.append("gary4local rebuild diagnostics")
+        lines.append("timestamp: \(formatter.string(from: report.createdAt))")
+        lines.append("service_id: \(report.serviceID)")
+        lines.append("service_name: \(report.serviceName)")
+        lines.append("summary: \(report.summary)")
+        lines.append("manifest_path: \(manifestPath)")
+        lines.append("working_directory: \(report.workingDirectory.path)")
+        lines.append("log_file: \(report.logFile.path)")
+        if let pythonExecutable = report.pythonExecutable {
+            lines.append("python_executable: \(pythonExecutable)")
+        }
+        if let requirementsFile = report.requirementsFile {
+            lines.append("requirements_file: \(requirementsFile.path)")
+            if let editableRequirementsFile = resolvedRequirementsFile(for: report),
+               editableRequirementsFile.path != requirementsFile.path {
+                lines.append("editable_requirements_file: \(editableRequirementsFile.path)")
+            }
+        }
+        if let venvDirectory = report.venvDirectory {
+            lines.append("venv_directory: \(venvDirectory.path)")
+        }
+        lines.append("")
+        lines.append("---- recent log tail ----")
+        if report.logTail.isEmpty {
+            lines.append("(no log output)")
+        } else {
+            lines.append(report.logTail)
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func resolvedRequirementsFile(for report: RebuildFailureReport) -> URL? {
+        guard let requirementsFile = report.requirementsFile else {
+            return nil
+        }
+        return resolveLeafRequirementsFile(startingAt: requirementsFile)
+    }
+
+    private func resolveLeafRequirementsFile(startingAt root: URL, maxDepth: Int = 6) -> URL {
+        var current = root.standardizedFileURL
+        let fileManager = FileManager.default
+
+        for _ in 0..<maxDepth {
+            guard fileManager.fileExists(atPath: current.path),
+                  let contents = try? String(contentsOf: current, encoding: .utf8) else {
+                return current
+            }
+
+            let parsed = parseRequirements(contents)
+            guard !parsed.includePaths.isEmpty, !parsed.hasDirectPackages else {
+                return current
+            }
+
+            guard let firstIncludePath = parsed.includePaths.first else {
+                return current
+            }
+
+            if firstIncludePath.contains("://") {
+                return current
+            }
+
+            let next: URL
+            if firstIncludePath.hasPrefix("/") {
+                next = URL(fileURLWithPath: firstIncludePath).standardizedFileURL
+            } else {
+                next = current
+                    .deletingLastPathComponent()
+                    .appendingPathComponent(firstIncludePath)
+                    .standardizedFileURL
+            }
+
+            guard fileManager.fileExists(atPath: next.path), next.path != current.path else {
+                return current
+            }
+            current = next
+        }
+
+        return current
+    }
+
+    private func parseRequirements(_ contents: String) -> (includePaths: [String], hasDirectPackages: Bool) {
+        var includePaths: [String] = []
+        var hasDirectPackages = false
+
+        for rawLine in contents.split(whereSeparator: \.isNewline) {
+            var line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+
+            if let hashIndex = line.firstIndex(of: "#") {
+                line = String(line[..<hashIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if line.isEmpty { continue }
+            }
+
+            let tokens = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+            guard let first = tokens.first else { continue }
+
+            if first == "-r" || first == "--requirement" {
+                if tokens.count >= 2 {
+                    includePaths.append(cleanRequirementsPathToken(tokens[1]))
+                }
+                continue
+            }
+            if first.hasPrefix("-r"), first != "-r" {
+                includePaths.append(cleanRequirementsPathToken(String(first.dropFirst(2))))
+                continue
+            }
+            if first.hasPrefix("--requirement=") {
+                includePaths.append(
+                    cleanRequirementsPathToken(
+                        String(first.dropFirst("--requirement=".count))
+                    )
+                )
+                continue
+            }
+
+            if first == "-c" || first == "--constraint" ||
+                first.hasPrefix("-c") || first.hasPrefix("--constraint=") {
+                continue
+            }
+
+            hasDirectPackages = true
+            break
+        }
+
+        return (includePaths: includePaths, hasDirectPackages: hasDirectPackages)
+    }
+
+    private func cleanRequirementsPathToken(_ token: String) -> String {
+        var cleaned = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.hasPrefix("\""), cleaned.hasSuffix("\""), cleaned.count >= 2 {
+            cleaned.removeFirst()
+            cleaned.removeLast()
+        } else if cleaned.hasPrefix("'"), cleaned.hasSuffix("'"), cleaned.count >= 2 {
+            cleaned.removeFirst()
+            cleaned.removeLast()
+        }
+        return cleaned
     }
 
     private func preferredStep2Screenshot(from paths: [String]) -> String? {

@@ -58,13 +58,13 @@ struct GaryControlCenterApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("Gary Localhost Control Center") {
+        WindowGroup("gary4local") {
             ControlCenterView(viewModel: viewModel)
                 .frame(minWidth: 980, minHeight: 620)
         }
         .defaultSize(width: 1180, height: 720)
 
-        MenuBarExtra("Gary Localhost", systemImage: "slider.horizontal.3") {
+        MenuBarExtra("gary4local", systemImage: "slider.horizontal.3") {
             MenuBarContentView(
                 viewModel: viewModel,
                 onOpenMainWindow: openMainWindow

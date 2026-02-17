@@ -801,7 +801,7 @@ class StreamingTransformer(StreamingModule):
 def _verify_xformers_memory_efficient_compat():
     """Verify xformers memory efficient attention compatibility - now gracefully handles missing xformers."""
     if not _has_xformers:
-        print("⚠️ Memory efficient attention requested, but xformers not installed. Using PyTorch scaled_dot_product_attention.")
+        # xformers is optional on Apple Silicon; fallback is expected and can be noisy per-generation.
         return
     
     try:

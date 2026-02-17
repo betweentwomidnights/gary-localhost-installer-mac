@@ -40,10 +40,25 @@ struct LogTailSnapshot {
     let modificationDate: Date?
 }
 
+struct RebuildFailureReport: Identifiable {
+    let id = UUID()
+    let createdAt: Date
+    let serviceID: String
+    let serviceName: String
+    let summary: String
+    let logFile: URL
+    let workingDirectory: URL
+    let pythonExecutable: String?
+    let requirementsFile: URL?
+    let venvDirectory: URL?
+    let logTail: String
+}
+
 @MainActor
 final class ServiceManager: ObservableObject {
     @Published private(set) var services: [ServiceRuntime]
     @Published private(set) var isRebuildingAllEnvironments = false
+    @Published private(set) var latestRebuildFailure: RebuildFailureReport?
 
     private let manifest: ResolvedManifest
     private var stableAudioBackendEngine = "mps"
@@ -121,6 +136,10 @@ final class ServiceManager: ObservableObject {
         for (_, handle) in logHandles {
             try? handle.close()
         }
+    }
+
+    func clearLatestRebuildFailure() {
+        latestRebuildFailure = nil
     }
 
     func shutdownForApplicationTermination() {
@@ -313,9 +332,14 @@ final class ServiceManager: ObservableObject {
         startHealthMonitor(for: service)
     }
 
-    func rebuildEnvironment(serviceID: String) {
+    func rebuildEnvironment(
+        serviceID: String,
+        forceRecreateVenv: Bool = false,
+        extraPipArguments: [String] = []
+    ) {
         guard let index = indexForService(serviceID) else { return }
         guard bootstrapTasks[serviceID] == nil else { return }
+        latestRebuildFailure = nil
 
         guard processes[serviceID]?.isRunning != true else {
             services[index].bootstrapState = .failed
@@ -330,7 +354,9 @@ final class ServiceManager: ObservableObject {
         }
 
         services[index].bootstrapState = .running
-        services[index].bootstrapMessage = "Rebuilding environment..."
+        services[index].bootstrapMessage = forceRecreateVenv
+            ? "Running clean environment repair..."
+            : "Rebuilding environment..."
         services[index].lastError = nil
 
         let service = services[index].service
@@ -341,7 +367,9 @@ final class ServiceManager: ObservableObject {
                 Self.runBootstrap(
                     service: service,
                     bootstrap: bootstrap,
-                    inheritedEnvironment: inheritedEnvironment
+                    inheritedEnvironment: inheritedEnvironment,
+                    forceRecreateVenv: forceRecreateVenv,
+                    extraPipArguments: extraPipArguments
                 )
             }.value
 
@@ -354,11 +382,38 @@ final class ServiceManager: ObservableObject {
                 self.services[latestIndex].bootstrapMessage = result.message
                 if !result.success {
                     self.services[latestIndex].lastError = result.message
+                    self.latestRebuildFailure = self.makeRebuildFailureReport(
+                        service: self.services[latestIndex].service,
+                        summary: result.message
+                    )
                 }
             }
         }
 
         bootstrapTasks[serviceID] = task
+    }
+
+    private func makeRebuildFailureReport(
+        service: ResolvedService,
+        summary: String
+    ) -> RebuildFailureReport {
+        let snapshot = Self.readLogTailSnapshot(
+            at: service.logFile,
+            maxLines: 220,
+            maxBytes: 192_000
+        )
+        return RebuildFailureReport(
+            createdAt: Date(),
+            serviceID: service.id,
+            serviceName: service.name,
+            summary: summary,
+            logFile: service.logFile,
+            workingDirectory: service.workingDirectory,
+            pythonExecutable: service.bootstrap?.pythonExecutable,
+            requirementsFile: service.bootstrap?.requirementsFile,
+            venvDirectory: service.bootstrap?.venvDirectory,
+            logTail: snapshot.text
+        )
     }
 
     func rebuildAllEnvironments() {
@@ -461,7 +516,9 @@ final class ServiceManager: ObservableObject {
     nonisolated private static func runBootstrap(
         service: ResolvedService,
         bootstrap: ResolvedBootstrapConfig,
-        inheritedEnvironment: [String: String]
+        inheritedEnvironment: [String: String],
+        forceRecreateVenv: Bool,
+        extraPipArguments: [String]
     ) -> BootstrapRunResult {
         do {
             let logURL = try prepareLogFile(at: service.logFile)
@@ -470,6 +527,12 @@ final class ServiceManager: ObservableObject {
             logHandle.seekToEndOfFile()
 
             writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild started ----", to: logHandle)
+            if forceRecreateVenv {
+                writeLogLine("Repair mode: forcing venv recreation.", to: logHandle)
+            }
+            if !extraPipArguments.isEmpty {
+                writeLogLine("Repair mode: extra pip args: \(extraPipArguments.joined(separator: " "))", to: logHandle)
+            }
 
             let pythonExecutable = try resolvePythonExecutable(
                 named: bootstrap.pythonExecutable,
@@ -512,6 +575,20 @@ final class ServiceManager: ObservableObject {
             let venvPython = bootstrap.venvDirectory.appendingPathComponent("bin/python")
             let fileManager = FileManager.default
             var shouldCreateVenv = !fileManager.fileExists(atPath: bootstrap.venvDirectory.path)
+
+            if forceRecreateVenv,
+               fileManager.fileExists(atPath: bootstrap.venvDirectory.path) {
+                writeLogLine("Removing existing venv: \(bootstrap.venvDirectory.path)", to: logHandle)
+                do {
+                    try fileManager.removeItem(at: bootstrap.venvDirectory)
+                } catch {
+                    let message = "Failed to remove existing venv: \(error.localizedDescription)"
+                    writeLogLine(message, to: logHandle)
+                    writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
+                    return BootstrapRunResult(success: false, message: message)
+                }
+                shouldCreateVenv = true
+            }
 
             if !shouldCreateVenv {
                 writeLogLine("Using existing venv: \(bootstrap.venvDirectory.path)", to: logHandle)
@@ -579,6 +656,7 @@ final class ServiceManager: ObservableObject {
 
             var installArguments = ["-m", "pip", "install"]
             installArguments.append(contentsOf: bootstrap.pipArguments)
+            installArguments.append(contentsOf: extraPipArguments)
             installArguments.append(contentsOf: ["-r", bootstrap.requirementsFile.path])
 
             let installStatus = try runCommand(

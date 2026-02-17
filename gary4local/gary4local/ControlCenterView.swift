@@ -9,15 +9,15 @@ struct ControlCenterView: View {
         Group {
             if let error = viewModel.startupError {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Control Center failed to load manifest.")
+                    Text("control center failed to load manifest.")
                         .font(.title3.weight(.semibold))
                     Text(error)
                         .font(.body.monospaced())
-                    Text("Manifest path:")
+                    Text("manifest path:")
                         .font(.caption)
                     Text(viewModel.manifestPath)
                         .font(.caption.monospaced())
-                    Button("Retry") { viewModel.loadManifest() }
+                    Button("retry") { viewModel.loadManifest() }
                 }
                 .padding(20)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -37,13 +37,14 @@ struct ControlCenterView: View {
         .sheet(isPresented: $viewModel.isModelDownloadSheetPresented) {
             ModelDownloadSheet(viewModel: viewModel)
         }
+        .sheet(item: $viewModel.rebuildFailureReport) { report in
+            RebuildFailureSheet(viewModel: viewModel, report: report)
+        }
     }
 
     @ViewBuilder
     private func serviceList(manager: ServiceManager) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Gary Localhost Services")
-                .font(.title3.weight(.semibold))
             Text(viewModel.manifestPath)
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
@@ -51,28 +52,28 @@ struct ControlCenterView: View {
             HStack {
                 Button(
                     manager.isRebuildingAllEnvironments
-                    ? "Rebuilding Environments..."
-                    : "Rebuild All Environments"
+                    ? "rebuilding environments..."
+                    : "rebuild all environments"
                 ) {
                     manager.rebuildAllEnvironments()
                 }
                 .disabled(manager.isRebuildingAllEnvironments || manager.services.isEmpty)
-                Button("Download Models...") {
-                    viewModel.openModelDownloadSheet()
-                }
-                .disabled(manager.services.first(where: { $0.id == "audiocraft_mlx" }) == nil)
                 Spacer()
             }
 
             List(manager.services) { runtime in
                 ServiceRow(
                     runtime: runtime,
+                    displayName: displayName(for: runtime),
                     isSelected: viewModel.selectedServiceID == runtime.id,
                     onSelect: { viewModel.selectService(runtime.id) },
                     onStart: { manager.start(serviceID: runtime.id) },
                     onStop: { manager.stop(serviceID: runtime.id) },
                     onRestart: { manager.restart(serviceID: runtime.id) },
-                    onRebuildEnv: { manager.rebuildEnvironment(serviceID: runtime.id) }
+                    onRebuildEnv: { manager.rebuildEnvironment(serviceID: runtime.id) },
+                    onDownloadModels: runtime.id == "audiocraft_mlx" ? {
+                        viewModel.openModelDownloadSheet()
+                    } : nil
                 )
             }
             .listStyle(.inset)
@@ -93,7 +94,7 @@ struct ControlCenterView: View {
                     Divider()
                 }
 
-                Text("Logs: \(runtime.service.name)")
+                Text("logs: \(displayName(for: runtime))")
                     .font(.headline)
                 Text(runtime.service.logFile.path)
                     .font(.caption.monospaced())
@@ -112,13 +113,13 @@ struct ControlCenterView: View {
                 )
 
                 HStack {
-                    Button("Refresh") { viewModel.refreshLog() }
-                    Button("Open Log File") { NSWorkspace.shared.open(runtime.service.logFile) }
+                    Button("refresh") { viewModel.refreshLog() }
+                    Button("open log file") { NSWorkspace.shared.open(runtime.service.logFile) }
                     Spacer()
-                    Button("Clear Selection") { viewModel.selectedServiceID = nil }
+                    Button("clear selection") { viewModel.selectedServiceID = nil }
                 }
             } else {
-                Text("Select a service to view logs.")
+                Text("select a service to view logs.")
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
@@ -129,7 +130,7 @@ struct ControlCenterView: View {
     @ViewBuilder
     private func stableAudioAuthPanel() -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Stable Audio Access Setup")
+            Text("jerry backend")
                 .font(.headline)
             Text(
                 viewModel.stableAudioTokenConfigured
@@ -140,7 +141,7 @@ struct ControlCenterView: View {
             .foregroundStyle(viewModel.stableAudioTokenConfigured ? .green : .orange)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Generation Backend")
+                Text("generation backend")
                     .font(.subheadline)
                 Picker("Generation Backend", selection: Binding(
                     get: { viewModel.stableAudioBackendEngine },
@@ -151,6 +152,7 @@ struct ControlCenterView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                .labelsHidden()
                 Text("Applies to localhost generation default. Changing this restarts Stable Audio if it's running.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -160,7 +162,7 @@ struct ControlCenterView: View {
                 stepRow(
                     number: 1,
                     title: "Open model page and click 'Agree and access repository'",
-                    buttonTitle: "Open Stable Audio Page",
+                    buttonTitle: "open stable audio page",
                     isEnabled: true
                 ) {
                     NSWorkspace.shared.open(StableAudioAuthLinks.modelPage)
@@ -169,7 +171,7 @@ struct ControlCenterView: View {
                 stepRow(
                     number: 2,
                     title: "Create a read token on Hugging Face",
-                    buttonTitle: "Open Token Settings",
+                    buttonTitle: "open token settings",
                     isEnabled: true
                 ) {
                     NSWorkspace.shared.open(StableAudioAuthLinks.tokenPage)
@@ -193,11 +195,11 @@ struct ControlCenterView: View {
 
             HStack {
                 if !viewModel.stableAudioTokenConfigured {
-                    Button("Save Token") { viewModel.saveStableAudioToken() }
+                    Button("save token") { viewModel.saveStableAudioToken() }
                 }
-                Button("Remove Token", role: .destructive) { viewModel.clearStableAudioToken() }
+                Button("remove token", role: .destructive) { viewModel.clearStableAudioToken() }
                     .disabled(!viewModel.stableAudioTokenConfigured)
-                Button("Refresh Token Status") { viewModel.refreshStableAudioTokenState() }
+                Button("refresh token status") { viewModel.refreshStableAudioTokenState() }
                 Spacer()
             }
 
@@ -217,11 +219,11 @@ struct ControlCenterView: View {
     @ViewBuilder
     private func melodyFlowBackendPanel() -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("MelodyFlow Backend")
+            Text("terry backend")
                 .font(.headline)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Generation Backend")
+                Text("generation backend")
                     .font(.subheadline)
                 Picker("Generation Backend", selection: Binding(
                     get: { viewModel.melodyFlowBackendEngine },
@@ -232,6 +234,7 @@ struct ControlCenterView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                .labelsHidden()
                 Text(
                     "MPS is the quality baseline. MLX+Torch keeps MLX flow with torch codec. "
                     + "MLX End-to-End uses native MLX codec and may differ in output quality."
@@ -271,6 +274,221 @@ struct ControlCenterView: View {
     }
 }
 
+private struct RebuildFailureSheet: View {
+    @ObservedObject var viewModel: ControlCenterViewModel
+    let report: RebuildFailureReport
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("environment rebuild failed")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Button("close") {
+                    viewModel.clearRebuildFailureReport()
+                    dismiss()
+                }
+            }
+
+            Text(displayName(forServiceID: report.serviceID, fallback: report.serviceName))
+                .font(.headline)
+            Text(report.summary)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("repair")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Button("repair again") { viewModel.retryRebuildFailure() }
+                                .help("Rerun dependency repair using the current environment.")
+                            Button("repair from scratch") { viewModel.cleanRepairRebuildFailure() }
+                                .help("Recreate the environment and install dependencies with --no-cache-dir.")
+                            Spacer()
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("dependencies")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Button("edit requirements") { viewModel.openRebuildFailureRequirementsEditor() }
+                                .disabled(report.requirementsFile == nil)
+                            Button("open in editor") { viewModel.openRebuildFailureRequirementsFile() }
+                                .disabled(report.requirementsFile == nil)
+                            Spacer()
+                        }
+                    }
+
+                    Text("flow: start with support if needed, then edit requirements, save, and run repair again.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Text("repair from scratch recreates the environment when a normal repair is not enough.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 0)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("support")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        Button("email") { viewModel.openSupportEmail() }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+                        Button(action: { viewModel.openSupportDiscord() }) {
+                            Image("DiscordIcon")
+                                .resizable()
+                                .renderingMode(.template)
+                                .interpolation(.high)
+                                .frame(width: 18, height: 18)
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 4)
+                                .help("join discord")
+                        }
+                        .help("join discord")
+                        .accessibilityLabel("join discord")
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .tint(
+                            Color(
+                                red: 88.0 / 255.0,
+                                green: 101.0 / 255.0,
+                                blue: 242.0 / 255.0
+                            )
+                        )
+                    }
+                    Text("support: kev@thecollabagepatch.com")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(12)
+                .frame(width: 260, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.gray.opacity(0.09))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.gray.opacity(0.2))
+                        .allowsHitTesting(false)
+                )
+            }
+
+            if !viewModel.rebuildDiagnosticsStatusMessage.isEmpty {
+                Text(viewModel.rebuildDiagnosticsStatusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(spacing: 0) {
+                HStack {
+                    Text("diagnostics")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button(action: { viewModel.copyRebuildFailureDiagnostics() }) {
+                        Image(systemName: "doc.on.doc")
+                            .frame(width: 16, height: 16)
+                            .padding(6)
+                            .contentShape(Rectangle())
+                            .help("copy diagnostics")
+                    }
+                    .help("copy diagnostics")
+                    .accessibilityLabel("copy diagnostics")
+                    .buttonStyle(.plain)
+                    Button(action: { viewModel.openRebuildFailureLogFile() }) {
+                        Image(systemName: "doc.text")
+                            .frame(width: 16, height: 16)
+                            .padding(6)
+                            .contentShape(Rectangle())
+                            .help("open log file")
+                    }
+                    .help("open log file")
+                    .accessibilityLabel("open log file")
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+                .padding(.bottom, 6)
+
+                Divider()
+
+                ScrollView {
+                    Text(viewModel.diagnosticsReportText(for: report))
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                }
+            }
+            .background(Color(NSColor.textBackgroundColor))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.gray.opacity(0.2))
+                    .allowsHitTesting(false)
+            )
+        }
+        .padding(16)
+        .frame(minWidth: 820, minHeight: 560)
+        .sheet(isPresented: $viewModel.isRequirementsEditorPresented) {
+            RequirementsEditorSheet(viewModel: viewModel)
+        }
+    }
+}
+
+private struct RequirementsEditorSheet: View {
+    @ObservedObject var viewModel: ControlCenterViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("edit requirements")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Button("close") {
+                    viewModel.closeRequirementsEditor()
+                    dismiss()
+                }
+            }
+
+            Text(viewModel.requirementsEditorPath)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+
+            TextEditor(text: $viewModel.requirementsEditorText)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .background(Color(NSColor.textBackgroundColor))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.gray.opacity(0.2))
+                )
+
+            HStack {
+                if !viewModel.requirementsEditorStatusMessage.isEmpty {
+                    Text(viewModel.requirementsEditorStatusMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("save") { viewModel.saveRequirementsEditor() }
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 820, minHeight: 560)
+    }
+}
+
 private struct ModelDownloadSheet: View {
     @ObservedObject var viewModel: ControlCenterViewModel
     @Environment(\.dismiss) private var dismiss
@@ -278,10 +496,10 @@ private struct ModelDownloadSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Download Models")
+                Text("download models")
                     .font(.title3.weight(.semibold))
                 Spacer()
-                Button("Close") { dismiss() }
+                Button("close") { dismiss() }
             }
 
             Text("Pre-download models for offline use in gary4juce.")
@@ -297,7 +515,7 @@ private struct ModelDownloadSheet: View {
             }
 
             HStack {
-                Button("Refresh Statuses") {
+                Button("refresh statuses") {
                     viewModel.refreshModelCatalogAndStatuses()
                 }
                 .disabled(viewModel.isModelCatalogLoading || viewModel.isModelDownloadInProgress)
@@ -332,7 +550,7 @@ private struct ModelDownloadSheet: View {
                                         Spacer()
                                         statusPill(for: model)
                                         Button(
-                                            model.isDownloading ? "Downloading..." : "Download"
+                                            model.isDownloading ? "downloading..." : "download"
                                         ) {
                                             viewModel.startModelDownload(model.path)
                                         }
@@ -406,6 +624,7 @@ private struct HoverExpandableScreenshot: View {
     let caption: String
 
     @StateObject private var previewWindow = DetachedScreenshotPreviewWindow()
+    @State private var isHoveringScreenshot = false
 
     var body: some View {
         if let screenshot = NSImage(contentsOfFile: screenshotPath) {
@@ -423,17 +642,22 @@ private struct HoverExpandableScreenshot: View {
                             .stroke(Color.gray.opacity(0.2))
                     )
                     .contentShape(Rectangle())
-                    .onHover { hovering in
-                        if hovering {
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case .active(_):
+                            guard !isHoveringScreenshot else { return }
+                            isHoveringScreenshot = true
                             previewWindow.show(
                                 image: screenshot,
                                 title: "Step 2 detailed preview"
                             )
-                        } else {
+                        case .ended:
+                            isHoveringScreenshot = false
                             previewWindow.hide()
                         }
                     }
             }
+            .onAppear { previewWindow.prepare() }
             .onDisappear { previewWindow.hide() }
         }
     }
@@ -442,6 +666,10 @@ private struct HoverExpandableScreenshot: View {
 @MainActor
 private final class DetachedScreenshotPreviewWindow: ObservableObject {
     private var panel: NSPanel?
+
+    func prepare() {
+        _ = ensurePanel()
+    }
 
     func show(image: NSImage, title: String) {
         let panel = ensurePanel()
@@ -745,36 +973,35 @@ struct MenuBarContentView: View {
                 ForEach(manager.services) { runtime in
                     HStack {
                         StatusDot(processState: runtime.processState, healthState: runtime.healthState)
-                        Text(runtime.service.name)
+                        Text(displayName(for: runtime))
                         Spacer()
                         if runtime.isRunning {
-                            Button("Stop") { manager.stop(serviceID: runtime.id) }
+                            Button("stop") { manager.stop(serviceID: runtime.id) }
                         } else {
-                            Button("Start") { manager.start(serviceID: runtime.id) }
+                            Button("start") { manager.start(serviceID: runtime.id) }
                         }
                     }
                 }
             } else {
-                Text("Manifest load failed")
+                Text("manifest load failed")
                 if let error = viewModel.startupError {
                     Text(error).font(.caption)
                 }
             }
 
             Divider()
-            Button("Open Control Center", action: onOpenMainWindow)
+            Button("open control center", action: onOpenMainWindow)
             if let manager = viewModel.manager {
                 Button(
                     manager.isRebuildingAllEnvironments
-                    ? "Rebuilding All Envs..."
-                    : "Rebuild All Envs"
+                    ? "rebuilding all envs..."
+                    : "rebuild all envs"
                 ) {
                     manager.rebuildAllEnvironments()
                 }
                 .disabled(manager.isRebuildingAllEnvironments)
             }
-            Button("Reload Manifest") { viewModel.loadManifest() }
-            Button("Quit") { NSApp.terminate(nil) }
+            Button("quit") { NSApp.terminate(nil) }
         }
         .padding(12)
         .frame(minWidth: 360)
@@ -783,19 +1010,31 @@ struct MenuBarContentView: View {
 
 private struct ServiceRow: View {
     let runtime: ServiceRuntime
+    let displayName: String
     let isSelected: Bool
     let onSelect: () -> Void
     let onStart: () -> Void
     let onStop: () -> Void
     let onRestart: () -> Void
     let onRebuildEnv: () -> Void
+    let onDownloadModels: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 StatusDot(processState: runtime.processState, healthState: runtime.healthState)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(runtime.service.name).font(.headline)
+                    HStack(spacing: 8) {
+                        Text(displayName)
+                            .font(.headline)
+                        if let onDownloadModels {
+                            Button("download models") {
+                                onDownloadModels()
+                            }
+                            .controlSize(.small)
+                            .disabled(runtime.isBootstrapping)
+                        }
+                    }
                     Text("id: \(runtime.id)")
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
@@ -821,14 +1060,14 @@ private struct ServiceRow: View {
             }
 
             HStack {
-                Button("Start", action: onStart)
+                Button("start", action: onStart)
                     .disabled(runtime.isRunning || runtime.isBootstrapping)
-                Button("Stop", action: onStop)
+                Button("stop", action: onStop)
                     .disabled(!runtime.isRunning)
-                Button("Restart", action: onRestart)
+                Button("restart", action: onRestart)
                     .disabled(runtime.isBootstrapping)
                 Button(
-                    runtime.isBootstrapping ? "Rebuilding..." : "Rebuild Env",
+                    runtime.isBootstrapping ? "rebuilding..." : "rebuild env",
                     action: onRebuildEnv
                 )
                 .disabled(runtime.isRunning || runtime.isBootstrapping || runtime.bootstrapState == .notConfigured)
@@ -845,6 +1084,32 @@ private struct ServiceRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .contentShape(RoundedRectangle(cornerRadius: 8))
         .onTapGesture(perform: onSelect)
+    }
+}
+
+private func displayName(for runtime: ServiceRuntime) -> String {
+    switch runtime.id {
+    case "audiocraft_mlx":
+        return "gary (musicgen)"
+    case "melodyflow":
+        return "terry (melodyflow)"
+    case "stable_audio":
+        return "jerry (stable audio)"
+    default:
+        return runtime.service.name
+    }
+}
+
+private func displayName(forServiceID serviceID: String, fallback: String) -> String {
+    switch serviceID {
+    case "audiocraft_mlx":
+        return "gary (musicgen)"
+    case "melodyflow":
+        return "terry (melodyflow)"
+    case "stable_audio":
+        return "jerry (stable audio)"
+    default:
+        return fallback
     }
 }
 
