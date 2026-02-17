@@ -161,6 +161,102 @@ CORS(app)
 
 # Global variables
 model = None
+_mlx_runtime = None
+_mlx_runtime_model_id = None
+_mlx_runtime_module = None
+
+BACKEND_MPS = "mps"
+BACKEND_MLX_NATIVE_TORCH_CODEC = "mlx_native_torch_codec"
+BACKEND_MLX_NATIVE_MLX_CODEC = "mlx_native_mlx_codec"
+_VALID_BACKEND_ENGINES = {
+    BACKEND_MPS,
+    BACKEND_MLX_NATIVE_TORCH_CODEC,
+    BACKEND_MLX_NATIVE_MLX_CODEC,
+}
+
+
+def _normalize_backend_engine(raw_backend) -> str:
+    if raw_backend is None:
+        return BACKEND_MPS
+    backend = str(raw_backend).strip().lower()
+    if backend in _VALID_BACKEND_ENGINES:
+        return backend
+    if backend in ("", "torch"):
+        return BACKEND_MPS
+    raise ValueError(
+        "backend_engine must be one of 'mps', 'mlx_native_torch_codec', or 'mlx_native_mlx_codec'"
+    )
+
+
+def _default_backend_engine() -> str:
+    configured = os.environ.get("MELODYFLOW_BACKEND_ENGINE", BACKEND_MPS)
+    try:
+        return _normalize_backend_engine(configured)
+    except ValueError:
+        logger.warning(
+            "Invalid MELODYFLOW_BACKEND_ENGINE='%s'; falling back to '%s'",
+            configured,
+            BACKEND_MPS,
+        )
+        return BACKEND_MPS
+
+
+def _resolve_backend_engine_from_request(raw_backend) -> str:
+    if raw_backend is None:
+        return _default_backend_engine()
+    if isinstance(raw_backend, str) and raw_backend.strip() == "":
+        return _default_backend_engine()
+    return _normalize_backend_engine(raw_backend)
+
+
+def _mlx_dtype_name() -> str:
+    raw = os.environ.get("MELODYFLOW_MLX_DTYPE", "float32").strip().lower()
+    if raw in {"float16", "bfloat16", "float32"}:
+        return raw
+    logger.warning("Invalid MELODYFLOW_MLX_DTYPE='%s'; falling back to 'float32'", raw)
+    return "float32"
+
+
+def _mlx_native_prompt_mode() -> str:
+    raw = os.environ.get("MELODYFLOW_MLX_NATIVE_PROMPT_MODE", "mean").strip().lower()
+    if raw in {"mean", "stochastic"}:
+        return raw
+    logger.warning(
+        "Invalid MELODYFLOW_MLX_NATIVE_PROMPT_MODE='%s'; falling back to 'mean'",
+        raw,
+    )
+    return "mean"
+
+
+def _require_mlx_runtime_module():
+    global _mlx_runtime_module
+    if _mlx_runtime_module is None:
+        try:
+            import melodyflow_mlx_edit as mlx_runtime_module
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to import MLX runtime support. Ensure MLX dependencies are installed."
+            ) from exc
+        _mlx_runtime_module = mlx_runtime_module
+    return _mlx_runtime_module
+
+
+def _get_mlx_runtime(current_model, *, need_native_codec: bool):
+    global _mlx_runtime
+    global _mlx_runtime_model_id
+
+    mlx_module = _require_mlx_runtime_module()
+    runtime_model_id = id(current_model)
+    if _mlx_runtime is None or _mlx_runtime_model_id != runtime_model_id:
+        _mlx_runtime = mlx_module.build_runtime(current_model, dtype_name=_mlx_dtype_name())
+        _mlx_runtime_model_id = runtime_model_id
+
+    if need_native_codec:
+        mlx_module.ensure_native_codec(_mlx_runtime, current_model)
+
+    return _mlx_runtime, mlx_module
+
+
 def _pick_device() -> str:
     forced_device = os.environ.get("MELODYFLOW_DEVICE", "").strip().lower()
     require_mps = os.environ.get("MELODYFLOW_REQUIRE_MPS", "0") == "1"
@@ -192,17 +288,22 @@ DEVICE = device
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('melodyflow')
+logger.info("Default MelodyFlow backend engine: %s", _default_backend_engine())
 
 from flask import after_this_request
 
 def unload_model():
     global model
+    global _mlx_runtime
+    global _mlx_runtime_model_id
     if model is not None:
         try:
             del model
         except:
             pass
         model = None
+    _mlx_runtime = None
+    _mlx_runtime_model_id = None
     if torch.cuda.is_available():
         try:
             torch.cuda.synchronize()
@@ -286,14 +387,18 @@ def load_audio_from_file(file_path: str, target_sr: int = 32000) -> torch.Tensor
 
 def find_max_duration(model: MelodyFlow, waveform: torch.Tensor, sr: int = 32000, max_token_length: int = 750) -> tuple:
     """Binary search to find maximum duration that produces tokens under the limit."""
-    min_seconds = 1
+    min_seconds = 1.0
     max_seconds = waveform.shape[-1] / sr
     best_duration = min_seconds
     best_tokens = None
 
+    if max_seconds <= min_seconds:
+        tokens = model.encode_audio(waveform)
+        return max_seconds, tokens
+
     while max_seconds - min_seconds > 0.1:
         mid_seconds = (min_seconds + max_seconds) / 2
-        samples = int(mid_seconds * sr)
+        samples = max(1, int(mid_seconds * sr))
         test_waveform = waveform[..., :samples]
 
         try:
@@ -310,41 +415,93 @@ def find_max_duration(model: MelodyFlow, waveform: torch.Tensor, sr: int = 32000
         except Exception as e:
             max_seconds = mid_seconds
 
+    if best_tokens is None:
+        fallback_samples = max(1, int(min_seconds * sr))
+        best_tokens = model.encode_audio(waveform[..., :fallback_samples])
+        best_duration = min_seconds
+
+    if int(best_tokens.shape[-1]) > max_token_length:
+        raise RuntimeError(
+            f"Prompt token length {int(best_tokens.shape[-1])} exceeds max_token_length={max_token_length}"
+        )
+
     return best_duration, best_tokens
 
-def process_audio(waveform: torch.Tensor, variation_name: str, 
-                 custom_flowstep: float = None, solver: str = "euler", 
-                 custom_prompt: str = None, session_id: str = None, 
-                 progress_callback = None) -> torch.Tensor:
+
+def _normalize_waveform_for_save(tensor: torch.Tensor) -> torch.Tensor:
+    x = tensor
+    if x.dim() >= 3:
+        x = x[0]
+    if x.dim() == 1:
+        x = x.unsqueeze(0)
+    if x.dim() != 2:
+        raise RuntimeError(f"Expected output waveform with 2 dims [C,T], got shape={tuple(x.shape)}")
+    return x
+
+def process_audio(
+    waveform: torch.Tensor,
+    variation_name: str,
+    custom_flowstep: float = None,
+    solver: str = "euler",
+    custom_prompt: str = None,
+    session_id: str = None,
+    progress_callback=None,
+    backend_engine: str = None,
+) -> torch.Tensor:
     """Process audio with selected variation."""
-    
+
     try:
         if variation_name not in VARIATIONS:
             raise AudioProcessingError(f"Unknown variation: {variation_name}")
-        
+
+        backend = _resolve_backend_engine_from_request(backend_engine)
         config = VARIATIONS[variation_name].copy()
         flowstep = custom_flowstep if custom_flowstep is not None else config['default_flowstep']
-        
+
         if custom_prompt is not None:
             config['prompt'] = custom_prompt
 
         with resource_cleanup():
-            # Load model
             current_model = load_model()
 
-            # Find valid duration and get tokens
-            max_valid_duration, tokens = find_max_duration(current_model, waveform)
+            codec_mode = "native" if backend == BACKEND_MLX_NATIVE_MLX_CODEC else "torch"
+
+            if backend == BACKEND_MPS:
+                max_valid_duration, tokens = find_max_duration(current_model, waveform)
+            else:
+                need_native_codec = codec_mode == "native"
+                mlx_runtime, mlx_module = _get_mlx_runtime(
+                    current_model,
+                    need_native_codec=need_native_codec,
+                )
+                if codec_mode == "native":
+                    max_valid_duration, tokens = mlx_module.find_max_duration_with_encoder(
+                        waveform,
+                        encode_audio_fn=lambda w: mlx_module.encode_audio_with_mlx_codec(
+                            mlx_runtime,
+                            w,
+                            current_model.device,
+                        ),
+                        sr=current_model.sample_rate,
+                        max_token_length=750,
+                    )
+                else:
+                    max_valid_duration, tokens = mlx_module.find_max_duration_with_encoder(
+                        waveform,
+                        encode_audio_fn=lambda w: current_model.encode_audio(w.to(current_model.device)),
+                        sr=current_model.sample_rate,
+                        max_token_length=750,
+                    )
+
             config['duration'] = max_valid_duration
 
-            # Override steps and regularization based on solver
             if solver.lower() == "midpoint":
                 steps = 64
                 use_regularize = False
-            else:  # Default to euler
+            else:
                 steps = config['steps']
                 use_regularize = True
 
-            # Set model parameters
             current_model.set_generation_params(
                 solver=solver.lower(),
                 steps=steps,
@@ -361,24 +518,40 @@ def process_audio(waveform: torch.Tensor, variation_name: str,
                 lambda_kl=0.2 if use_regularize else 0.0,
             )
 
-            # Set up progress callback if provided
+            model_progress_callback = None
             if progress_callback and session_id:
                 def model_progress_callback(elapsed_steps: int, total_steps: int):
                     progress_callback(session_id, elapsed_steps, total_steps)
-                current_model._progress_callback = model_progress_callback
 
-            edited_audio = current_model.edit(
+            if backend == BACKEND_MPS:
+                if model_progress_callback is not None:
+                    current_model._progress_callback = model_progress_callback
+                edited_audio = current_model.edit(
+                    prompt_tokens=tokens,
+                    descriptions=[config['prompt']],
+                    src_descriptions=[""],
+                    progress=True,
+                    return_tokens=True
+                )
+                return _normalize_waveform_for_save(edited_audio[0][0])
+
+            native_prompt_mode = _mlx_native_prompt_mode()
+            edited_audio = mlx_module.edit_with_mlx(
+                current_model,
+                mlx_runtime,
                 prompt_tokens=tokens,
-                descriptions=[config['prompt']],
-                src_descriptions=[""],
-                progress=True,
-                return_tokens=True
+                prompt_text=config['prompt'],
+                src_prompt_text="",
+                codec_mode=codec_mode,
+                native_prompt_mode=native_prompt_mode,
+                progress_callback=model_progress_callback,
             )
+            return _normalize_waveform_for_save(edited_audio)
 
-            return edited_audio[0][0]
-
+    except AudioProcessingError:
+        raise
     except Exception as e:
-        raise AudioProcessingError(f"Failed to process audio: {str(e)}")
+        raise AudioProcessingError(f"Failed to process audio: {str(e)}", status_code=500)
 
 @app.route('/transform', methods=['POST'])
 def transform_audio():
@@ -404,6 +577,7 @@ def transform_audio():
                 return response
 
         session_id = None
+        request_backend_engine = None
 
         # ---------------------------------------------------------------------
         # Handle both multipart form-data and JSON
@@ -422,6 +596,7 @@ def transform_audio():
             solver = request.form.get('solver', 'euler')
             custom_prompt = request.form.get('prompt', request.form.get('custom_prompt'))
             session_id = request.form.get('session_id')
+            request_backend_engine = request.form.get('backend_engine')
 
             with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
                 audio_file.save(tmp_file.name)
@@ -443,6 +618,7 @@ def transform_audio():
             solver = data.get('solver', 'euler')
             custom_prompt = data.get('custom_prompt')
             session_id = data.get('session_id')
+            request_backend_engine = data.get('backend_engine')
 
             if 'audio_file_path' in data and data['audio_file_path']:
                 audio_file_path = data['audio_file_path']
@@ -478,7 +654,8 @@ def transform_audio():
             solver,
             custom_prompt,
             session_id=session_id,
-            progress_callback=redis_progress_callback
+            progress_callback=redis_progress_callback,
+            backend_engine=request_backend_engine,
         )
 
         import uuid
@@ -537,14 +714,19 @@ def health_check():
         cuda_available = torch.cuda.is_available()
         mps_available = torch.backends.mps.is_available()
         accelerator = 'cuda' if cuda_available else 'mps' if mps_available else 'cpu'
+        backend_engine = _default_backend_engine()
+        requires_mps = backend_engine == BACKEND_MPS
         accelerator_available = accelerator != 'cpu'
+        backend_ready = mps_available if requires_mps else True
         
         status = {
-            'status': 'healthy' if accelerator_available else 'degraded',
+            'status': 'healthy' if accelerator_available and backend_ready else 'degraded',
             'accelerator': accelerator,
             'cuda_available': cuda_available,
             'mps_available': mps_available,
             'model_loaded': model_loaded,
+            'backend_engine': backend_engine,
+            'backend_requires_mps': requires_mps,
         }
         
         return jsonify(status), 200 if status['status'] == 'healthy' else 503

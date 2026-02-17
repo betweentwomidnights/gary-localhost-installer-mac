@@ -23,6 +23,40 @@ enum StableAudioBackendEngine: String, CaseIterable, Identifiable {
     }
 }
 
+enum MelodyFlowBackendEngine: String, CaseIterable, Identifiable {
+    case mps
+    case mlxNativeTorchCodec = "mlx_native_torch_codec"
+    case mlxNativeMlxCodec = "mlx_native_mlx_codec"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .mps:
+            return "MPS"
+        case .mlxNativeTorchCodec:
+            return "MLX + Torch Codec"
+        case .mlxNativeMlxCodec:
+            return "MLX End-to-End"
+        }
+    }
+
+    var shortDisplayName: String {
+        switch self {
+        case .mps:
+            return "MPS"
+        case .mlxNativeTorchCodec:
+            return "MLX+Torch"
+        case .mlxNativeMlxCodec:
+            return "MLX E2E"
+        }
+    }
+
+    static func from(rawValue: String) -> MelodyFlowBackendEngine {
+        MelodyFlowBackendEngine(rawValue: rawValue.lowercased()) ?? .mps
+    }
+}
+
 struct DownloadableModel: Identifiable {
     let id: String
     let size: String
@@ -43,6 +77,7 @@ struct DownloadModelSection: Identifiable {
 @MainActor
 final class ControlCenterViewModel: ObservableObject {
     private static let stableAudioBackendDefaultsKey = "stableAudioBackendEngine"
+    private static let melodyFlowBackendDefaultsKey = "melodyFlowBackendEngine"
 
     @Published var manager: ServiceManager?
     @Published var startupError: String?
@@ -60,6 +95,8 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var isModelCatalogLoading: Bool = false
     @Published var isModelDownloadInProgress: Bool = false
     @Published var stableAudioBackendEngine: StableAudioBackendEngine = .mps
+    @Published var melodyFlowBackendEngine: MelodyFlowBackendEngine = .mps
+    @Published var melodyFlowBackendStatus: String = ""
 
     private var logRefreshTask: Task<Void, Never>?
     private var modelDownloadPollTask: Task<Void, Never>?
@@ -160,6 +197,10 @@ final class ControlCenterViewModel: ObservableObject {
     init() {
         let savedBackend = UserDefaults.standard.string(forKey: Self.stableAudioBackendDefaultsKey) ?? StableAudioBackendEngine.mps.rawValue
         stableAudioBackendEngine = StableAudioBackendEngine.from(rawValue: savedBackend)
+        let savedMelodyFlowBackend = UserDefaults.standard.string(
+            forKey: Self.melodyFlowBackendDefaultsKey
+        ) ?? MelodyFlowBackendEngine.mps.rawValue
+        melodyFlowBackendEngine = MelodyFlowBackendEngine.from(rawValue: savedMelodyFlowBackend)
         observeApplicationTermination()
         refreshStableAudioTokenState()
         loadManifest()
@@ -208,6 +249,7 @@ final class ControlCenterViewModel: ObservableObject {
             let manifest = try ManifestLoader.load(from: defaultURL)
             let manager = ServiceManager(manifest: manifest)
             manager.setStableAudioBackendEngine(stableAudioBackendEngine.rawValue, restartIfRunning: false)
+            manager.setMelodyFlowBackendEngine(melodyFlowBackendEngine.rawValue, restartIfRunning: false)
             self.manager = manager
             startupError = nil
             selectedServiceID = manager.services.first?.id
@@ -255,6 +297,18 @@ final class ControlCenterViewModel: ObservableObject {
             stableAudioTokenStatus = "Stable Audio backend set to \(backend.displayName). Service restarting..."
         } else {
             stableAudioTokenStatus = "Stable Audio backend set to \(backend.displayName)."
+        }
+    }
+
+    func setMelodyFlowBackendEngine(_ backend: MelodyFlowBackendEngine) {
+        guard melodyFlowBackendEngine != backend else { return }
+        melodyFlowBackendEngine = backend
+        UserDefaults.standard.set(backend.rawValue, forKey: Self.melodyFlowBackendDefaultsKey)
+        manager?.setMelodyFlowBackendEngine(backend.rawValue, restartIfRunning: true)
+        if manager?.services.first(where: { $0.id == "melodyflow" })?.isRunning == true {
+            melodyFlowBackendStatus = "MelodyFlow backend set to \(backend.displayName). Service restarting..."
+        } else {
+            melodyFlowBackendStatus = "MelodyFlow backend set to \(backend.displayName)."
         }
     }
 

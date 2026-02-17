@@ -88,6 +88,9 @@ struct ControlCenterView: View {
                 if runtime.id == "stable_audio" {
                     stableAudioAuthPanel()
                     Divider()
+                } else if runtime.id == "melodyflow" {
+                    melodyFlowBackendPanel()
+                    Divider()
                 }
 
                 Text("Logs: \(runtime.service.name)")
@@ -200,6 +203,45 @@ struct ControlCenterView: View {
 
             if !viewModel.stableAudioTokenStatus.isEmpty {
                 Text(viewModel.stableAudioTokenStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.gray.opacity(0.08))
+        )
+    }
+
+    @ViewBuilder
+    private func melodyFlowBackendPanel() -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("MelodyFlow Backend")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Generation Backend")
+                    .font(.subheadline)
+                Picker("Generation Backend", selection: Binding(
+                    get: { viewModel.melodyFlowBackendEngine },
+                    set: { viewModel.setMelodyFlowBackendEngine($0) }
+                )) {
+                    ForEach(MelodyFlowBackendEngine.allCases) { backend in
+                        Text(backend.shortDisplayName).tag(backend)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text(
+                    "MPS is the quality baseline. MLX+Torch keeps MLX flow with torch codec. "
+                    + "MLX End-to-End uses native MLX codec and may differ in output quality."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            if !viewModel.melodyFlowBackendStatus.isEmpty {
+                Text(viewModel.melodyFlowBackendStatus)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

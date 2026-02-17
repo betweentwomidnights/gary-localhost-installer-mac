@@ -47,6 +47,7 @@ final class ServiceManager: ObservableObject {
 
     private let manifest: ResolvedManifest
     private var stableAudioBackendEngine = "mps"
+    private var melodyFlowBackendEngine = "mps"
     private var processes: [String: Process] = [:]
     private var outputPipes: [String: Pipe] = [:]
     private var logHandles: [String: FileHandle] = [:]
@@ -72,11 +73,35 @@ final class ServiceManager: ObservableObject {
         }
     }
 
+    func setMelodyFlowBackendEngine(_ backend: String, restartIfRunning: Bool) {
+        let normalized = Self.normalizeMelodyFlowBackendEngine(backend)
+        guard melodyFlowBackendEngine != normalized else { return }
+        melodyFlowBackendEngine = normalized
+
+        guard restartIfRunning else { return }
+        guard let runtime = services.first(where: { $0.id == "melodyflow" }) else { return }
+        if runtime.processState == .running || runtime.processState == .starting {
+            restart(serviceID: "melodyflow")
+        }
+    }
+
     nonisolated private static func normalizeStableAudioBackendEngine(_ value: String) -> String {
         let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         switch normalized {
         case "mlx":
             return "mlx"
+        default:
+            return "mps"
+        }
+    }
+
+    nonisolated private static func normalizeMelodyFlowBackendEngine(_ value: String) -> String {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch normalized {
+        case "mlx_native_torch_codec":
+            return "mlx_native_torch_codec"
+        case "mlx_native_mlx_codec":
+            return "mlx_native_mlx_codec"
         default:
             return "mps"
         }
@@ -812,6 +837,9 @@ final class ServiceManager: ObservableObject {
         }
         if service.id == "stable_audio" {
             env["STABLE_AUDIO_BACKEND_ENGINE"] = stableAudioBackendEngine
+        } else if service.id == "melodyflow" {
+            env["MELODYFLOW_BACKEND_ENGINE"] = melodyFlowBackendEngine
+            env["MELODYFLOW_REQUIRE_MPS"] = melodyFlowBackendEngine == "mps" ? "1" : "0"
         }
         return env
     }
