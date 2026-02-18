@@ -16,7 +16,6 @@ import gc
 import base64
 import traceback
 import threading
-import requests
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -24,7 +23,7 @@ from typing import Optional
 import torch
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from pydantic import BaseModel, ValidationError, Field
+from pydantic import BaseModel, ValidationError
 
 # Import our audio processing functions (MLX MusicGen)
 from g4laudio_mlx import (
@@ -34,14 +33,6 @@ from g4laudio_mlx import (
     process_audio,
 )
 from g4l_models import MODEL_CATALOG
-
-# In both g4l_localhost.py AND localhost_melodyflow.py
-import tempfile
-
-# Use a consistent shared temp directory
-SHARED_TEMP_DIR = os.path.join(tempfile.gettempdir(), "gary4juce_shared")
-os.makedirs(SHARED_TEMP_DIR, exist_ok=True)
-MELODYFLOW_PROGRESS_PREFIX = "melodyflow_progress_"
 
 # =============================================================================
 # CONFIGURATION
@@ -140,15 +131,6 @@ class ContinueMusicRequest(BaseModel):
     description: Optional[str] = None
     quantization_mode: Optional[str] = None
 
-class TransformRequest(BaseModel):
-    audio_data: Optional[str] = None
-    variation: str
-    session_id: Optional[str] = None
-    flowstep: Optional[float] = Field(None, ge=0)
-    solver: Optional[str] = None
-    custom_prompt: Optional[str] = None
-
-
 class ModelPredownloadRequest(BaseModel):
     model_name: str
 
@@ -221,101 +203,6 @@ def store_audio_result(session_id: str, audio_base64: str):
 def get_audio_result(session_id: str):
     """Get generated audio result."""
     return redis_client.get(f"result:{session_id}")
-
-def store_original_audio(session_id: str, audio_base64: str):
-    """Store original audio for undo functionality."""
-    redis_client.setex(f"original:{session_id}", 3600, audio_base64)
-
-def get_original_audio(session_id: str):
-    """Get original audio for undo."""
-    return redis_client.get(f"original:{session_id}")
-
-def write_audio_to_temp_file(audio_base64, session_id):
-    filename = f"input_{session_id}_{uuid.uuid4().hex[:8]}.wav"
-    file_path = os.path.join(SHARED_TEMP_DIR, filename)  # Use shared directory
-    
-    audio_data = base64.b64decode(audio_base64)
-    with open(file_path, 'wb') as f:
-        f.write(audio_data)
-    return file_path
-
-def cleanup_temp_file(file_path):
-    """Safely remove a temporary file."""
-    try:
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
-            print(f"Cleaned up temp file: {file_path}")
-    except Exception as e:
-        print(f"Error cleaning up temp file {file_path}: {e}")
-
-def melodyflow_progress_file_path(session_id: str):
-    safe_session = "".join(ch for ch in str(session_id) if ch.isalnum() or ch in ("-", "_"))
-    if not safe_session:
-        safe_session = "unknown"
-    return os.path.join(SHARED_TEMP_DIR, f"{MELODYFLOW_PROGRESS_PREFIX}{safe_session}.json")
-
-def read_melodyflow_progress_snapshot(session_id: str):
-    """Read progress snapshots emitted by localhost_melodyflow.py."""
-    file_path = melodyflow_progress_file_path(session_id)
-    if not os.path.exists(file_path):
-        return None
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        return payload if isinstance(payload, dict) else None
-    except Exception:
-        return None
-
-def apply_melodyflow_progress_snapshot(session_id: str, status_data: dict, progress: int, qstatus):
-    """
-    Merge MelodyFlow progress snapshots into the local poll response.
-    This is needed when Redis is unavailable and g4l_localhost uses in-memory storage.
-    """
-    snapshot = read_melodyflow_progress_snapshot(session_id)
-    if not snapshot:
-        return status_data, progress, qstatus
-
-    current_status = status_data.get("status")
-    if current_status not in ("warming", "processing"):
-        return status_data, progress, qstatus
-
-    snap_progress = snapshot.get("progress")
-    if isinstance(snap_progress, (int, float)):
-        snap_progress = max(0, min(99, int(snap_progress)))
-        if snap_progress > progress:
-            progress = snap_progress
-            store_session_progress(session_id, snap_progress)
-            if snap_progress > 0 and current_status == "warming":
-                status_data = {"status": "processing"}
-                store_session_status(session_id, "processing")
-                current_status = "processing"
-
-    snap_status = snapshot.get("status")
-    if snap_status == "failed":
-        error_message = str(snapshot.get("error") or snapshot.get("message") or "MelodyFlow transform failed")
-        status_data = {"status": "failed", "error": error_message}
-        store_session_status(session_id, "failed", error_message)
-        return status_data, progress, qstatus
-
-    snap_queue = snapshot.get("queue_status")
-    if isinstance(snap_queue, dict):
-        qstatus = snap_queue
-        store_queue_status_update(session_id, qstatus)
-    else:
-        snap_message = snapshot.get("message")
-        if isinstance(snap_message, str) and snap_message.strip():
-            qstatus = {
-                "status": "processing" if progress > 0 else current_status,
-                "message": snap_message,
-                "position": 0,
-                "total_queued": 0,
-                "estimated_time": None,
-                "estimated_seconds": 0,
-                "source": "melodyflow-localhost"
-            }
-            store_queue_status_update(session_id, qstatus)
-
-    return status_data, progress, qstatus
 
 def store_queue_status_update(session_id: str, payload: dict):
     """Store queue/warmup/processing hints for the poller."""
@@ -940,188 +827,12 @@ def juce_retry_music():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
     
-MELODYFLOW_URL = os.environ.get("MELODYFLOW_URL", "http://127.0.0.1:8002")
-
-def run_transform_processing(session_id: str, audio_base64: str, task_data: dict):
-    """
-    Background transform runner:
-    - writes input wav to shared temp
-    - calls localhost MelodyFlow /transform using audio_file_path JSON mode
-    - reads WAV bytes response
-    - stores base64 result in Redis for JUCE poller
-    """
-    def processing_thread():
-        input_path = None
-        try:
-            # Reset any stale progress snapshot for reused/custom session IDs.
-            cleanup_temp_file(melodyflow_progress_file_path(session_id))
-
-            store_session_status(session_id, "warming")
-            store_session_progress(session_id, 0)
-            store_queue_status_update(session_id, {
-                "status": "warming",
-                "message": "loading terry (first run / model warmup)",
-                "position": 0,
-                "total_queued": 0,
-                "estimated_time": None,
-                "estimated_seconds": 0,
-                "source": "localhost"
-            })
-
-            # Store original for undo
-            store_original_audio(session_id, audio_base64)
-
-            # Write temp wav for melodyflow to read
-            input_path = write_audio_to_temp_file(audio_base64, session_id)
-
-            # Build payload for localhost_melodyflow.py JSON mode
-            payload = {
-                "variation": task_data["variation"],
-                "session_id": session_id,
-                "audio_file_path": input_path,
-            }
-            if task_data.get("flowstep") is not None:
-                payload["flowstep"] = task_data["flowstep"]
-            if task_data.get("solver") is not None:
-                payload["solver"] = task_data["solver"]
-            if task_data.get("custom_prompt") is not None:
-                payload["custom_prompt"] = task_data["custom_prompt"]
-
-            # Mark processing immediately. Fine-grained progress is merged in poll_status
-            # from MelodyFlow's shared progress snapshot (and Redis when available).
-            store_session_status(session_id, "processing")
-            store_queue_status_update(session_id, {
-                "status": "processing",
-                "message": "transforming…",
-                "position": 0,
-                "total_queued": 0,
-                "estimated_time": None,
-                "estimated_seconds": 0,
-                "source": "localhost"
-            })
-
-            # Call melodyflow
-            resp = requests.post(
-                f"{MELODYFLOW_URL}/transform",
-                json=payload,
-                timeout=600,  # transforms can take a while, especially first run
-            )
-            resp.raise_for_status()
-
-            # MelodyFlow returns WAV bytes
-            wav_bytes = resp.content
-            result_b64 = base64.b64encode(wav_bytes).decode("utf-8")
-
-            store_audio_result(session_id, result_b64)
-            store_session_status(session_id, "completed")
-            store_session_progress(session_id, 100)
-            store_queue_status_update(session_id, {
-                "status": "completed",
-                "message": "done",
-                "source": "localhost"
-            })
-            print(f"[SUCCESS] Transform completed for {session_id}")
-
-        except Exception as e:
-            print(f"[ERROR] Transform failed for {session_id}: {e}")
-            store_session_status(session_id, "failed", str(e))
-            store_queue_status_update(session_id, {
-                "status": "failed",
-                "message": str(e),
-                "source": "localhost"
-            })
-        finally:
-            cleanup_temp_file(input_path)
-            clean_gpu_memory()
-
-    threading.Thread(target=processing_thread, daemon=True).start()
-
-
-@app.route('/api/juce/transform_audio', methods=['POST'])
-def juce_transform_audio():
-    """JUCE-compatible Terry transform endpoint (matches remote backend contract)."""
-    try:
-        request_data = TransformRequest(**request.json)
-        session_id = request_data.session_id or generate_session_id()
-
-        # Require audio_data for localhost (remote can pull from stored audio; localhost should be explicit)
-        if not request_data.audio_data:
-            return jsonify({'success': False, 'error': 'audio_data is required on localhost'}), 400
-
-        # Basic validation
-        if not request_data.variation:
-            return jsonify({'success': False, 'error': 'variation is required'}), 400
-
-        task_data = {
-            "variation": request_data.variation,
-            "flowstep": request_data.flowstep,
-            "solver": (request_data.solver.lower() if request_data.solver else "euler"),
-            "custom_prompt": request_data.custom_prompt,
-        }
-
-        # Store session metadata (optional but useful for debugging/polling messages)
-        store_session_data(session_id, {
-            "session_id": session_id,
-            "type": "transform",
-            "variation": request_data.variation,
-            "created_at": datetime.now(timezone.utc).isoformat()
-        })
-
-        # Kick off transform thread
-        run_transform_processing(session_id, request_data.audio_data, task_data)
-
-        # Return minimal response (JUCE will poll)
-        return jsonify({
-            "success": True,
-            "session_id": session_id,
-            "message": "Audio transform started",
-            "note": "Poll /api/juce/poll_status/{session_id} for progress and results"
-        })
-
-    except ValidationError as e:
-        return jsonify({'success': False, 'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/juce/undo_transform', methods=['POST'])
-def juce_undo_transform():
-    """Undo last transform by returning original audio."""
-    try:
-        data = request.json
-        session_id = data.get('session_id')
-        
-        if not session_id:
-            return jsonify({'success': False, 'error': 'Session ID required'}), 400
-        
-        # Get original audio
-        original_audio = get_original_audio(session_id)
-        if not original_audio:
-            return jsonify({'success': False, 'error': 'No original audio found for undo'}), 404
-        
-        return jsonify({
-            'success': True,
-            'audio_data': original_audio,
-            'message': 'Transform undone successfully'
-        })
-        
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
 @app.route('/api/juce/poll_status/<session_id>', methods=['GET'])
 def juce_poll_status(session_id):
     try:
         status_data = get_session_status(session_id)      # {"status": "...", "error": "...?"}
         progress = get_session_progress(session_id)
         qstatus = get_stored_queue_status(session_id)     # may be None
-
-        # Pull live transform progress from MelodyFlow's shared snapshot when available.
-        status_data, progress, qstatus = apply_melodyflow_progress_snapshot(
-            session_id,
-            status_data,
-            progress,
-            qstatus,
-        )
 
         # Synthesize a warming hint if we look idle-but-working and nothing is stored yet
         if (status_data.get('status') in ('warming', 'processing') and progress == 0 and not qstatus):

@@ -3,15 +3,15 @@ from flask_cors import CORS
 import torch
 import torchaudio
 import time
-import io
 import tempfile
 import os
 import json
 import threading
+import base64
+import uuid
 from audiocraft.models import MelodyFlow
 import gc
 from variations import VARIATIONS
-import psutil
 import logging
 from contextlib import contextmanager
 
@@ -19,9 +19,6 @@ try:
     import redis
 except Exception:
     redis = None  # type: ignore
-
-# In both g4l_localhost.py AND localhost_melodyflow.py
-import tempfile
 
 # Use a consistent shared temp directory
 SHARED_TEMP_DIR = os.path.join(tempfile.gettempdir(), "gary4juce_shared")
@@ -146,7 +143,7 @@ def redis_progress_callback(session_id, current, total):
     except Exception:
         return
 
-    # Keep completion ownership in g4l_localhost; it marks completed after WAV is fully relayed.
+    # Keep completion ownership in the JUCE session worker.
     progress_percent = max(0, min(99, progress_percent))
     with _progress_lock:
         last_percent = _last_progress_percent.get(session_id)
@@ -155,6 +152,229 @@ def redis_progress_callback(session_id, current, total):
         _last_progress_percent[session_id] = progress_percent
 
     _set_progress(session_id, progress_percent, status="processing")
+
+JUCE_SESSION_TTL_SECONDS = 3600
+_juce_session_lock = threading.Lock()
+_juce_sessions = {}
+
+
+def _cleanup_expired_juce_sessions(now_ts: float) -> None:
+    expired = [
+        sid for sid, payload in _juce_sessions.items()
+        if float(payload.get("expires_at", 0)) <= now_ts
+    ]
+    for sid in expired:
+        _juce_sessions.pop(sid, None)
+
+
+def _upsert_juce_session(session_id: str, **updates) -> None:
+    if not session_id:
+        return
+    now_ts = time.time()
+    with _juce_session_lock:
+        _cleanup_expired_juce_sessions(now_ts)
+        payload = dict(_juce_sessions.get(session_id) or {})
+        payload.update(updates)
+        payload["updated_at"] = now_ts
+        payload["expires_at"] = now_ts + JUCE_SESSION_TTL_SECONDS
+        _juce_sessions[session_id] = payload
+
+
+def _get_juce_session(session_id: str):
+    if not session_id:
+        return None
+    now_ts = time.time()
+    with _juce_session_lock:
+        _cleanup_expired_juce_sessions(now_ts)
+        payload = _juce_sessions.get(session_id)
+        return dict(payload) if payload else None
+
+
+def _delete_progress_snapshot(session_id: str) -> None:
+    progress_path = _progress_file_path(session_id)
+    try:
+        if os.path.exists(progress_path):
+            os.remove(progress_path)
+    except Exception as e:
+        logger.warning("Failed to remove stale progress snapshot %s: %s", progress_path, e)
+
+
+def _read_progress_snapshot(session_id: str):
+    progress_path = _progress_file_path(session_id)
+    if not os.path.exists(progress_path):
+        return None
+    try:
+        with open(progress_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _sync_juce_session_from_snapshot(session_id: str, session_data: dict) -> dict:
+    if session_data.get("status") in {"completed", "failed"}:
+        return session_data
+
+    snapshot = _read_progress_snapshot(session_id)
+    if not snapshot:
+        return session_data
+
+    updates = {}
+    snap_status = snapshot.get("status")
+    if isinstance(snap_status, str) and snap_status:
+        updates["status"] = snap_status
+
+    snap_progress = snapshot.get("progress")
+    if isinstance(snap_progress, (int, float)):
+        updates["progress"] = max(0, min(100, int(snap_progress)))
+
+    snap_queue = snapshot.get("queue_status")
+    if isinstance(snap_queue, dict):
+        updates["queue_status"] = snap_queue
+
+    snap_error = snapshot.get("error")
+    if snap_error:
+        updates["error"] = str(snap_error)
+
+    if not updates:
+        return session_data
+
+    _upsert_juce_session(session_id, **updates)
+    merged = dict(session_data)
+    merged.update(updates)
+    return merged
+
+
+def _shared_audio_file(prefix: str, session_id: str) -> str:
+    safe_session = "".join(ch for ch in str(session_id) if ch.isalnum() or ch in ("-", "_"))
+    if not safe_session:
+        safe_session = "unknown"
+    return os.path.join(
+        SHARED_TEMP_DIR,
+        f"{prefix}_{safe_session}_{uuid.uuid4().hex[:8]}.wav",
+    )
+
+
+def _write_base64_audio_to_file(audio_base64: str, session_id: str) -> str:
+    file_path = _shared_audio_file("input", session_id)
+    audio_bytes = base64.b64decode(audio_base64)
+    with open(file_path, "wb") as f:
+        f.write(audio_bytes)
+    return file_path
+
+
+def _cleanup_file(file_path: str) -> None:
+    if not file_path:
+        return
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    except Exception as e:
+        logger.warning("Failed to remove temp file %s: %s", file_path, e)
+
+
+def _queue_transform_job(
+    *,
+    session_id: str,
+    audio_data: str,
+    variation: str,
+    flowstep: float,
+    solver: str,
+    custom_prompt: str,
+    backend_engine: str,
+) -> None:
+    def worker():
+        input_path = None
+        output_path = None
+        input_waveform = None
+        processed_waveform = None
+        try:
+            _delete_progress_snapshot(session_id)
+
+            warm_message = "loading terry (first run / model warmup)"
+            with _progress_lock:
+                _last_progress_percent[session_id] = -1
+            _set_progress(session_id, 0, status="warming", message=warm_message)
+
+            _upsert_juce_session(
+                session_id,
+                status="warming",
+                progress=0,
+                error=None,
+                queue_status=_build_queue_status("warming", warm_message, 0),
+                original_audio=audio_data,
+            )
+
+            input_path = _write_base64_audio_to_file(audio_data, session_id)
+
+            _set_progress(session_id, 0, status="processing", message="transforming... 0%")
+            _upsert_juce_session(
+                session_id,
+                status="processing",
+                progress=0,
+                error=None,
+                queue_status=_build_queue_status("processing", "transforming...", 0),
+            )
+
+            input_waveform = load_audio_from_file(input_path)
+            processed_waveform = process_audio(
+                input_waveform,
+                variation,
+                flowstep,
+                solver,
+                custom_prompt,
+                session_id=session_id,
+                progress_callback=redis_progress_callback,
+                backend_engine=backend_engine,
+            )
+
+            output_path = _shared_audio_file("output", session_id)
+            torchaudio.save(output_path, processed_waveform.cpu(), 32000)
+            with open(output_path, "rb") as f:
+                result_audio = base64.b64encode(f.read()).decode("utf-8")
+
+            finalize_progress_tracking(session_id)
+            _upsert_juce_session(
+                session_id,
+                status="completed",
+                progress=100,
+                error=None,
+                queue_status=_build_queue_status("completed", "done", 100),
+                result_audio=result_audio,
+            )
+        except AudioProcessingError as e:
+            fail_progress_tracking(session_id, str(e))
+            _upsert_juce_session(
+                session_id,
+                status="failed",
+                progress=0,
+                error=str(e),
+                queue_status=_build_queue_status("failed", str(e), 0),
+            )
+        except Exception as e:
+            error_message = f"Unexpected error: {e}"
+            fail_progress_tracking(session_id, error_message)
+            logger.error("Unexpected JUCE transform error: %s", e)
+            _upsert_juce_session(
+                session_id,
+                status="failed",
+                progress=0,
+                error=error_message,
+                queue_status=_build_queue_status("failed", error_message, 0),
+            )
+        finally:
+            _cleanup_file(input_path)
+            _cleanup_file(output_path)
+            if input_waveform is not None:
+                del input_waveform
+            if processed_waveform is not None:
+                del processed_waveform
+            if os.environ.get("MELODYFLOW_UNLOAD_EACH_REQUEST", "1") == "1":
+                unload_model()
+            gc.collect()
+
+    threading.Thread(target=worker, daemon=True).start()
+
 
 app = Flask(__name__)
 CORS(app)
@@ -658,7 +878,6 @@ def transform_audio():
             backend_engine=request_backend_engine,
         )
 
-        import uuid
         output_filename = f"output_{session_id}_{uuid.uuid4().hex[:8]}.wav"
         output_file_path = os.path.join(SHARED_TEMP_DIR, output_filename)
 
@@ -688,6 +907,126 @@ def transform_audio():
             fail_progress_tracking(session_id, str(e))
         logger.error(f"Unexpected error: {str(e)}")
         return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
+
+
+@app.route('/api/juce/transform_audio', methods=['POST'])
+def juce_transform_audio():
+    """JUCE-compatible transform endpoint for localhost Terry service."""
+    data = request.get_json(silent=True) or {}
+    session_id = str(data.get('session_id') or uuid.uuid4())
+    variation = str(data.get('variation') or '').strip()
+    audio_data = data.get('audio_data')
+
+    if not variation:
+        return jsonify({'success': False, 'error': 'variation is required'}), 400
+    if not audio_data:
+        return jsonify({'success': False, 'error': 'audio_data is required on localhost'}), 400
+
+    flowstep = data.get('flowstep')
+    if flowstep is not None:
+        try:
+            flowstep = float(flowstep)
+        except Exception:
+            return jsonify({'success': False, 'error': 'Invalid flowstep value'}), 400
+        if flowstep <= 0:
+            return jsonify({'success': False, 'error': 'Flowstep must be positive'}), 400
+
+    solver = str(data.get('solver') or 'euler').strip().lower()
+    if solver not in ('euler', 'midpoint'):
+        return jsonify({'success': False, 'error': 'Invalid solver. Must be "euler" or "midpoint"'}), 400
+
+    custom_prompt = data.get('custom_prompt')
+    backend_engine = data.get('backend_engine')
+
+    _upsert_juce_session(
+        session_id,
+        type='transform',
+        created_at=time.time(),
+        variation=variation,
+        status='queued',
+        progress=0,
+        queue_status=_build_queue_status('queued', 'queued for transform', 0),
+    )
+
+    _queue_transform_job(
+        session_id=session_id,
+        audio_data=audio_data,
+        variation=variation,
+        flowstep=flowstep,
+        solver=solver,
+        custom_prompt=custom_prompt,
+        backend_engine=backend_engine,
+    )
+
+    return jsonify({
+        'success': True,
+        'session_id': session_id,
+        'message': 'Audio transform started',
+        'note': 'Poll /api/juce/poll_status/{session_id} for progress and results',
+    })
+
+
+@app.route('/api/juce/poll_status/<session_id>', methods=['GET'])
+def juce_poll_status(session_id):
+    session_data = _get_juce_session(session_id)
+    if not session_data:
+        return jsonify({'success': False, 'error': 'Session not found'}), 404
+
+    session_data = _sync_juce_session_from_snapshot(session_id, session_data)
+    status = str(session_data.get('status') or 'unknown')
+    progress = max(0, min(100, int(session_data.get('progress') or 0)))
+    queue_status = session_data.get('queue_status')
+    if not isinstance(queue_status, dict):
+        queue_status = {}
+
+    response = {
+        'success': True,
+        'status': status,
+        'progress': progress,
+        'queue_status': queue_status,
+    }
+
+    if status in ('queued', 'warming', 'processing'):
+        response['generation_in_progress'] = False
+        response['transform_in_progress'] = True
+    elif status == 'completed':
+        response['generation_in_progress'] = False
+        response['transform_in_progress'] = False
+        audio_data = session_data.get('result_audio')
+        if audio_data:
+            response['audio_data'] = audio_data
+    elif status == 'failed':
+        response['generation_in_progress'] = False
+        response['transform_in_progress'] = False
+        response['error'] = str(session_data.get('error') or 'transform failed')
+    else:
+        response['generation_in_progress'] = False
+        response['transform_in_progress'] = False
+
+    return jsonify(response)
+
+
+@app.route('/api/juce/undo_transform', methods=['POST'])
+def juce_undo_transform():
+    """Restore original pre-transform audio for a Terry session."""
+    data = request.get_json(silent=True) or {}
+    session_id = str(data.get('session_id') or '').strip()
+    if not session_id:
+        return jsonify({'success': False, 'error': 'Session ID required'}), 400
+
+    session_data = _get_juce_session(session_id)
+    if not session_data:
+        return jsonify({'success': False, 'error': 'Session not found'}), 404
+
+    original_audio = session_data.get('original_audio')
+    if not original_audio:
+        return jsonify({'success': False, 'error': 'No original audio found for undo'}), 404
+
+    return jsonify({
+        'success': True,
+        'audio_data': original_audio,
+        'message': 'Transform undone successfully',
+    })
 
 @app.route('/variations', methods=['GET'])
 def get_variations():
