@@ -19,11 +19,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func pruneTopLevelMenus() {
+        guard let mainMenu = NSApp.mainMenu else { return }
+        let titlesToRemove = ["Format"]
+        for title in titlesToRemove {
+            if let index = mainMenu.items.firstIndex(where: { $0.title.caseInsensitiveCompare(title) == .orderedSame }) {
+                mainMenu.removeItem(at: index)
+            }
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         DispatchQueue.main.async {
             self.presentMainWindow()
+            self.pruneTopLevelMenus()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                self.pruneTopLevelMenus()
+            }
         }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        pruneTopLevelMenus()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -205,6 +223,194 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+private struct GaryHelpView: View {
+    private func iconLink(_ title: String, imageName: String, destination: String) -> some View {
+        Link(destination: URL(string: destination)!) {
+            Label {
+                Text(title)
+            } icon: {
+                Image(imageName)
+                    .renderingMode(.original)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 14, height: 14)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("gary4local help")
+                        .font(.title2.bold())
+                    Text("v1.0 guidance for backend selection, support, and model references.")
+                        .foregroundStyle(.secondary)
+                }
+
+                GroupBox("backend notes") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("mps is usually the safest default on macOS Sequoia.")
+                        Text("mlx is expected to become increasingly preferred on Tahoe-era Apple Silicon systems.")
+                        Text("on some Tahoe setups, certain torch/mps operations can fall back to cpu. if that happens, try mlx.")
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                GroupBox("implementation repositories") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Link("stable-audio-mlx", destination: URL(string: "https://github.com/betweentwomidnights/stable-audio-mlx")!)
+                        Link("melodyflow-mlx", destination: URL(string: "https://github.com/betweentwomidnights/melodyflow-mlx")!)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                GroupBox("model architecture references") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Link("gary (musicgen): facebookresearch/audiocraft", destination: URL(string: "https://github.com/facebookresearch/audiocraft")!)
+                        Link("jerry (stable audio): stabilityAI/stable-audio-tools", destination: URL(string: "https://github.com/stabilityAI/stable-audio-tools")!)
+                        Link("jerry model repo: stable-audio-open-small", destination: URL(string: "https://huggingface.co/stabilityAI/stable-audio-open-small")!)
+                        Link("terry (melodyflow) project page", destination: URL(string: "https://huggingface.co/spaces/facebook/Melodyflow")!)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                GroupBox("support") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("discord is the preferred support channel.")
+                        HStack(spacing: 12) {
+                            iconLink("join discord", imageName: "DiscordIcon", destination: "https://discord.gg/xUkpsKNvM6")
+                            Link(destination: URL(string: "mailto:kev@thecollabagepatch.com")!) {
+                                Label("email support", systemImage: "envelope.fill")
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        Text("finetunes for audiocraft musicgen and stable-audio-open-small are supported with minor adjustments. ask in discord for tuning guidance.")
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(20)
+        }
+    }
+}
+
+private struct GaryAboutView: View {
+    private var appIconImage: NSImage {
+        if let iconURL = Bundle.main.url(forResource: "icon", withExtension: "icns"),
+           let icon = NSImage(contentsOf: iconURL) {
+            return icon
+        }
+        return NSApp.applicationIconImage
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 12) {
+                Image(nsImage: appIconImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 56, height: 56)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("about gary4local")
+                        .font(.title2.bold())
+                    Text("local backend control center")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Text("gary4local runs local backend services for gary4juce.")
+                .foregroundStyle(.secondary)
+
+            Text("this v1.0 flow is tested against gary4juce v2.2.")
+            Link("gary4juce releases", destination: URL(string: "https://github.com/betweentwomidnights/gary4juce")!)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("support")
+                    .font(.headline)
+                HStack(spacing: 12) {
+                    Link("discord", destination: URL(string: "https://discord.gg/xUkpsKNvM6")!)
+                    Link("email", destination: URL(string: "mailto:kev@thecollabagepatch.com")!)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(20)
+    }
+}
+
+private struct GaryCoreCommands: Commands {
+    let controlCenterWindowID: String
+    let aboutWindowID: String
+    @Environment(\.openWindow) private var openWindow
+
+    private func activateAndOpen(windowID: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: windowID)
+    }
+
+    var body: some Commands {
+        CommandGroup(replacing: .appInfo) {
+            Button("about gary4local") {
+                activateAndOpen(windowID: aboutWindowID)
+            }
+        }
+
+        CommandGroup(replacing: .newItem) {
+            Button("open control center") {
+                activateAndOpen(windowID: controlCenterWindowID)
+            }
+            .keyboardShortcut("o", modifiers: [.command])
+        }
+    }
+}
+
+private struct GaryPrunedDefaultMenusCommands: Commands {
+    var body: some Commands {
+        CommandGroup(replacing: .saveItem) {}
+        CommandGroup(replacing: .importExport) {}
+        CommandGroup(replacing: .printItem) {}
+        CommandGroup(replacing: .undoRedo) {}
+        CommandGroup(replacing: .pasteboard) {}
+        CommandGroup(replacing: .textEditing) {}
+        CommandGroup(replacing: .textFormatting) {}
+        CommandGroup(replacing: .toolbar) {}
+        CommandGroup(replacing: .sidebar) {}
+        CommandGroup(replacing: .windowArrangement) {}
+    }
+}
+
+private struct GaryHelpCommands: Commands {
+    let helpWindowID: String
+    @Environment(\.openWindow) private var openWindow
+
+    private func openHelp() {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: helpWindowID)
+    }
+
+    var body: some Commands {
+        CommandGroup(replacing: .help) {
+            Button("gary4local help") {
+                openHelp()
+            }
+            Divider()
+            Link("join discord", destination: URL(string: "https://discord.gg/xUkpsKNvM6")!)
+            Link("github", destination: URL(string: "https://github.com/betweentwomidnights/gary-localhost-installer-mac")!)
+            Link("email support", destination: URL(string: "mailto:kev@thecollabagepatch.com")!)
+        }
+    }
+}
+
 @main
 struct GaryControlCenterApp: App {
     private enum FirstUseHelperStage: String {
@@ -228,6 +434,8 @@ struct GaryControlCenterApp: App {
     private let menuBarFallbackSymbolName = "waveform"
     private let menuBarIconStyle: MenuBarIconStyle = .brandColor
     private let controlCenterWindowID = "control-center"
+    private let helpWindowID = "help-center"
+    private let aboutWindowID = "about-window"
     private let menuBarAttentionTimer = Timer.publish(every: 0.75, on: .main, in: .common).autoconnect()
 
     private var shouldAnimateMenuBarIconAttention: Bool {
@@ -319,6 +527,26 @@ struct GaryControlCenterApp: App {
                 }
         }
         .defaultSize(width: 1180, height: 720)
+        .commands {
+            GaryCoreCommands(
+                controlCenterWindowID: controlCenterWindowID,
+                aboutWindowID: aboutWindowID
+            )
+            GaryPrunedDefaultMenusCommands()
+            GaryHelpCommands(helpWindowID: helpWindowID)
+        }
+
+        WindowGroup("gary4local help", id: helpWindowID) {
+            GaryHelpView()
+                .frame(minWidth: 720, minHeight: 560)
+        }
+        .defaultSize(width: 780, height: 620)
+
+        WindowGroup("about gary4local", id: aboutWindowID) {
+            GaryAboutView()
+                .frame(minWidth: 460, minHeight: 320)
+        }
+        .defaultSize(width: 520, height: 360)
 
         MenuBarExtra {
             MenuBarContentView(
