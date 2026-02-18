@@ -3,7 +3,27 @@ import AppKit
 import Combine
 
 struct ControlCenterView: View {
+    private enum FirstUseHelperStage: String {
+        case rebuild
+        case menuBar
+    }
+
     @ObservedObject var viewModel: ControlCenterViewModel
+    @AppStorage("firstUseHelperDismissedV1") private var firstUseHelperDismissed = false
+    @AppStorage("firstUseHelperStageV1") private var firstUseHelperStageRawValue = FirstUseHelperStage.rebuild.rawValue
+    @AppStorage("firstUseMenuBarOpenedV1") private var firstUseMenuBarOpened = false
+    @State private var didObserveRebuildStart = false
+    @State private var onboardingPulse = false
+    private let showOnboardingResetButton = false
+
+    private var firstUseHelperStage: FirstUseHelperStage {
+        get { FirstUseHelperStage(rawValue: firstUseHelperStageRawValue) ?? .rebuild }
+        nonmutating set { firstUseHelperStageRawValue = newValue.rawValue }
+    }
+
+    private var showsFirstUseHelper: Bool {
+        !firstUseHelperDismissed
+    }
 
     var body: some View {
         Group {
@@ -34,6 +54,13 @@ struct ControlCenterView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .onAppear {
+            if !onboardingPulse {
+                withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                    onboardingPulse = true
+                }
+            }
+        }
         .sheet(isPresented: $viewModel.isModelDownloadSheetPresented) {
             ModelDownloadSheet(viewModel: viewModel)
         }
@@ -45,19 +72,41 @@ struct ControlCenterView: View {
     @ViewBuilder
     private func serviceList(manager: ServiceManager) -> some View {
         VStack(alignment: .leading, spacing: 12) {
+            if showsFirstUseHelper {
+                firstUseHelper(manager: manager)
+            }
+
             Text(viewModel.manifestPath)
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
 
             HStack {
-                Button(
-                    manager.isRebuildingAllEnvironments
-                    ? "rebuilding environments..."
-                    : "rebuild all environments"
-                ) {
+                Button(rebuildAllEnvironmentsButtonTitle(manager: manager)) {
                     manager.rebuildAllEnvironments()
                 }
                 .disabled(manager.isRebuildingAllEnvironments || manager.services.isEmpty)
+                .overlay {
+                    if showsFirstUseHelper && firstUseHelperStage == .rebuild {
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(
+                                Color.accentColor.opacity(onboardingPulse ? 0.95 : 0.4),
+                                lineWidth: 2
+                            )
+                            .shadow(
+                                color: Color.accentColor.opacity(onboardingPulse ? 0.45 : 0.12),
+                                radius: onboardingPulse ? 10 : 5
+                            )
+                            .padding(-3)
+                    }
+                }
+#if DEBUG
+                if showOnboardingResetButton {
+                    Button("show onboarding") {
+                        resetFirstUseHelperState()
+                    }
+                    .controlSize(.small)
+                }
+#endif
                 Spacer()
             }
 
@@ -78,7 +127,134 @@ struct ControlCenterView: View {
             }
             .listStyle(.inset)
         }
+        .onChange(of: manager.isRebuildingAllEnvironments, initial: false) { _, isRebuilding in
+            guard showsFirstUseHelper, firstUseHelperStage == .rebuild else { return }
+            if isRebuilding {
+                didObserveRebuildStart = true
+                return
+            }
+            guard didObserveRebuildStart else { return }
+            didObserveRebuildStart = false
+            if configuredServicesAreReadyOrSucceeded(manager: manager) {
+                firstUseMenuBarOpened = false
+                firstUseHelperStage = .menuBar
+            }
+        }
+        .onChange(of: activeRebuildAllServiceID(manager: manager), initial: true) { _, activeServiceID in
+            guard manager.isRebuildingAllEnvironments else { return }
+            guard let activeServiceID else { return }
+            viewModel.selectService(activeServiceID)
+        }
         .padding(16)
+    }
+
+    @ViewBuilder
+    private func firstUseHelper(manager: ServiceManager) -> some View {
+        let isStageTwoAttention = firstUseHelperStage == .menuBar
+        VStack(alignment: .leading, spacing: 10) {
+            Text("first use")
+                .font(.headline)
+
+            if firstUseHelperStage == .rebuild {
+                Text("step 1: run \(buildOrRebuildAllEnvironmentsPhrase(manager: manager)).")
+                    .font(.subheadline.weight(.semibold))
+                Text("click the highlighted \(buildOrRebuildAllEnvironmentsPhrase(manager: manager)) button below.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("environments look ready.")
+                    .font(.subheadline.weight(.semibold))
+                Text("now use the red gary icon in the top menu bar for quick service start/stop.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("got it") { firstUseHelperDismissed = true }
+                    Spacer()
+                }
+            }
+        }
+        .padding(12)
+        .scaleEffect(isStageTwoAttention ? (onboardingPulse ? 1.012 : 1.0) : 1.0)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(
+                    Color.accentColor.opacity(
+                        isStageTwoAttention
+                        ? (onboardingPulse ? 0.16 : 0.09)
+                        : 0.09
+                    )
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(
+                    Color.accentColor.opacity(
+                        isStageTwoAttention
+                        ? (onboardingPulse ? 0.92 : 0.28)
+                        : 0.22
+                    ),
+                    lineWidth: isStageTwoAttention ? 2.0 : 1.0
+                )
+                .shadow(
+                    color: isStageTwoAttention
+                        ? Color.accentColor.opacity(onboardingPulse ? 0.4 : 0.08)
+                        : .clear,
+                    radius: isStageTwoAttention ? (onboardingPulse ? 14 : 4) : 0
+                )
+                .allowsHitTesting(false)
+        )
+    }
+
+    private func configuredServicesAreReadyOrSucceeded(manager: ServiceManager) -> Bool {
+        let configured = manager.services.filter { $0.service.bootstrap != nil }
+        guard !configured.isEmpty else { return false }
+        return configured.allSatisfy { runtime in
+            runtime.bootstrapState == .ready || runtime.bootstrapState == .succeeded
+        }
+    }
+
+    private func activeRebuildAllServiceID(manager: ServiceManager) -> String? {
+        guard manager.isRebuildingAllEnvironments else { return nil }
+        return manager.services.first(where: { $0.bootstrapState == .running })?.id
+    }
+
+    private func isInitialEnvironmentBuild(manager: ServiceManager) -> Bool {
+        let configured = manager.services.filter { $0.service.bootstrap != nil }
+        guard !configured.isEmpty else { return false }
+
+        // If any configured venv directory already exists, this is no longer first-time setup.
+        let fileManager = FileManager.default
+        let hasAnyExistingVenv = configured.contains { runtime in
+            guard let bootstrap = runtime.service.bootstrap else { return false }
+            return fileManager.fileExists(atPath: bootstrap.venvDirectory.path)
+        }
+        if hasAnyExistingVenv {
+            return false
+        }
+
+        return configured.allSatisfy { runtime in
+            runtime.bootstrapState == .ready
+        }
+    }
+
+    private func buildOrRebuildAllEnvironmentsPhrase(manager: ServiceManager) -> String {
+        isInitialEnvironmentBuild(manager: manager)
+        ? "build all environments"
+        : "rebuild all environments"
+    }
+
+    private func rebuildAllEnvironmentsButtonTitle(manager: ServiceManager) -> String {
+        if manager.isRebuildingAllEnvironments {
+            return "rebuilding environments..."
+        }
+        return buildOrRebuildAllEnvironmentsPhrase(manager: manager)
+    }
+
+    private func resetFirstUseHelperState() {
+        firstUseHelperDismissed = false
+        firstUseHelperStage = .rebuild
+        firstUseMenuBarOpened = false
+        didObserveRebuildStart = false
     }
 
     @ViewBuilder
@@ -966,6 +1142,7 @@ private struct LogTextView: NSViewRepresentable {
 struct MenuBarContentView: View {
     @ObservedObject var viewModel: ControlCenterViewModel
     let onOpenMainWindow: () -> Void
+    let onMenuPresented: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1002,6 +1179,9 @@ struct MenuBarContentView: View {
         }
         .padding(12)
         .frame(minWidth: 360)
+        .onAppear {
+            onMenuPresented()
+        }
     }
 }
 
