@@ -1,41 +1,112 @@
-# Code Signing Checklist (macOS Control Center)
+# Code Signing + Notarization (gary4local DMG)
 
-Use this when moving from Swift package prototype to a signed `.app` in Xcode.
+Use this flow for outside-App-Store macOS distribution.
 
-## 1) Create App Target
+## Distribution Target
 
-- In Xcode, create a macOS App target (SwiftUI/AppKit hybrid is fine).
-- Use bundle id like: `com.betweentwomidnights.gary.localhost.controlcenter`.
+- Target: notarized DMG download.
+- Not target (yet): Mac App Store sandbox distribution.
 
-## 2) Team + Signing
+## Certificates You Need
 
-- Set your Apple Developer Team.
-- Signing Certificate:
-  - Development for local testing.
-  - Developer ID Application for outside-App-Store distribution.
+For a notarized DMG, you only need:
 
-## 3) Entitlements
+- `Developer ID Application` (required, signs `.app` and can sign `.dmg`)
+- `Developer ID Installer` (only needed for signed `.pkg`, optional for DMG-only flow)
 
-Recommended starting point:
-- App Sandbox: OFF (unless you deliberately harden for sandboxed distribution).
-- Hardened Runtime: ON for release builds.
+Provisioning profiles are generally **not required** for Developer ID DMG distribution.
+Profiles are mainly relevant for App Store/TestFlight/iOS style workflows or specific entitlements/capabilities.
 
-## 4) Runtime Paths
+## Xcode Project Settings (gary4local)
 
-- Install backend files under:
-  - `~/Library/Application Support/GaryLocalhost/`
-- Generate manifest there and set:
-  - `GARY_SERVICE_MANIFEST=/Users/<user>/Library/Application Support/GaryLocalhost/manifest/services.json`
+- Team: `P8L4LGS728`
+- Signing: Automatic is fine for local release builds.
+- Release config:
+  - `ENABLE_HARDENED_RUNTIME = YES`
+  - `ENABLE_APP_SANDBOX = NO` (DMG target)
 
-## 5) Notarization
+## Runtime Payload Layout
 
-For release:
-- Archive in Xcode.
-- Export signed app.
-- Notarize with your Developer ID credentials.
-- Staple ticket to app (and DMG, if used).
+The app stages backend source into app resources at build time:
 
-## 6) Login Item (Optional)
+- `Contents/Resources/runtime/audiocraft-mlx`
+- `Contents/Resources/runtime/melodyflow`
+- `Contents/Resources/runtime/stable-audio-tools`
+- `Contents/Resources/manifest/services.production.json`
 
-If you want auto-launch at login:
-- Add login item support with `SMAppService` in the app target.
+Virtualenvs and caches remain user-local:
+
+- `~/Library/Application Support/GaryLocalhost/venvs`
+- `~/Library/Application Support/GaryLocalhost/cache`
+- `~/Library/Logs/GaryLocalhost`
+
+## Preflight Checks
+
+Verify signing identities exist in local keychain:
+
+```bash
+security find-identity -v -p codesigning
+```
+
+You should see at least one `Developer ID Application: <Name> (<TeamID>)` identity.
+
+## Build + Sign
+
+From Xcode:
+
+1. Select `gary4local` target, `Release` configuration.
+2. Product -> Archive.
+3. Distribute App -> Copy App (or direct export).
+
+Or CLI:
+
+```bash
+xcodebuild -project gary4local/gary4local.xcodeproj \
+  -scheme gary4local \
+  -configuration Release \
+  -destination 'platform=macOS' \
+  build
+```
+
+## Notarization (notarytool)
+
+1. Store credentials once:
+
+```bash
+xcrun notarytool store-credentials "gary4local-notary" \
+  --apple-id "<apple-id-email>" \
+  --team-id "P8L4LGS728" \
+  --password "<app-specific-password>"
+```
+
+2. Zip or DMG the signed app, then submit:
+
+```bash
+xcrun notarytool submit /path/to/gary4local.dmg \
+  --keychain-profile "gary4local-notary" \
+  --wait
+```
+
+3. Staple ticket:
+
+```bash
+xcrun stapler staple /path/to/gary4local.app
+xcrun stapler staple /path/to/gary4local.dmg
+```
+
+4. Validate:
+
+```bash
+spctl -a -vv /path/to/gary4local.app
+```
+
+## First-Run Runtime Notes
+
+- On first use, users run `build all environments` to create service venvs.
+- `uv` bootstraps automatically if missing.
+- `python3.11` must exist on user machine (or be supplied by your installer/bootstrap in a future pass).
+
+## Recommended Next Hardening Pass
+
+- Add explicit python bootstrap/install guidance for machines missing `python3.11`.
+- Move toward wheelhouse/bundled runtime strategy for deterministic dependency installs.

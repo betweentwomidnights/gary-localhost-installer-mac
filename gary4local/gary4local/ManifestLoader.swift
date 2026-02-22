@@ -20,11 +20,41 @@ struct ManifestLoader {
             return URL(fileURLWithPath: customPath)
         }
 
+        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        let appSupportCandidates = [
+            home.appendingPathComponent("Library/Application Support/GaryLocalhost/manifest/services.json"),
+            home.appendingPathComponent("Library/Application Support/GaryLocalhost/manifest/services.production.json"),
+            home.appendingPathComponent("Library/Application Support/GaryLocalhost/manifest/services.dev.json"),
+        ]
+        for candidate in appSupportCandidates where FileManager.default.fileExists(atPath: candidate.path) {
+            return candidate
+        }
+
+        if let bundledManifest = Bundle.main.url(
+            forResource: "services",
+            withExtension: "json",
+            subdirectory: "manifest"
+        ) {
+            return bundledManifest
+        }
+        if let bundledManifest = Bundle.main.url(
+            forResource: "services.production",
+            withExtension: "json",
+            subdirectory: "manifest"
+        ) {
+            return bundledManifest
+        }
         if let bundledManifest = Bundle.main.url(
             forResource: "services.dev",
             withExtension: "json",
             subdirectory: "manifest"
         ) {
+            return bundledManifest
+        }
+        if let bundledManifest = Bundle.main.url(forResource: "services", withExtension: "json") {
+            return bundledManifest
+        }
+        if let bundledManifest = Bundle.main.url(forResource: "services.production", withExtension: "json") {
             return bundledManifest
         }
         if let bundledManifest = Bundle.main.url(forResource: "services.dev", withExtension: "json") {
@@ -33,7 +63,6 @@ struct ManifestLoader {
 
         let fileManager = FileManager.default
         let cwd = URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
-        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
 
         let candidates = [
             cwd.appendingPathComponent("control-center/manifest/services.dev.json"),
@@ -69,6 +98,8 @@ struct ManifestLoader {
         let manifestDirURL = finalManifestURL.deletingLastPathComponent()
         let workspaceRootURL = workspaceRoot(forManifestDirectory: manifestDirURL)
         let appSupportRoot = "\(NSHomeDirectory())/Library/Application Support/GaryLocalhost"
+        let bundleResourcesRoot = Bundle.main.resourceURL?.standardizedFileURL.path ?? workspaceRootURL.path
+        let appBundleRoot = Bundle.main.bundleURL.standardizedFileURL.path
 
         var variables: [String: String] = [
             "HOME": NSHomeDirectory(),
@@ -76,6 +107,8 @@ struct ManifestLoader {
             "MANIFEST_DIR": manifestDirURL.path,
             "WORKSPACE_ROOT": workspaceRootURL.path,
             "APP_SUPPORT_DIR": appSupportRoot,
+            "BUNDLE_RESOURCES": bundleResourcesRoot,
+            "APP_BUNDLE_DIR": appBundleRoot,
         ]
 
         for (key, value) in ProcessInfo.processInfo.environment {

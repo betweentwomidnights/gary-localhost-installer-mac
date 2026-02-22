@@ -41,6 +41,7 @@ These staging repos are used to validate MLX integrations before promoting minim
   Implemented from the staging flow in [melodyflow-mlx](https://github.com/betweentwomidnights/melodyflow-mlx).
 - Audiocraft MLX + MelodyFlow rebuild/run have been validated from this repo with the JUCE plugin flow.
 - App icon asset set now uses the repository-provided Gary icon.
+- Model download transport note (Apple Silicon): in our testing, `hf_xet` can have very slow/unstable time-to-first-byte and throughput. We currently prefer reliable fallback to HTTPS downloads (often around `~10 MB/s`) when needed.
 
 ### Next Production Pass
 
@@ -55,9 +56,22 @@ These staging repos are used to validate MLX integrations before promoting minim
   - service naming/copy pass (`gary` / `terry` / `jerry`)
   - visual style alignment with gary4juce theme (while keeping native macOS clarity)
 - Packaging/release:
-  - bundle manifest/assets for distribution
+  - bundle runtime payload + production manifest for distribution
   - signing + notarization
   - DMG installer workflow
+
+### DMG Runtime Packaging (current approach)
+
+- `gary4local` now stages runtime backend source code into app resources during build:
+  - `Contents/Resources/runtime/audiocraft-mlx`
+  - `Contents/Resources/runtime/melodyflow`
+  - `Contents/Resources/runtime/stable-audio-tools`
+- Production manifest is staged to:
+  - `Contents/Resources/manifest/services.production.json`
+- Mutable user data remains outside the app bundle:
+  - venvs/caches: `~/Library/Application Support/GaryLocalhost/`
+  - logs: `~/Library/Logs/GaryLocalhost/`
+- See `control-center/docs/CODE_SIGNING.md` for signing + notarization workflow.
 
 ## Rebuild Python Environments
 

@@ -50,6 +50,8 @@ Built-in tokens:
 - `${MANIFEST_DIR}`
 - `${WORKSPACE_ROOT}`
 - `${APP_SUPPORT_DIR}`
+- `${BUNDLE_RESOURCES}`
+- `${APP_BUNDLE_DIR}`
 
 You can define additional tokens in `variables`.
 

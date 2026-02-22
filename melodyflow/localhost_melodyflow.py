@@ -6,14 +6,21 @@ import time
 import tempfile
 import os
 import json
+import inspect
 import threading
+import subprocess
+import shutil
+import select
 import base64
 import uuid
+from datetime import datetime, timezone
+from typing import Callable, Optional
 from audiocraft.models import MelodyFlow
 import gc
 from variations import VARIATIONS
 import logging
 from contextlib import contextmanager
+from huggingface_hub import hf_hub_download
 
 try:
     import redis
@@ -156,6 +163,576 @@ def redis_progress_callback(session_id, current, total):
 JUCE_SESSION_TTL_SECONDS = 3600
 _juce_session_lock = threading.Lock()
 _juce_sessions = {}
+MODEL_PREDOWNLOAD_TTL_SECONDS = 3600
+_model_predownload_lock = threading.Lock()
+_model_predownload_sessions = {}
+
+MELODYFLOW_MODEL_REPO = os.environ.get("MELODYFLOW_MODEL_REPO", "facebook/melodyflow-t24-30secs")
+MELODYFLOW_REQUIRED_FILES = (
+    "state_dict.bin",
+    "compression_state_dict.bin",
+)
+HF_DOWNLOADER_PYTHON_VERSION = "3.11"
+HF_DOWNLOADER_PACKAGES = [
+    "huggingface_hub==1.4.1",
+    "hf_xet==1.2.0",
+    "tqdm==4.67.2",
+]
+HF_DOWNLOADER_VENV_DIR = os.environ.get(
+    "G4L_HF_DOWNLOADER_VENV_DIR",
+    os.path.join(
+        os.path.expanduser("~"),
+        "Library",
+        "Application Support",
+        "GaryLocalhost",
+        "venvs",
+        "hf-downloader",
+    ),
+)
+HF_DOWNLOADER_MARKER_FILE = ".g4l_hf_downloader_spec.json"
+HF_DOWNLOADER_SPEC_VERSION = 1
+_hf_downloader_lock = threading.Lock()
+_hf_downloader_python_path: Optional[str] = None
+HF_DOWNLOADER_XET_MODE = str(os.environ.get("G4L_HF_DOWNLOADER_XET_MODE", "adaptive")).strip().lower()
+HF_DOWNLOADER_XET_HIGH_PERFORMANCE = os.environ.get("G4L_HF_DOWNLOADER_XET_HIGH_PERFORMANCE", "1")
+HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS = str(
+    os.environ.get("G4L_HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS", "64")
+).strip()
+try:
+    HF_DOWNLOADER_XET_FIRST_BYTE_TIMEOUT_SECONDS = max(
+        5.0, float(str(os.environ.get("G4L_HF_XET_FIRST_BYTE_TIMEOUT_SECONDS", "25")).strip())
+    )
+except Exception:
+    HF_DOWNLOADER_XET_FIRST_BYTE_TIMEOUT_SECONDS = 25.0
+try:
+    HF_DOWNLOADER_XET_SLOW_SPEED_BPS = max(
+        64 * 1024,
+        int(str(os.environ.get("G4L_HF_XET_SLOW_SPEED_BPS", str(1 * 1024 * 1024))).strip()),
+    )
+except Exception:
+    HF_DOWNLOADER_XET_SLOW_SPEED_BPS = 1 * 1024 * 1024
+try:
+    HF_DOWNLOADER_XET_SLOW_SPEED_GRACE_SECONDS = max(
+        5.0, float(str(os.environ.get("G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS", "45")).strip())
+    )
+except Exception:
+    HF_DOWNLOADER_XET_SLOW_SPEED_GRACE_SECONDS = 45.0
+
+try:
+    _HF_HUB_DOWNLOAD_SUPPORTS_TQDM_CLASS = (
+        "tqdm_class" in inspect.signature(hf_hub_download).parameters
+    )
+except Exception:
+    _HF_HUB_DOWNLOAD_SUPPORTS_TQDM_CLASS = False
+
+
+class _NullTqdmStream:
+    def write(self, message: str) -> int:
+        return len(message) if message is not None else 0
+
+    def flush(self) -> None:
+        return None
+
+    def isatty(self) -> bool:
+        return False
+
+
+_NULL_TQDM_STREAM = _NullTqdmStream()
+
+
+def _fmt_bytes(n: int) -> str:
+    f = float(max(0, int(n)))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if f < 1024.0 or unit == "TB":
+            return f"{f:.1f}{unit}" if unit != "B" else f"{int(f)}B"
+        f /= 1024.0
+    return f"{f:.1f}TB"
+
+
+def _resolve_existing_uv_path() -> Optional[str]:
+    candidates = []
+    found_in_path = shutil.which("uv")
+    if found_in_path:
+        candidates.append(found_in_path)
+
+    home = os.path.expanduser("~")
+    candidates.extend([
+        os.path.join(home, ".local", "bin", "uv"),
+        os.path.join(home, "Library", "Application Support", "gary4local", "tools", "uv", "uv"),
+        os.path.join(home, "Library", "Application Support", "gary4local", "tools", "uv", "bin", "uv"),
+        os.path.join(home, "Library", "Application Support", "GaryLocalhost", "tools", "uv", "uv"),
+        os.path.join(home, "Library", "Application Support", "GaryLocalhost", "tools", "uv", "bin", "uv"),
+        "/opt/homebrew/bin/uv",
+        "/usr/local/bin/uv",
+    ])
+
+    seen = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _bootstrap_uv_if_needed() -> str:
+    existing = _resolve_existing_uv_path()
+    if existing:
+        return existing
+
+    home = os.path.expanduser("~")
+    install_dir = os.path.join(
+        home,
+        "Library",
+        "Application Support",
+        "gary4local",
+        "tools",
+        "uv",
+    )
+    os.makedirs(install_dir, exist_ok=True)
+
+    env = os.environ.copy()
+    env["UV_UNMANAGED_INSTALL"] = install_dir
+    env["PATH"] = env.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin"
+
+    proc = subprocess.run(
+        ["/bin/sh", "-lc", "curl -LsSf https://astral.sh/uv/install.sh | sh"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"uv bootstrap failed (exit {proc.returncode}): {(proc.stderr or proc.stdout or '').strip()}"
+        )
+
+    resolved = _resolve_existing_uv_path()
+    if not resolved:
+        raise RuntimeError("uv bootstrap completed but uv executable was not found.")
+    logger.info("HF downloader bootstrap: uv installed at %s", resolved)
+    return resolved
+
+
+def _run_command_checked(args: list[str], *, env: Optional[dict] = None) -> None:
+    proc = subprocess.run(args, capture_output=True, text=True, env=env)
+    if proc.returncode == 0:
+        return
+    message = (proc.stderr or proc.stdout or "").strip()
+    raise RuntimeError(
+        f"command failed (exit {proc.returncode}): {' '.join(args)}"
+        + (f" | {message}" if message else "")
+    )
+
+
+def _ensure_hf_downloader_python() -> str:
+    global _hf_downloader_python_path
+
+    with _hf_downloader_lock:
+        if _hf_downloader_python_path and os.path.exists(_hf_downloader_python_path):
+            return _hf_downloader_python_path
+
+        uv_path = _bootstrap_uv_if_needed()
+        venv_dir = HF_DOWNLOADER_VENV_DIR
+        marker_path = os.path.join(venv_dir, HF_DOWNLOADER_MARKER_FILE)
+        desired_marker = {
+            "version": HF_DOWNLOADER_SPEC_VERSION,
+            "python": HF_DOWNLOADER_PYTHON_VERSION,
+            "packages": HF_DOWNLOADER_PACKAGES,
+        }
+        venv_python = os.path.join(venv_dir, "bin", "python")
+
+        os.makedirs(os.path.dirname(venv_dir), exist_ok=True)
+        if not os.path.exists(venv_python):
+            _run_command_checked([uv_path, "python", "install", HF_DOWNLOADER_PYTHON_VERSION])
+            _run_command_checked([
+                uv_path,
+                "venv",
+                "--python",
+                HF_DOWNLOADER_PYTHON_VERSION,
+                "--seed",
+                venv_dir,
+            ])
+
+        needs_install = True
+        if os.path.exists(marker_path):
+            try:
+                with open(marker_path, "r", encoding="utf-8") as f:
+                    marker_payload = json.load(f)
+                needs_install = marker_payload != desired_marker
+            except Exception:
+                needs_install = True
+
+        if needs_install:
+            _run_command_checked([
+                uv_path, "pip", "install", "--python", venv_python,
+                "--upgrade", "pip", "setuptools", "wheel"
+            ])
+            _run_command_checked(
+                [uv_path, "pip", "install", "--python", venv_python, "--upgrade"]
+                + HF_DOWNLOADER_PACKAGES
+            )
+            with open(marker_path, "w", encoding="utf-8") as f:
+                json.dump(desired_marker, f)
+
+        _hf_downloader_python_path = venv_python
+        logger.info("HF downloader env ready: %s", venv_python)
+        return venv_python
+
+
+def _download_with_shared_hf_downloader_env(
+    *,
+    model_name: str,
+    filename: str,
+    on_progress: Callable[[dict], None],
+) -> str:
+    def resolve_mode() -> str:
+        mode = HF_DOWNLOADER_XET_MODE
+        if mode in {"on", "off", "adaptive"}:
+            return mode
+        return "adaptive"
+
+    def terminate_process(process: subprocess.Popen) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=2)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+    def run_worker(
+        *,
+        use_xet: bool,
+        force_download: bool = False,
+    ) -> tuple[bool, Optional[str], Optional[str]]:
+        backend_label = "shared downloader env (xet)" if use_xet else "shared downloader env (http)"
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        if use_xet:
+            env["HF_HUB_DISABLE_XET"] = "0"
+            env["HF_XET_HIGH_PERFORMANCE"] = HF_DOWNLOADER_XET_HIGH_PERFORMANCE
+            if HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS:
+                env["HF_XET_NUM_CONCURRENT_RANGE_GETS"] = HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS
+            env.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+        else:
+            env["HF_HUB_DISABLE_XET"] = "1"
+            env["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+
+        worker_cmd = [downloader_python, worker_path, "--repo-id", model_name, "--filename", filename]
+        if force_download:
+            worker_cmd.append("--force-download")
+
+        process = subprocess.Popen(
+            worker_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            bufsize=1,
+        )
+        if process.stdout is None:
+            terminate_process(process)
+            raise RuntimeError("failed to capture downloader worker output.")
+
+        worker_error = None
+        started_at = time.time()
+        first_byte_at = None
+        slow_since = None
+
+        while True:
+            if use_xet:
+                now = time.time()
+                if first_byte_at is None and (now - started_at) > HF_DOWNLOADER_XET_FIRST_BYTE_TIMEOUT_SECONDS:
+                    terminate_process(process)
+                    logger.warning(
+                        "shared downloader env xet timeout: no first byte for %s after %.1fs",
+                        filename,
+                        HF_DOWNLOADER_XET_FIRST_BYTE_TIMEOUT_SECONDS,
+                    )
+                    return False, "xet_no_first_byte", backend_label
+                if first_byte_at is not None and slow_since is not None and (
+                    now - slow_since
+                ) > HF_DOWNLOADER_XET_SLOW_SPEED_GRACE_SECONDS:
+                    terminate_process(process)
+                    logger.warning(
+                        "shared downloader env xet slow throughput for %s: < %s B/s for %.1fs",
+                        filename,
+                        HF_DOWNLOADER_XET_SLOW_SPEED_BPS,
+                        HF_DOWNLOADER_XET_SLOW_SPEED_GRACE_SECONDS,
+                    )
+                    return False, "xet_slow_throughput", backend_label
+
+            ready, _, _ = select.select([process.stdout], [], [], 0.4)
+            if not ready:
+                if process.poll() is not None:
+                    break
+                continue
+
+            raw_line = process.stdout.readline()
+            if raw_line == "":
+                if process.poll() is not None:
+                    break
+                continue
+
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+
+            event = str(payload.get("event") or "").lower()
+            if event == "progress":
+                on_progress(payload)
+                downloaded = int(payload.get("downloaded_bytes") or 0)
+                speed_bps = float(payload.get("speed_bps") or 0.0)
+                if downloaded > 0 and first_byte_at is None:
+                    first_byte_at = time.time()
+                if use_xet and downloaded > 0:
+                    if speed_bps >= HF_DOWNLOADER_XET_SLOW_SPEED_BPS:
+                        slow_since = None
+                    else:
+                        if slow_since is None:
+                            slow_since = time.time()
+            elif event == "error":
+                worker_error = str(payload.get("error") or "unknown downloader error")
+
+        return_code = process.wait()
+        if return_code != 0:
+            raise RuntimeError(worker_error or f"downloader worker failed with exit {return_code}.")
+        return True, None, backend_label
+
+    downloader_python = _ensure_hf_downloader_python()
+    worker_path = os.path.join(os.path.dirname(__file__), "hf_predownload_worker.py")
+    if not os.path.exists(worker_path):
+        raise RuntimeError(f"downloader worker is missing: {worker_path}")
+
+    mode = resolve_mode()
+    if mode == "off":
+        success, _, backend_label = run_worker(use_xet=False)
+        if not success:
+            raise RuntimeError("shared downloader env failed in HTTP mode.")
+        return backend_label or "shared downloader env (http)"
+
+    if mode == "on":
+        success, _, backend_label = run_worker(use_xet=True)
+        if not success:
+            raise RuntimeError("shared downloader env failed in forced XET mode.")
+        return backend_label or "shared downloader env (xet)"
+
+    # adaptive (default): try xet first, then fallback to http on bad TTFB/speed
+    success, fallback_reason, backend_label = run_worker(use_xet=True)
+    if success:
+        return backend_label or "shared downloader env (xet)"
+
+    logger.warning(
+        "shared downloader env adaptive fallback for %s/%s: %s -> http",
+        model_name,
+        filename,
+        fallback_reason or "unknown reason",
+    )
+    success_http, _, backend_label_http = run_worker(
+        use_xet=False,
+        force_download=True,
+    )
+    if not success_http:
+        raise RuntimeError("shared downloader env failed in HTTP fallback mode.")
+    return backend_label_http or "shared downloader env (http fallback)"
+
+
+def _make_hf_tqdm_class(
+    *,
+    model_name: str,
+    filename: str,
+    stage_index: int,
+    stage_total: int,
+    on_progress: Optional[Callable[[dict], None]],
+):
+    if on_progress is None:
+        return None
+
+    try:
+        from huggingface_hub.utils import tqdm as hf_tqdm
+    except Exception:
+        return None
+
+    class _CallbackTqdm(hf_tqdm):  # type: ignore[misc,valid-type]
+        def __init__(self, *args, **kwargs):
+            self._last_emit_t = 0.0
+            self._last_emit_pct = -1
+            self._last_emit_bytes = 0
+            kwargs.setdefault("file", _NULL_TQDM_STREAM)
+            kwargs.setdefault("leave", False)
+            kwargs["disable"] = False
+            super().__init__(*args, **kwargs)
+            self._emit(force=True)
+
+        def update(self, n=1):
+            out = super().update(n)
+            self._emit()
+            return out
+
+        def refresh(self, *args, **kwargs):
+            out = super().refresh(*args, **kwargs)
+            self._emit()
+            return out
+
+        def set_description(self, desc=None, refresh=True):
+            out = super().set_description(desc, refresh=refresh)
+            self._emit(force=True)
+            return out
+
+        def close(self):
+            self._emit(force=True)
+            return super().close()
+
+        def display(self, msg=None, pos=None):
+            return None
+
+        def _emit(self, force: bool = False) -> None:
+            now = time.time()
+            total = int(getattr(self, "total", 0) or 0)
+            downloaded = int(getattr(self, "n", 0) or 0)
+            pct = int((downloaded / total) * 100) if total > 0 else 0
+
+            if not force:
+                if (now - self._last_emit_t) < 0.25:
+                    return
+                pct_delta_ok = self._last_emit_pct < 0 or abs(pct - self._last_emit_pct) >= 1
+                bytes_delta_ok = (downloaded - self._last_emit_bytes) >= (1 * 1024 * 1024)
+                if not (pct_delta_ok or bytes_delta_ok):
+                    return
+
+            self._last_emit_t = now
+            self._last_emit_pct = pct
+            self._last_emit_bytes = downloaded
+            rate = None
+            try:
+                rate = float((getattr(self, "format_dict", {}) or {}).get("rate") or 0.0)
+            except Exception:
+                rate = 0.0
+            on_progress({
+                "repo_id": model_name,
+                "filename": filename,
+                "stage_index": stage_index,
+                "stage_total": stage_total,
+                "downloaded_bytes": downloaded,
+                "total_bytes": total,
+                "download_percent": max(0, min(100, pct)),
+                "speed_bps": max(0.0, float(rate or 0.0)),
+            })
+
+    return _CallbackTqdm
+
+
+@contextmanager
+def _patched_hf_download_tqdm(tqdm_class):
+    if tqdm_class is None:
+        yield
+        return
+    try:
+        import huggingface_hub.file_download as hf_file_download
+    except Exception:
+        yield
+        return
+
+    original_tqdm = getattr(hf_file_download, "tqdm", None)
+    if original_tqdm is None:
+        yield
+        return
+
+    hf_file_download.tqdm = tqdm_class
+    try:
+        yield
+    finally:
+        hf_file_download.tqdm = original_tqdm
+
+
+@contextmanager
+def _temporary_env(overrides: Optional[dict[str, str]]):
+    if not overrides:
+        yield
+        return
+
+    previous = {}
+    try:
+        for key, value in overrides.items():
+            previous[key] = os.environ.get(key)
+            os.environ[key] = value
+        yield
+    finally:
+        for key, old in previous.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+
+
+def _hf_hub_download_safe(**kwargs):
+    try:
+        return hf_hub_download(**kwargs)
+    except TypeError:
+        kwargs.pop("force_download", None)
+        return hf_hub_download(**kwargs)
+
+
+def _is_checkpoint_like_filename(filename: str) -> bool:
+    lower = str(filename or "").strip().lower()
+    return lower.endswith((".bin", ".ckpt", ".pt", ".pth", ".safetensors"))
+
+
+def _looks_like_corrupt_checkpoint_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    markers = (
+        "pytorchstreamreader failed",
+        "invalid header",
+        "archive is corrupted",
+        "filename 'storages' not found",
+        "cannot use ``weights_only=true``",
+        "legacy .tar format",
+        "unable to parse checkpoint",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _repair_melodyflow_model_cache() -> None:
+    runtime_profiles = [
+        {},
+        {"HF_HUB_DISABLE_XET": "1", "HF_HUB_ENABLE_HF_TRANSFER": "1"},
+        {"HF_HUB_DISABLE_XET": "1", "HF_HUB_ENABLE_HF_TRANSFER": "0"},
+    ]
+
+    for filename in MELODYFLOW_REQUIRED_FILES:
+        downloaded = False
+        errors = []
+        for profile in runtime_profiles:
+            profile_label = (
+                "default"
+                if not profile
+                else ", ".join(f"{k}={v}" for k, v in profile.items())
+            )
+            try:
+                with _temporary_env(profile):
+                    _hf_hub_download_safe(
+                        repo_id=MELODYFLOW_MODEL_REPO,
+                        filename=filename,
+                        force_download=True,
+                    )
+                downloaded = True
+                break
+            except Exception as download_error:
+                errors.append(f"{profile_label}: {download_error}")
+
+        if not downloaded:
+            raise RuntimeError(
+                f"failed to repair melodyflow cache for {filename}: {' | '.join(errors)}"
+            )
 
 
 def _cleanup_expired_juce_sessions(now_ts: float) -> None:
@@ -188,6 +765,374 @@ def _get_juce_session(session_id: str):
         _cleanup_expired_juce_sessions(now_ts)
         payload = _juce_sessions.get(session_id)
         return dict(payload) if payload else None
+
+
+def _cleanup_expired_model_predownload_sessions(now_ts: float) -> None:
+    expired = [
+        sid for sid, payload in _model_predownload_sessions.items()
+        if float(payload.get("expires_at", 0)) <= now_ts
+    ]
+    for sid in expired:
+        _model_predownload_sessions.pop(sid, None)
+
+
+def _upsert_model_predownload_session(session_id: str, **updates) -> None:
+    if not session_id:
+        return
+    now_ts = time.time()
+    with _model_predownload_lock:
+        _cleanup_expired_model_predownload_sessions(now_ts)
+        payload = dict(_model_predownload_sessions.get(session_id) or {})
+        payload.update(updates)
+        payload["updated_at"] = now_ts
+        payload["expires_at"] = now_ts + MODEL_PREDOWNLOAD_TTL_SECONDS
+        _model_predownload_sessions[session_id] = payload
+
+
+def _get_model_predownload_session(session_id: str):
+    if not session_id:
+        return None
+    now_ts = time.time()
+    with _model_predownload_lock:
+        _cleanup_expired_model_predownload_sessions(now_ts)
+        payload = _model_predownload_sessions.get(session_id)
+        return dict(payload) if payload else None
+
+
+def _model_catalog_payload() -> dict:
+    return {
+        "small": [],
+        "medium": [],
+        "large": [
+            {
+                "name": "melodyflow-t24-30secs",
+                "path": MELODYFLOW_MODEL_REPO,
+                "type": "single",
+            }
+        ],
+    }
+
+
+def _model_download_status_for(model_name: str) -> dict:
+    missing = []
+    for filename in MELODYFLOW_REQUIRED_FILES:
+        try:
+            hf_hub_download(
+                repo_id=model_name,
+                filename=filename,
+                local_files_only=True,
+            )
+        except Exception:
+            missing.append(filename)
+
+    return {
+        "downloaded": len(missing) == 0,
+        "missing": missing,
+    }
+
+
+def _build_model_queue_status(
+    *,
+    status: str,
+    message: str,
+    model_name: str,
+    stage_index: int,
+    stage_total: int,
+    download_percent: int,
+) -> dict:
+    payload = {
+        "status": status,
+        "message": message,
+        "position": 0,
+        "total_queued": 0,
+        "estimated_time": None,
+        "estimated_seconds": 0,
+        "source": "melodyflow-localhost",
+        "phase": "download",
+        "repo_id": model_name,
+        "download_percent": max(0, min(100, int(download_percent))),
+        "stage_index": max(0, int(stage_index)),
+        "stage_total": max(0, int(stage_total)),
+        "unit": "files",
+    }
+    return payload
+
+
+def _run_model_predownload(session_id: str, model_name: str) -> None:
+    def worker():
+        stage_total = len(MELODYFLOW_REQUIRED_FILES)
+        try:
+            _upsert_model_predownload_session(
+                session_id,
+                model_name=model_name,
+                status="warming",
+                progress=0,
+                queue_status=_build_model_queue_status(
+                    status="warming",
+                    message=f"preparing download for {model_name}",
+                    model_name=model_name,
+                    stage_index=0,
+                    stage_total=stage_total,
+                    download_percent=0,
+                ),
+                error=None,
+            )
+
+            for stage_index, filename in enumerate(MELODYFLOW_REQUIRED_FILES, start=1):
+                stage_start_progress = int(((stage_index - 1) / max(stage_total, 1)) * 100)
+                stage_status = "warming" if stage_index == 1 else "processing"
+                download_backend_label = "shared downloader env"
+                _upsert_model_predownload_session(
+                    session_id,
+                    status=stage_status,
+                    progress=stage_start_progress,
+                    queue_status=_build_model_queue_status(
+                        status=stage_status,
+                        message=f"stage {stage_index}/{stage_total}: downloading {filename}",
+                        model_name=model_name,
+                        stage_index=stage_index,
+                        stage_total=stage_total,
+                        download_percent=0,
+                    ),
+                    error=None,
+                )
+
+                def on_progress(evt: dict) -> None:
+                    stage_percent = int(evt.get("download_percent") or evt.get("percent") or 0)
+                    downloaded = int(evt.get("downloaded_bytes") or 0)
+                    total = int(evt.get("total_bytes") or 0)
+                    speed_bps = float(evt.get("speed_bps") or 0.0)
+                    overall_progress_raw = (
+                        (
+                            (stage_index - 1)
+                            + (max(0, min(100, stage_percent)) / 100.0)
+                        )
+                        / max(stage_total, 1)
+                        * 100
+                    )
+                    overall_progress = int(overall_progress_raw + 0.9999)
+                    if downloaded > 0:
+                        overall_progress = max(stage_start_progress + 1, overall_progress)
+                    overall_progress = max(0, min(99, overall_progress))
+                    message = (
+                        f"stage {stage_index}/{stage_total}: downloading {filename} "
+                        f"via {download_backend_label} "
+                        f"({_fmt_bytes(downloaded)}/{_fmt_bytes(total)} • {stage_percent}%"
+                        f"{(' • ' + _fmt_bytes(int(speed_bps)) + '/s') if speed_bps > 0 else ''})"
+                    )
+                    _upsert_model_predownload_session(
+                        session_id,
+                        status=stage_status,
+                        progress=max(stage_start_progress, overall_progress),
+                        queue_status={
+                            **_build_model_queue_status(
+                                status=stage_status,
+                                message=message,
+                                model_name=model_name,
+                                stage_index=stage_index,
+                                stage_total=stage_total,
+                                download_percent=stage_percent,
+                            ),
+                            "downloaded_bytes": downloaded,
+                            "total_bytes": total,
+                            "speed_bps": speed_bps,
+                        },
+                        error=None,
+                    )
+
+                prefer_runtime_downloader = _is_checkpoint_like_filename(filename)
+                downloaded_with_shared_env = False
+                if prefer_runtime_downloader:
+                    download_backend_label = "runtime checkpoint path"
+                    logger.info(
+                        "model predownload session %s: forcing runtime downloader for %s",
+                        session_id,
+                        filename,
+                    )
+                else:
+                    try:
+                        _upsert_model_predownload_session(
+                            session_id,
+                            status=stage_status,
+                            progress=stage_start_progress,
+                            queue_status=_build_model_queue_status(
+                                status=stage_status,
+                                message=f"stage {stage_index}/{stage_total}: preparing shared downloader env for {filename}",
+                                model_name=model_name,
+                                stage_index=stage_index,
+                                stage_total=stage_total,
+                                download_percent=0,
+                            ),
+                            error=None,
+                        )
+                        selected_backend_label = _download_with_shared_hf_downloader_env(
+                            model_name=model_name,
+                            filename=filename,
+                            on_progress=on_progress,
+                        )
+                        if selected_backend_label:
+                            download_backend_label = selected_backend_label
+                            logger.info(
+                                "model predownload session %s: %s selected for %s",
+                                session_id,
+                                selected_backend_label,
+                                filename,
+                            )
+                        downloaded_with_shared_env = True
+                    except Exception as shared_download_error:
+                        download_backend_label = "runtime fallback"
+                        logger.warning(
+                            "Shared downloader env failed for %s/%s; falling back to runtime env: %s",
+                            model_name,
+                            filename,
+                            shared_download_error,
+                        )
+                        _upsert_model_predownload_session(
+                            session_id,
+                            status=stage_status,
+                            progress=stage_start_progress,
+                            queue_status=_build_model_queue_status(
+                                status=stage_status,
+                                message=(
+                                    f"stage {stage_index}/{stage_total}: shared downloader failed, "
+                                    f"falling back to runtime env for {filename}"
+                                ),
+                                model_name=model_name,
+                                stage_index=stage_index,
+                                stage_total=stage_total,
+                                download_percent=0,
+                            ),
+                            error=None,
+                        )
+                        logger.info(
+                            "model predownload session %s: runtime fallback selected for %s",
+                            session_id,
+                            filename,
+                        )
+
+                if not downloaded_with_shared_env:
+                    tqdm_class = _make_hf_tqdm_class(
+                        model_name=model_name,
+                        filename=filename,
+                        stage_index=stage_index,
+                        stage_total=stage_total,
+                        on_progress=on_progress,
+                    )
+
+                    runtime_profiles = (
+                        [
+                            {},
+                            {"HF_HUB_DISABLE_XET": "1", "HF_HUB_ENABLE_HF_TRANSFER": "1"},
+                            {"HF_HUB_DISABLE_XET": "1", "HF_HUB_ENABLE_HF_TRANSFER": "0"},
+                        ]
+                        if prefer_runtime_downloader
+                        else [{}]
+                    )
+                    attempt_errors = []
+                    downloaded = False
+                    for attempt_index, env_profile in enumerate(runtime_profiles, start=1):
+                        profile_label = (
+                            "default"
+                            if not env_profile
+                            else ", ".join(f"{k}={v}" for k, v in env_profile.items())
+                        )
+                        try:
+                            if len(runtime_profiles) > 1:
+                                _upsert_model_predownload_session(
+                                    session_id,
+                                    status=stage_status,
+                                    progress=stage_start_progress,
+                                    queue_status=_build_model_queue_status(
+                                        status=stage_status,
+                                        message=(
+                                            f"stage {stage_index}/{stage_total}: runtime download attempt "
+                                            f"{attempt_index}/{len(runtime_profiles)} ({profile_label})"
+                                        ),
+                                        model_name=model_name,
+                                        stage_index=stage_index,
+                                        stage_total=stage_total,
+                                        download_percent=0,
+                                    ),
+                                    error=None,
+                                )
+
+                            with _temporary_env(env_profile):
+                                kwargs = {
+                                    "repo_id": model_name,
+                                    "filename": filename,
+                                }
+                                if prefer_runtime_downloader:
+                                    kwargs["force_download"] = True
+
+                                if _HF_HUB_DOWNLOAD_SUPPORTS_TQDM_CLASS:
+                                    if tqdm_class is not None:
+                                        kwargs["tqdm_class"] = tqdm_class
+                                    _hf_hub_download_safe(**kwargs)
+                                else:
+                                    # huggingface_hub<0.20 has no `tqdm_class`; patch module-level
+                                    # progress bar class during this call so we still get callbacks.
+                                    with _patched_hf_download_tqdm(tqdm_class):
+                                        _hf_hub_download_safe(**kwargs)
+
+                            downloaded = True
+                            break
+                        except Exception as runtime_download_error:
+                            attempt_errors.append(
+                                f"attempt {attempt_index} ({profile_label}): {runtime_download_error}"
+                            )
+                            logger.warning(
+                                "Runtime downloader attempt %s failed for %s/%s: %s",
+                                attempt_index,
+                                model_name,
+                                filename,
+                                runtime_download_error,
+                            )
+
+                    if not downloaded:
+                        raise RuntimeError(
+                            f"runtime downloader failed for {model_name}/{filename}: "
+                            f"{' | '.join(attempt_errors)}"
+                        )
+
+                stage_end_progress = int((stage_index / max(stage_total, 1)) * 100)
+                completed = stage_index >= stage_total
+                _upsert_model_predownload_session(
+                    session_id,
+                    status="completed" if completed else "processing",
+                    progress=100 if completed else stage_end_progress,
+                    queue_status=_build_model_queue_status(
+                        status="completed" if completed else "processing",
+                        message=(
+                            f"{model_name} is ready for offline use."
+                            if completed
+                            else f"stage {stage_index}/{stage_total} complete."
+                        ),
+                        model_name=model_name,
+                        stage_index=stage_index,
+                        stage_total=stage_total,
+                        download_percent=100,
+                    ),
+                    error=None,
+                )
+        except Exception as e:
+            error_message = str(e)
+            logger.error("Melodyflow predownload failed: %s", error_message)
+            _upsert_model_predownload_session(
+                session_id,
+                status="failed",
+                progress=0,
+                queue_status=_build_model_queue_status(
+                    status="failed",
+                    message=error_message,
+                    model_name=model_name,
+                    stage_index=0,
+                    stage_total=stage_total,
+                    download_percent=0,
+                ),
+                error=error_message,
+            )
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def _delete_progress_snapshot(session_id: str) -> None:
@@ -577,7 +1522,21 @@ def load_model():
     global model
     if model is None:
         print("Loading MelodyFlow model...")
-        model = MelodyFlow.get_pretrained('facebook/melodyflow-t24-30secs', device=DEVICE)
+        try:
+            model = MelodyFlow.get_pretrained(
+                "facebook/melodyflow-t24-30secs", device=DEVICE
+            )
+        except Exception as model_error:
+            if not _looks_like_corrupt_checkpoint_error(model_error):
+                raise
+            logger.warning(
+                "MelodyFlow checkpoint load failed; repairing cache and retrying once: %s",
+                model_error,
+            )
+            _repair_melodyflow_model_cache()
+            model = MelodyFlow.get_pretrained(
+                "facebook/melodyflow-t24-30secs", device=DEVICE
+            )
     return model
 
 def load_audio_from_file(file_path: str, target_sr: int = 32000) -> torch.Tensor:
@@ -1044,6 +2003,121 @@ def get_variations():
         })
     except Exception as e:
         return jsonify({'error': f'Failed to fetch variations: {str(e)}'}), 500
+
+@app.route('/api/models', methods=['GET'])
+def get_available_models():
+    try:
+        return jsonify({
+            "success": True,
+            "models": _model_catalog_payload(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
+
+
+@app.route('/api/models/download_status', methods=['GET'])
+def get_models_download_status():
+    try:
+        requested_model = request.args.get("model_name", type=str)
+        model_name = MELODYFLOW_MODEL_REPO
+        if requested_model and requested_model != model_name:
+            return jsonify({
+                "success": False,
+                "error": f"Unknown model '{requested_model}'",
+            }), 404
+
+        return jsonify({
+            "success": True,
+            "models": {
+                model_name: _model_download_status_for(model_name),
+            },
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
+
+
+@app.route('/api/models/predownload', methods=['POST'])
+def start_model_predownload():
+    try:
+        payload = request.get_json(silent=True) or {}
+        model_name = str(payload.get("model_name") or "").strip()
+        if not model_name:
+            return jsonify({
+                "success": False,
+                "error": "model_name is required",
+            }), 400
+        if model_name != MELODYFLOW_MODEL_REPO:
+            return jsonify({
+                "success": False,
+                "error": f"Unknown model '{model_name}'",
+            }), 404
+
+        session_id = str(uuid.uuid4())
+        _upsert_model_predownload_session(
+            session_id,
+            model_name=model_name,
+            status="queued",
+            progress=0,
+            queue_status=_build_model_queue_status(
+                status="queued",
+                message="queued for download",
+                model_name=model_name,
+                stage_index=0,
+                stage_total=len(MELODYFLOW_REQUIRED_FILES),
+                download_percent=0,
+            ),
+            error=None,
+        )
+        _run_model_predownload(session_id, model_name)
+
+        return jsonify({
+            "success": True,
+            "session_id": session_id,
+            "model_name": model_name,
+            "message": f"Started pre-download for {model_name}",
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
+
+
+@app.route('/api/models/predownload_status/<session_id>', methods=['GET'])
+def get_model_predownload_status(session_id: str):
+    try:
+        session_data = _get_model_predownload_session(session_id)
+        if not session_data:
+            return jsonify({
+                "success": False,
+                "error": "Session not found",
+            }), 404
+
+        response = {
+            "success": True,
+            "session_id": session_id,
+            "model_name": session_data.get("model_name"),
+            "status": str(session_data.get("status") or "unknown"),
+            "progress": max(0, min(100, int(session_data.get("progress") or 0))),
+            "queue_status": session_data.get("queue_status") if isinstance(session_data.get("queue_status"), dict) else {},
+        }
+        if response["status"] == "failed":
+            response["error"] = str(session_data.get("error") or "Unknown error")
+        return jsonify(response)
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
+
 
 @app.route('/health', methods=['GET'])
 def health_check():

@@ -544,6 +544,21 @@ final class ServiceManager: ObservableObject {
                 return BootstrapRunResult(success: false, message: message)
             }
 
+            let fileManager = FileManager.default
+            do {
+                try ensureBootstrapDirectories(
+                    service: service,
+                    bootstrap: bootstrap,
+                    environment: inheritedEnvironment,
+                    logHandle: logHandle
+                )
+            } catch {
+                let message = "failed to prepare runtime directories: \(error.localizedDescription)"
+                writeLogLine(message, to: logHandle)
+                writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
+                return BootstrapRunResult(success: false, message: message)
+            }
+
             let uvExecutable = ensureUVExecutable(
                 environment: inheritedEnvironment,
                 currentDirectory: service.workingDirectory,
@@ -606,7 +621,6 @@ final class ServiceManager: ObservableObject {
             }
 
             let venvPython = bootstrap.venvDirectory.appendingPathComponent("bin/python")
-            let fileManager = FileManager.default
             var shouldCreateVenv = !fileManager.fileExists(atPath: bootstrap.venvDirectory.path)
 
             if forceRecreateVenv,
@@ -675,7 +689,7 @@ final class ServiceManager: ObservableObject {
                         writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
                         return BootstrapRunResult(success: false, message: message)
                     }
-                    var createArguments = ["venv", "--python", pythonVersion]
+                    var createArguments = ["venv", "--python", pythonVersion, "--seed"]
                     createArguments.append(bootstrap.venvDirectory.path)
 
                     createStatus = try runCommand(
@@ -714,18 +728,50 @@ final class ServiceManager: ObservableObject {
             }
 
             if bootstrap.upgradeBuildTools {
-                let upgradeStatus = try runCommand(
-                    executable: venvPython,
-                    arguments: ["-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"],
-                    currentDirectory: service.workingDirectory,
-                    environment: inheritedEnvironment,
-                    logHandle: logHandle
-                )
-                if upgradeStatus != 0 {
-                    let message = "failed to upgrade pip/setuptools/wheel (exit \(upgradeStatus))."
-                    writeLogLine(message, to: logHandle)
-                    writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
-                    return BootstrapRunResult(success: false, message: message)
+                let upgradeArguments = ["--upgrade", "pip", "setuptools", "wheel"]
+                var buildToolsUpgraded = false
+
+                if let uvExecutable {
+                    let uvUpgradeStatus = try runCommand(
+                        executable: uvExecutable,
+                        arguments: ["pip", "install", "--python", venvPython.path] + upgradeArguments,
+                        currentDirectory: service.workingDirectory,
+                        environment: inheritedEnvironment,
+                        logHandle: logHandle
+                    )
+                    if uvUpgradeStatus == 0 {
+                        buildToolsUpgraded = true
+                    } else {
+                        writeLogLine(
+                            "warning: uv build-tools upgrade failed (exit \(uvUpgradeStatus)); trying pip fallback.",
+                            to: logHandle
+                        )
+                    }
+                }
+
+                if !buildToolsUpgraded {
+                    let pipUpgradeStatus = try runCommand(
+                        executable: venvPython,
+                        arguments: ["-m", "pip", "install"] + upgradeArguments,
+                        currentDirectory: service.workingDirectory,
+                        environment: inheritedEnvironment,
+                        logHandle: logHandle
+                    )
+                    if pipUpgradeStatus == 0 {
+                        buildToolsUpgraded = true
+                    } else {
+                        writeLogLine(
+                            "warning: failed to upgrade pip/setuptools/wheel (exit \(pipUpgradeStatus)); continuing with current tool versions.",
+                            to: logHandle
+                        )
+                    }
+                }
+
+                if !buildToolsUpgraded {
+                    writeLogLine(
+                        "proceeding without build-tools upgrade; dependency install may still succeed.",
+                        to: logHandle
+                    )
                 }
             }
 
@@ -855,6 +901,59 @@ final class ServiceManager: ObservableObject {
 
         writeLogLine("uv bootstrap completed but uv executable was not found in expected locations.", to: logHandle)
         return nil
+    }
+
+    nonisolated private static func ensureBootstrapDirectories(
+        service: ResolvedService,
+        bootstrap: ResolvedBootstrapConfig,
+        environment: [String: String],
+        logHandle: FileHandle
+    ) throws {
+        let fileManager = FileManager.default
+        var directoryPaths: [URL] = [
+            bootstrap.venvDirectory.deletingLastPathComponent()
+        ]
+
+        let pathKeys = [
+            "TMPDIR",
+            "HF_HOME",
+            "HUGGINGFACE_HUB_CACHE",
+            "TRANSFORMERS_CACHE",
+            "TORCH_HOME",
+            "XDG_CACHE_HOME"
+        ]
+
+        for key in pathKeys {
+            guard let value = environment[key], !value.isEmpty else { continue }
+            let expanded = NSString(string: value).expandingTildeInPath
+            guard expanded.hasPrefix("/") else { continue }
+            directoryPaths.append(
+                URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL
+            )
+        }
+
+        var seenPaths = Set<String>()
+        for directory in directoryPaths {
+            let normalized = directory.standardizedFileURL
+            guard seenPaths.insert(normalized.path).inserted else { continue }
+            if !fileManager.fileExists(atPath: normalized.path) {
+                try fileManager.createDirectory(
+                    at: normalized,
+                    withIntermediateDirectories: true
+                )
+                writeLogLine("Prepared directory: \(normalized.path)", to: logHandle)
+            }
+        }
+
+        if !fileManager.fileExists(atPath: service.workingDirectory.path) {
+            throw NSError(
+                domain: "GaryLocalhostBootstrap",
+                code: 1,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "working directory is missing: \(service.workingDirectory.path)"
+                ]
+            )
+        }
     }
 
     nonisolated private static func managedUVInstallDirectory(

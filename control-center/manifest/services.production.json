@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "app_name": "gary4local",
+  "variables": {
+    "PYTHONUNBUFFERED": "1",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "RUNTIME_ROOT": "${BUNDLE_RESOURCES}/runtime",
+    "HF_HOME": "${APP_SUPPORT_DIR}/cache/huggingface",
+    "HUGGINGFACE_HUB_CACHE": "${APP_SUPPORT_DIR}/cache/huggingface/hub",
+    "HF_HUB_DISABLE_XET": "1",
+    "HF_XET_HIGH_PERFORMANCE": "0",
+    "HF_XET_NUM_RANGE_IN_SEGMENT_BASE": "16",
+    "G4L_HF_XET_MODE": "adaptive",
+    "G4L_HF_XET_PROBE_TIMEOUT_SECONDS": "20",
+    "G4L_HF_DOWNLOADER_XET_MODE": "adaptive",
+    "G4L_HF_DOWNLOADER_XET_HIGH_PERFORMANCE": "1",
+    "G4L_HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS": "128",
+    "G4L_HF_XET_FIRST_BYTE_TIMEOUT_SECONDS": "25",
+    "G4L_HF_XET_SLOW_SPEED_BPS": "1048576",
+    "G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS": "45",
+    "TRANSFORMERS_CACHE": "${APP_SUPPORT_DIR}/cache/huggingface/transformers",
+    "TORCH_HOME": "${APP_SUPPORT_DIR}/cache/torch",
+    "XDG_CACHE_HOME": "${APP_SUPPORT_DIR}/cache",
+    "TMPDIR": "${APP_SUPPORT_DIR}/tmp",
+    "G4L_HF_SNAPSHOT_MAX_WORKERS": "64"
+  },
+  "default_log_directory": "${HOME}/Library/Logs/GaryLocalhost",
+  "services": [
+    {
+      "id": "audiocraft_mlx",
+      "name": "Audiocraft MLX",
+      "working_directory": "${RUNTIME_ROOT}/audiocraft-mlx/audiocraft",
+      "executable": "${APP_SUPPORT_DIR}/venvs/audiocraft-mlx/bin/python",
+      "arguments": [
+        "g4l_localhost.py"
+      ],
+      "environment": {
+        "PYTHONUNBUFFERED": "${PYTHONUNBUFFERED}",
+        "PYTHONDONTWRITEBYTECODE": "${PYTHONDONTWRITEBYTECODE}",
+        "HF_HOME": "${HF_HOME}",
+        "HUGGINGFACE_HUB_CACHE": "${HUGGINGFACE_HUB_CACHE}",
+        "HF_HUB_DISABLE_XET": "${HF_HUB_DISABLE_XET}",
+        "HF_XET_HIGH_PERFORMANCE": "${HF_XET_HIGH_PERFORMANCE}",
+        "HF_XET_NUM_RANGE_IN_SEGMENT_BASE": "${HF_XET_NUM_RANGE_IN_SEGMENT_BASE}",
+        "G4L_HF_XET_MODE": "${G4L_HF_XET_MODE}",
+        "G4L_HF_XET_PROBE_TIMEOUT_SECONDS": "${G4L_HF_XET_PROBE_TIMEOUT_SECONDS}",
+        "G4L_HF_DOWNLOADER_XET_MODE": "${G4L_HF_DOWNLOADER_XET_MODE}",
+        "G4L_HF_DOWNLOADER_XET_HIGH_PERFORMANCE": "${G4L_HF_DOWNLOADER_XET_HIGH_PERFORMANCE}",
+        "G4L_HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS": "${G4L_HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS}",
+        "G4L_HF_XET_FIRST_BYTE_TIMEOUT_SECONDS": "${G4L_HF_XET_FIRST_BYTE_TIMEOUT_SECONDS}",
+        "G4L_HF_XET_SLOW_SPEED_BPS": "${G4L_HF_XET_SLOW_SPEED_BPS}",
+        "G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS": "${G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS}",
+        "G4L_HF_SNAPSHOT_MAX_WORKERS": "${G4L_HF_SNAPSHOT_MAX_WORKERS}",
+        "TRANSFORMERS_CACHE": "${TRANSFORMERS_CACHE}",
+        "TORCH_HOME": "${TORCH_HOME}",
+        "XDG_CACHE_HOME": "${XDG_CACHE_HOME}",
+        "TMPDIR": "${TMPDIR}"
+      },
+      "bootstrap": {
+        "python_executable": "python3.11",
+        "venv_directory": "${APP_SUPPORT_DIR}/venvs/audiocraft-mlx",
+        "requirements_file": "${RUNTIME_ROOT}/audiocraft-mlx/audiocraft/requirements.txt",
+        "upgrade_build_tools": true,
+        "pip_arguments": []
+      },
+      "log_file": "audiocraft-mlx.log",
+      "health_check": {
+        "url": "http://127.0.0.1:8000/health",
+        "expected_status": 200,
+        "interval_seconds": 3,
+        "timeout_seconds": 2
+      },
+      "auto_start": false,
+      "restart_on_crash": true,
+      "graceful_shutdown_seconds": 8
+    },
+    {
+      "id": "melodyflow",
+      "name": "MelodyFlow",
+      "working_directory": "${RUNTIME_ROOT}/melodyflow",
+      "executable": "${APP_SUPPORT_DIR}/venvs/melodyflow/bin/python",
+      "arguments": [
+        "localhost_melodyflow.py"
+      ],
+      "environment": {
+        "PYTHONUNBUFFERED": "${PYTHONUNBUFFERED}",
+        "PYTHONDONTWRITEBYTECODE": "${PYTHONDONTWRITEBYTECODE}",
+        "MELODYFLOW_REQUIRE_MPS": "1",
+        "HF_HOME": "${HF_HOME}",
+        "HUGGINGFACE_HUB_CACHE": "${HUGGINGFACE_HUB_CACHE}",
+        "HF_HUB_DISABLE_XET": "${HF_HUB_DISABLE_XET}",
+        "HF_XET_HIGH_PERFORMANCE": "${HF_XET_HIGH_PERFORMANCE}",
+        "HF_XET_NUM_RANGE_IN_SEGMENT_BASE": "${HF_XET_NUM_RANGE_IN_SEGMENT_BASE}",
+        "G4L_HF_XET_MODE": "${G4L_HF_XET_MODE}",
+        "G4L_HF_XET_PROBE_TIMEOUT_SECONDS": "${G4L_HF_XET_PROBE_TIMEOUT_SECONDS}",
+        "G4L_HF_DOWNLOADER_XET_MODE": "${G4L_HF_DOWNLOADER_XET_MODE}",
+        "G4L_HF_DOWNLOADER_XET_HIGH_PERFORMANCE": "${G4L_HF_DOWNLOADER_XET_HIGH_PERFORMANCE}",
+        "G4L_HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS": "${G4L_HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS}",
+        "G4L_HF_XET_FIRST_BYTE_TIMEOUT_SECONDS": "${G4L_HF_XET_FIRST_BYTE_TIMEOUT_SECONDS}",
+        "G4L_HF_XET_SLOW_SPEED_BPS": "${G4L_HF_XET_SLOW_SPEED_BPS}",
+        "G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS": "${G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS}",
+        "G4L_HF_SNAPSHOT_MAX_WORKERS": "${G4L_HF_SNAPSHOT_MAX_WORKERS}",
+        "TRANSFORMERS_CACHE": "${TRANSFORMERS_CACHE}",
+        "TORCH_HOME": "${TORCH_HOME}",
+        "XDG_CACHE_HOME": "${XDG_CACHE_HOME}",
+        "TMPDIR": "${TMPDIR}"
+      },
+      "bootstrap": {
+        "python_executable": "python3.11",
+        "venv_directory": "${APP_SUPPORT_DIR}/venvs/melodyflow",
+        "requirements_file": "${RUNTIME_ROOT}/melodyflow/requirements.txt",
+        "upgrade_build_tools": true,
+        "pip_arguments": []
+      },
+      "log_file": "melodyflow.log",
+      "health_check": {
+        "url": "http://127.0.0.1:8002/health",
+        "expected_status": 200,
+        "interval_seconds": 3,
+        "timeout_seconds": 2
+      },
+      "auto_start": false,
+      "restart_on_crash": true,
+      "graceful_shutdown_seconds": 8
+    },
+    {
+      "id": "stable_audio",
+      "name": "Stable Audio",
+      "working_directory": "${RUNTIME_ROOT}/stable-audio-tools",
+      "executable": "${APP_SUPPORT_DIR}/venvs/stable-audio-tools/bin/python",
+      "arguments": [
+        "api.py"
+      ],
+      "environment": {
+        "PYTHONUNBUFFERED": "${PYTHONUNBUFFERED}",
+        "PYTHONDONTWRITEBYTECODE": "${PYTHONDONTWRITEBYTECODE}",
+        "HF_HOME": "${HF_HOME}",
+        "HUGGINGFACE_HUB_CACHE": "${HUGGINGFACE_HUB_CACHE}",
+        "HF_HUB_DISABLE_XET": "${HF_HUB_DISABLE_XET}",
+        "HF_XET_HIGH_PERFORMANCE": "${HF_XET_HIGH_PERFORMANCE}",
+        "HF_XET_NUM_RANGE_IN_SEGMENT_BASE": "${HF_XET_NUM_RANGE_IN_SEGMENT_BASE}",
+        "G4L_HF_XET_MODE": "${G4L_HF_XET_MODE}",
+        "G4L_HF_XET_PROBE_TIMEOUT_SECONDS": "${G4L_HF_XET_PROBE_TIMEOUT_SECONDS}",
+        "G4L_HF_DOWNLOADER_XET_MODE": "${G4L_HF_DOWNLOADER_XET_MODE}",
+        "G4L_HF_DOWNLOADER_XET_HIGH_PERFORMANCE": "${G4L_HF_DOWNLOADER_XET_HIGH_PERFORMANCE}",
+        "G4L_HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS": "${G4L_HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS}",
+        "G4L_HF_XET_FIRST_BYTE_TIMEOUT_SECONDS": "${G4L_HF_XET_FIRST_BYTE_TIMEOUT_SECONDS}",
+        "G4L_HF_XET_SLOW_SPEED_BPS": "${G4L_HF_XET_SLOW_SPEED_BPS}",
+        "G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS": "${G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS}",
+        "G4L_HF_SNAPSHOT_MAX_WORKERS": "${G4L_HF_SNAPSHOT_MAX_WORKERS}",
+        "TRANSFORMERS_CACHE": "${TRANSFORMERS_CACHE}",
+        "TORCH_HOME": "${TORCH_HOME}",
+        "XDG_CACHE_HOME": "${XDG_CACHE_HOME}",
+        "TMPDIR": "${TMPDIR}"
+      },
+      "bootstrap": {
+        "python_executable": "python3.11",
+        "venv_directory": "${APP_SUPPORT_DIR}/venvs/stable-audio-tools",
+        "requirements_file": "${RUNTIME_ROOT}/stable-audio-tools/requirements.txt",
+        "upgrade_build_tools": true,
+        "pip_arguments": []
+      },
+      "log_file": "stable-audio.log",
+      "health_check": {
+        "url": "http://127.0.0.1:8005/health",
+        "expected_status": 200,
+        "interval_seconds": 3,
+        "timeout_seconds": 2
+      },
+      "auto_start": false,
+      "restart_on_crash": true,
+      "graceful_shutdown_seconds": 8
+    }
+  ]
+}

@@ -379,9 +379,6 @@ private struct GaryPrunedDefaultMenusCommands: Commands {
         CommandGroup(replacing: .saveItem) {}
         CommandGroup(replacing: .importExport) {}
         CommandGroup(replacing: .printItem) {}
-        CommandGroup(replacing: .undoRedo) {}
-        CommandGroup(replacing: .pasteboard) {}
-        CommandGroup(replacing: .textEditing) {}
         CommandGroup(replacing: .textFormatting) {}
         CommandGroup(replacing: .toolbar) {}
         CommandGroup(replacing: .sidebar) {}

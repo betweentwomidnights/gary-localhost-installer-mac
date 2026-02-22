@@ -23,7 +23,8 @@ num2words==0.5.14
 numpy==2.3.5
 sentencepiece==0.2.1
 spacy==3.8.11
-# Keep hub in the 0.x line to stay compatible with Transformers 4.x.
+# Keep hub pinned for MelodyFlow runtime compatibility with Transformers 4.31.
+# A separate lightweight downloader env handles high-performance predownload.
 huggingface_hub==0.16.4
 tqdm==4.67.2
 # Pin to the baseline used in Linux builds for Encodec compatibility.

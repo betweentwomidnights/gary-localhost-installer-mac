@@ -21,8 +21,12 @@ struct ControlCenterView: View {
         nonmutating set { firstUseHelperStageRawValue = newValue.rawValue }
     }
 
-    private var showsFirstUseHelper: Bool {
-        !firstUseHelperDismissed
+    private func effectiveFirstUseHelperStage(manager: ServiceManager) -> FirstUseHelperStage {
+        isInitialEnvironmentBuild(manager: manager) ? .rebuild : firstUseHelperStage
+    }
+
+    private func showsFirstUseHelper(manager: ServiceManager) -> Bool {
+        isInitialEnvironmentBuild(manager: manager) || !firstUseHelperDismissed
     }
 
     var body: some View {
@@ -72,7 +76,7 @@ struct ControlCenterView: View {
     @ViewBuilder
     private func serviceList(manager: ServiceManager) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            if showsFirstUseHelper {
+            if showsFirstUseHelper(manager: manager) {
                 firstUseHelper(manager: manager)
             }
 
@@ -86,7 +90,8 @@ struct ControlCenterView: View {
                 }
                 .disabled(manager.isRebuildingAllEnvironments || manager.services.isEmpty)
                 .overlay {
-                    if showsFirstUseHelper && firstUseHelperStage == .rebuild {
+                    if showsFirstUseHelper(manager: manager)
+                        && effectiveFirstUseHelperStage(manager: manager) == .rebuild {
                         RoundedRectangle(cornerRadius: 6)
                             .stroke(
                                 Color.accentColor.opacity(onboardingPulse ? 0.95 : 0.4),
@@ -120,15 +125,17 @@ struct ControlCenterView: View {
                     onStop: { manager.stop(serviceID: runtime.id) },
                     onRestart: { manager.restart(serviceID: runtime.id) },
                     onRebuildEnv: { manager.rebuildEnvironment(serviceID: runtime.id) },
-                    onDownloadModels: runtime.id == "audiocraft_mlx" ? {
-                        viewModel.openModelDownloadSheet()
-                    } : nil
+                    onDownloadModels: (runtime.id == "audiocraft_mlx" || runtime.id == "melodyflow" || runtime.id == "stable_audio") ? {
+                        viewModel.openModelDownloadSheet(for: runtime.id)
+                    } : nil,
+                    downloadModelsExtraDisabled: runtime.id == "stable_audio" && !viewModel.stableAudioTokenConfigured
                 )
             }
             .listStyle(.inset)
         }
         .onChange(of: manager.isRebuildingAllEnvironments, initial: false) { _, isRebuilding in
-            guard showsFirstUseHelper, firstUseHelperStage == .rebuild else { return }
+            guard showsFirstUseHelper(manager: manager),
+                  effectiveFirstUseHelperStage(manager: manager) == .rebuild else { return }
             if isRebuilding {
                 didObserveRebuildStart = true
                 return
@@ -145,17 +152,21 @@ struct ControlCenterView: View {
             guard let activeServiceID else { return }
             viewModel.selectService(activeServiceID)
         }
+        .onAppear {
+            reconcileFirstUseHelperStateIfNeeded(manager: manager)
+        }
         .padding(16)
     }
 
     @ViewBuilder
     private func firstUseHelper(manager: ServiceManager) -> some View {
-        let isStageTwoAttention = firstUseHelperStage == .menuBar
+        let stage = effectiveFirstUseHelperStage(manager: manager)
+        let isStageTwoAttention = stage == .menuBar
         VStack(alignment: .leading, spacing: 10) {
             Text("first use")
                 .font(.headline)
 
-            if firstUseHelperStage == .rebuild {
+            if stage == .rebuild {
                 Text("step 1: run \(buildOrRebuildAllEnvironmentsPhrase(manager: manager)).")
                     .font(.subheadline.weight(.semibold))
                 Text("click the highlighted \(buildOrRebuildAllEnvironmentsPhrase(manager: manager)) button below.")
@@ -254,6 +265,20 @@ struct ControlCenterView: View {
         firstUseHelperDismissed = false
         firstUseHelperStage = .rebuild
         firstUseMenuBarOpened = false
+        didObserveRebuildStart = false
+    }
+
+    private func reconcileFirstUseHelperStateIfNeeded(manager: ServiceManager) {
+        guard isInitialEnvironmentBuild(manager: manager) else { return }
+        if firstUseHelperDismissed {
+            firstUseHelperDismissed = false
+        }
+        if firstUseHelperStage != .rebuild {
+            firstUseHelperStage = .rebuild
+        }
+        if firstUseMenuBarOpened {
+            firstUseMenuBarOpened = false
+        }
         didObserveRebuildStart = false
     }
 
@@ -672,100 +697,281 @@ private struct ModelDownloadSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("download models")
+                Text("download models: \(viewModel.modelDownloadServiceDisplayName)")
                     .font(.title3.weight(.semibold))
                 Spacer()
                 Button("close") { dismiss() }
             }
 
-            Text("pre-download models for offline use in gary4juce.")
-                .font(.subheadline)
-            Text("models also download the first time you use them inside gary4juce.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            if !viewModel.modelDownloadStatusMessage.isEmpty {
-                Text(viewModel.modelDownloadStatusMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            HStack {
-                Button("refresh statuses") {
-                    viewModel.refreshModelCatalogAndStatuses()
-                }
-                .disabled(viewModel.isModelCatalogLoading || viewModel.isModelDownloadInProgress)
-
-                if viewModel.isModelCatalogLoading {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-                Spacer()
-            }
-
-            if viewModel.downloadableModels.isEmpty, !viewModel.isModelCatalogLoading {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("no models available.")
-                        .foregroundStyle(.secondary)
-                    if !viewModel.canManageModelDownloads {
-                        Text("start the audiocraft mlx service, then refresh statuses.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            if viewModel.modelDownloadServiceID == "stable_audio" {
+                stableAudioPredownloadContent
             } else {
-                List {
-                    ForEach(viewModel.modelDownloadSections) { section in
-                        Section(section.title) {
-                            ForEach(section.models) { model in
-                                VStack(alignment: .leading, spacing: 6) {
-                                    HStack(alignment: .firstTextBaseline) {
-                                        Text(model.displayName)
-                                            .font(.system(.body, design: .monospaced))
-                                        Spacer()
-                                        statusPill(for: model)
-                                        Button(
-                                            model.isDownloading ? "downloading..." : "download"
-                                        ) {
-                                            viewModel.startModelDownload(model.path)
-                                        }
-                                        .disabled(
-                                            model.isDownloading
-                                            || model.downloaded
-                                            || viewModel.isModelDownloadInProgress
-                                            || !viewModel.canManageModelDownloads
-                                        )
-                                    }
-
-                                    Text(model.path)
-                                        .font(.caption.monospaced())
-                                        .foregroundStyle(.secondary)
-
-                                    if model.isDownloading {
-                                        ProgressView(value: model.progress)
-                                            .controlSize(.small)
-                                    }
-
-                                    Text(model.statusMessage)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                                .padding(.vertical, 4)
-                            }
-                        }
-                    }
-                }
-                .listStyle(.inset)
+                standardPredownloadContent
             }
         }
         .padding(16)
         .frame(minWidth: 760, minHeight: 520)
         .onAppear {
-            if viewModel.downloadableModels.isEmpty {
+            if viewModel.modelDownloadServiceID != "stable_audio",
+               viewModel.downloadableModels.isEmpty {
                 viewModel.refreshModelCatalogAndStatuses()
             }
         }
+    }
+
+    @ViewBuilder
+    private var standardPredownloadContent: some View {
+        Text("pre-download models for offline use in gary4juce.")
+            .font(.subheadline)
+        Text("models also download the first time you use them inside gary4juce.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        Text("first-time model downloads can include shared assets, so progress can appear in multiple stages.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+        if !viewModel.modelDownloadStatusMessage.isEmpty {
+            Text(viewModel.modelDownloadStatusMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        HStack {
+            Button("refresh statuses") {
+                viewModel.refreshModelCatalogAndStatuses()
+            }
+            .disabled(viewModel.isModelCatalogLoading || viewModel.isModelDownloadInProgress)
+
+            if viewModel.isModelCatalogLoading {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            Spacer()
+        }
+
+        if viewModel.downloadableModels.isEmpty, !viewModel.isModelCatalogLoading {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("no models available.")
+                    .foregroundStyle(.secondary)
+                if !viewModel.canManageModelDownloads {
+                    Text("start \(viewModel.modelDownloadServiceDisplayName), then refresh statuses.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            List {
+                ForEach(viewModel.modelDownloadSections) { section in
+                    Section(section.title) {
+                        ForEach(section.models) { model in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(alignment: .firstTextBaseline) {
+                                    Text(model.displayName)
+                                        .font(.system(.body, design: .monospaced))
+                                    Spacer()
+                                    statusPill(for: model)
+                                    Button(
+                                        model.isDownloading ? "downloading..." : "download"
+                                    ) {
+                                        viewModel.startModelDownload(model.path)
+                                    }
+                                    .disabled(
+                                        model.isDownloading
+                                        || model.downloaded
+                                        || viewModel.isModelDownloadInProgress
+                                        || !viewModel.canManageModelDownloads
+                                    )
+                                }
+
+                                Text(model.path)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+
+                                if model.isDownloading {
+                                    ProgressView(value: model.progress)
+                                        .controlSize(.small)
+                                }
+
+                                Text(model.statusMessage)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+            }
+            .listStyle(.inset)
+        }
+    }
+
+    @ViewBuilder
+    private var stableAudioPredownloadContent: some View {
+        Text("pre-download stable audio models and finetune checkpoints for offline use in gary4juce.")
+            .font(.subheadline)
+        Text("this mirrors jerry's repo + checkpoint flow. downloads go to the same hugging face cache used at runtime.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        Text("stable-audio-open-small is already downloaded/loaded when jerry starts.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        Text("use the quick option below for stable-audio-open-1.0 or fetch finetune checkpoints.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+        if !viewModel.stableAudioTokenConfigured {
+            Text("hugging face token is required. save it in jerry setup first.")
+                .font(.caption)
+                .foregroundStyle(.red)
+        }
+
+        if !viewModel.modelDownloadStatusMessage.isEmpty {
+            Text(viewModel.modelDownloadStatusMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        HStack(spacing: 8) {
+            Button("download open-1.0") {
+                viewModel.startStableAudioPredownloadOpenOne()
+            }
+            Button("refresh downloaded") {
+                viewModel.refreshStableAudioPredownloadInventory(
+                    checkpointsHint: viewModel.stableAudioPredownloadCheckpoints
+                )
+            }
+            Spacer()
+        }
+        .disabled(!viewModel.canManageStableAudioPredownloads || viewModel.isModelDownloadInProgress)
+
+        if !viewModel.stableAudioInventoryModels.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("downloaded models")
+                    .font(.caption.weight(.semibold))
+                ForEach(viewModel.stableAudioInventoryModels) { row in
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(row.downloaded ? Color.green : Color.gray.opacity(0.5))
+                            .frame(width: 8, height: 8)
+                        Text(row.label)
+                            .font(.caption.monospaced())
+                        Spacer()
+                        if row.downloaded {
+                            Text("downloaded")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        } else if !row.missing.isEmpty {
+                            Text("missing \(row.missing.joined(separator: ", "))")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("not downloaded")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+        }
+
+        Divider()
+
+        VStack(alignment: .leading, spacing: 8) {
+            Text("finetune repo")
+                .font(.caption.weight(.semibold))
+            HStack(spacing: 8) {
+                TextField("hugging face repo (e.g. thepatch/jerry_grunge)", text: $viewModel.stableAudioPredownloadRepoInput)
+                    .textFieldStyle(.roundedBorder)
+                Button("fetch checkpoints") {
+                    viewModel.fetchStableAudioPredownloadCheckpoints()
+                }
+                .disabled(
+                    !viewModel.canManageStableAudioPredownloads
+                    || viewModel.isModelDownloadInProgress
+                    || viewModel.isStableAudioCheckpointFetchInProgress
+                )
+            }
+
+            Text("optional finetune repos: thepatch/jerry_grunge, S3Sound/kickbass, or your own hugging face repo.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if viewModel.isStableAudioCheckpointFetchInProgress {
+                ProgressView()
+                    .controlSize(.small)
+            }
+
+            if !viewModel.stableAudioPredownloadCheckpoints.isEmpty {
+                Picker("checkpoint", selection: $viewModel.stableAudioPredownloadSelectedCheckpoint) {
+                    ForEach(viewModel.stableAudioPredownloadCheckpoints, id: \.self) { checkpoint in
+                        let downloaded = viewModel.stableAudioPredownloadCheckpointDownloaded[checkpoint] ?? false
+                        Text(downloaded ? "✓ \(checkpoint)" : checkpoint).tag(checkpoint)
+                    }
+                }
+                .labelsHidden()
+
+                HStack(spacing: 8) {
+                    Button("download selected checkpoint") {
+                        viewModel.startStableAudioPredownloadSelectedCheckpoint()
+                    }
+                    .disabled(
+                        !viewModel.canManageStableAudioPredownloads
+                        || viewModel.isModelDownloadInProgress
+                        || viewModel.stableAudioPredownloadSelectedCheckpoint.isEmpty
+                    )
+                    Button("use model") {
+                        viewModel.useStableAudioSelectedCheckpoint()
+                    }
+                    .disabled(
+                        !viewModel.canManageModelDownloads
+                        || viewModel.isModelDownloadInProgress
+                        || viewModel.isStableAudioModelSwitchInProgress
+                        || viewModel.stableAudioPredownloadSelectedCheckpoint.isEmpty
+                    )
+                    Spacer()
+                }
+            }
+
+            if !viewModel.stableAudioCachedFinetunes.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("downloaded finetunes for this repo")
+                        .font(.caption.weight(.semibold))
+                    ForEach(viewModel.stableAudioCachedFinetunes, id: \.self) { checkpoint in
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(Color.green)
+                                .frame(width: 8, height: 8)
+                            Text(checkpoint)
+                                .font(.caption.monospaced())
+                                .lineLimit(1)
+                            Spacer()
+                        }
+                    }
+                }
+            }
+        }
+
+        if viewModel.isModelDownloadInProgress {
+            ProgressView(value: viewModel.stableAudioPredownloadProgress)
+                .controlSize(.small)
+            if !viewModel.stableAudioPredownloadTargetLabel.isEmpty {
+                Text("active: \(viewModel.stableAudioPredownloadTargetLabel)")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        if viewModel.isStableAudioModelSwitchInProgress {
+            ProgressView()
+                .controlSize(.small)
+            Text("loading selected model into jerry cache...")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        Spacer()
     }
 
     @ViewBuilder
@@ -1266,6 +1472,12 @@ private struct ServiceRow: View {
     let onRestart: () -> Void
     let onRebuildEnv: () -> Void
     let onDownloadModels: (() -> Void)?
+    let downloadModelsExtraDisabled: Bool
+
+    private var downloadModelsDisabled: Bool {
+        guard onDownloadModels != nil else { return true }
+        return !runtime.isRunning || runtime.isBootstrapping || downloadModelsExtraDisabled
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1280,7 +1492,7 @@ private struct ServiceRow: View {
                                 onDownloadModels()
                             }
                             .controlSize(.small)
-                            .disabled(!runtime.isRunning || runtime.isBootstrapping)
+                            .disabled(downloadModelsDisabled)
                         }
                     }
                     Text("id: \(runtime.id)")

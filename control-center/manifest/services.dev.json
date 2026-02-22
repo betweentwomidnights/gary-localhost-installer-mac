@@ -15,7 +15,19 @@
         "g4l_localhost.py"
       ],
       "environment": {
-        "PYTHONUNBUFFERED": "${PYTHONUNBUFFERED}"
+        "PYTHONUNBUFFERED": "${PYTHONUNBUFFERED}",
+        "HF_HUB_DISABLE_XET": "1",
+        "HF_XET_HIGH_PERFORMANCE": "0",
+        "HF_XET_NUM_RANGE_IN_SEGMENT_BASE": "16",
+        "G4L_HF_XET_MODE": "adaptive",
+        "G4L_HF_XET_PROBE_TIMEOUT_SECONDS": "20",
+        "G4L_HF_DOWNLOADER_XET_MODE": "adaptive",
+        "G4L_HF_DOWNLOADER_XET_HIGH_PERFORMANCE": "1",
+        "G4L_HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS": "128",
+        "G4L_HF_XET_FIRST_BYTE_TIMEOUT_SECONDS": "25",
+        "G4L_HF_XET_SLOW_SPEED_BPS": "1048576",
+        "G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS": "45",
+        "G4L_HF_SNAPSHOT_MAX_WORKERS": "128"
       },
       "bootstrap": {
         "python_executable": "python3.11",
@@ -45,7 +57,19 @@
       ],
       "environment": {
         "PYTHONUNBUFFERED": "${PYTHONUNBUFFERED}",
-        "MELODYFLOW_REQUIRE_MPS": "1"
+        "MELODYFLOW_REQUIRE_MPS": "1",
+        "HF_HUB_DISABLE_XET": "1",
+        "HF_XET_HIGH_PERFORMANCE": "0",
+        "HF_XET_NUM_RANGE_IN_SEGMENT_BASE": "4",
+        "G4L_HF_XET_MODE": "adaptive",
+        "G4L_HF_XET_PROBE_TIMEOUT_SECONDS": "20",
+        "G4L_HF_DOWNLOADER_XET_MODE": "adaptive",
+        "G4L_HF_DOWNLOADER_XET_HIGH_PERFORMANCE": "1",
+        "G4L_HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS": "64",
+        "G4L_HF_XET_FIRST_BYTE_TIMEOUT_SECONDS": "25",
+        "G4L_HF_XET_SLOW_SPEED_BPS": "1048576",
+        "G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS": "45",
+        "G4L_HF_SNAPSHOT_MAX_WORKERS": "64"
       },
       "bootstrap": {
         "python_executable": "python3.11",
@@ -74,7 +98,19 @@
         "api.py"
       ],
       "environment": {
-        "PYTHONUNBUFFERED": "${PYTHONUNBUFFERED}"
+        "PYTHONUNBUFFERED": "${PYTHONUNBUFFERED}",
+        "HF_HUB_DISABLE_XET": "1",
+        "HF_XET_HIGH_PERFORMANCE": "0",
+        "HF_XET_NUM_RANGE_IN_SEGMENT_BASE": "4",
+        "G4L_HF_XET_MODE": "adaptive",
+        "G4L_HF_XET_PROBE_TIMEOUT_SECONDS": "20",
+        "G4L_HF_DOWNLOADER_XET_MODE": "adaptive",
+        "G4L_HF_DOWNLOADER_XET_HIGH_PERFORMANCE": "1",
+        "G4L_HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS": "64",
+        "G4L_HF_XET_FIRST_BYTE_TIMEOUT_SECONDS": "25",
+        "G4L_HF_XET_SLOW_SPEED_BPS": "1048576",
+        "G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS": "45",
+        "G4L_HF_SNAPSHOT_MAX_WORKERS": "64"
       },
       "bootstrap": {
         "python_executable": "python3.11",

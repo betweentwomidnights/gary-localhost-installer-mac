@@ -19,6 +19,34 @@ from .encodec import EncodecModel
 from .t5 import T5
 
 
+def _load_torch_best_state(state_dict_path: Path):
+    import torch
+
+    def _unwrap_best_state(payload):
+        if isinstance(payload, dict) and "best_state" in payload:
+            return payload["best_state"]
+        raise RuntimeError(
+            f"Unexpected checkpoint payload for {state_dict_path}: missing 'best_state'"
+        )
+
+    try:
+        return _unwrap_best_state(torch.load(state_dict_path, weights_only=True))
+    except TypeError:
+        # Older torch versions may not support the `weights_only` keyword.
+        return _unwrap_best_state(torch.load(state_dict_path))
+    except Exception as first_error:
+        text = str(first_error or "").lower()
+        legacy_markers = (
+            "cannot use ``weights_only=true``",
+            "legacy .tar format",
+            "weights_only",
+            "filename 'storages' not found",
+        )
+        if not any(marker in text for marker in legacy_markers):
+            raise
+        return _unwrap_best_state(torch.load(state_dict_path, weights_only=False))
+
+
 class TextConditioner(nn.Module):
     def __init__(
         self,
@@ -354,7 +382,6 @@ class MusicGen(nn.Module):
         path_or_repo: str,
         download_progress_callback: Optional[Callable[[dict], None]] = None,
     ):
-        import torch
         from huggingface_hub import snapshot_download
 
         path = Path(path_or_repo)
@@ -393,7 +420,7 @@ class MusicGen(nn.Module):
             config.audio_encoder = SimpleNamespace(**config.audio_encoder)
             config.decoder = SimpleNamespace(**config.decoder)
 
-        weights = torch.load(path / "state_dict.bin", weights_only=True)["best_state"]
+        weights = _load_torch_best_state(path / "state_dict.bin")
         weights = {k: mx.array(v) for k, v in weights.items()}
         weights = cls.sanitize(weights)
 
@@ -758,7 +785,6 @@ class MusicGenContinuation(MusicGen):
         prefer_base_config: bool = False,
         download_progress_callback: Optional[Callable[[dict], None]] = None,
     ):
-        import torch
         from huggingface_hub import snapshot_download
 
         path = Path(path_or_repo)
@@ -840,7 +866,7 @@ class MusicGenContinuation(MusicGen):
             config.audio_encoder = SimpleNamespace(**config.audio_encoder)
             config.decoder = SimpleNamespace(**config.decoder)
 
-        weights = torch.load(path / "state_dict.bin", weights_only=True)["best_state"]
+        weights = _load_torch_best_state(path / "state_dict.bin")
         weights = {k: mx.array(v) for k, v in weights.items()}
         weights = cls.sanitize(weights)
 

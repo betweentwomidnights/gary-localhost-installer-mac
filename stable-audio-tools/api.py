@@ -15,16 +15,21 @@ import os
 import time
 import re
 import threading
+import inspect
+import select
 import gc
 import sys
 import types
 import json
 import hashlib
+import shutil
+import subprocess
 from einops import rearrange
 from huggingface_hub import login, hf_hub_download
 from contextlib import contextmanager
 import contextlib
 from pathlib import Path
+from typing import Callable, Optional
 
 # Compatibility shim:
 # Some transitive dependencies (e.g. clip) still import
@@ -396,6 +401,1015 @@ _MLX_MERGED_CHECKPOINT_DIR = _MLX_CACHE_DIR / "merged_checkpoints"
 _MLX_STATUS_LOCK = threading.Lock()
 _MLX_MODEL_STATUS: dict[str, dict] = {}
 
+STABLE_PREDOWNLOAD_TTL_SECONDS = 3600
+_stable_predownload_lock = threading.Lock()
+_stable_predownload_sessions: dict[str, dict] = {}
+_STABLE_PRETRAINED_MODEL_SPECS = [
+    {
+        "repo_id": "stabilityai/stable-audio-open-small",
+        "label": "stable-audio-open-small",
+        "config_candidates": ["model_config.json", "base_model_config.json"],
+        "weight_candidates": ["model.safetensors", "model.ckpt", "base_model.ckpt"],
+    },
+    {
+        "repo_id": "stabilityai/stable-audio-open-1.0",
+        "label": "stable-audio-open-1.0",
+        "config_candidates": ["model_config.json", "base_model_config.json"],
+        "weight_candidates": ["model.safetensors", "model.ckpt", "base_model.ckpt"],
+    },
+]
+
+HF_DOWNLOADER_PYTHON_VERSION = "3.11"
+HF_DOWNLOADER_PACKAGES = [
+    "huggingface_hub==1.4.1",
+    "hf_xet==1.2.0",
+    "tqdm==4.67.2",
+]
+HF_DOWNLOADER_VENV_DIR = os.environ.get(
+    "G4L_HF_DOWNLOADER_VENV_DIR",
+    os.path.join(
+        os.path.expanduser("~"),
+        "Library",
+        "Application Support",
+        "GaryLocalhost",
+        "venvs",
+        "hf-downloader",
+    ),
+)
+HF_DOWNLOADER_MARKER_FILE = ".g4l_hf_downloader_spec.json"
+HF_DOWNLOADER_SPEC_VERSION = 1
+_hf_downloader_lock = threading.Lock()
+_hf_downloader_python_path: Optional[str] = None
+HF_DOWNLOADER_XET_MODE = str(
+    os.environ.get(
+        "G4L_HF_DOWNLOADER_XET_MODE",
+        os.environ.get("G4L_HF_XET_MODE", "adaptive"),
+    )
+).strip().lower()
+HF_DOWNLOADER_XET_HIGH_PERFORMANCE = os.environ.get("G4L_HF_DOWNLOADER_XET_HIGH_PERFORMANCE", "1")
+HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS = str(
+    os.environ.get("G4L_HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS", "64")
+).strip()
+try:
+    HF_DOWNLOADER_XET_FIRST_BYTE_TIMEOUT_SECONDS = max(
+        5.0, float(str(os.environ.get("G4L_HF_XET_FIRST_BYTE_TIMEOUT_SECONDS", "25")).strip())
+    )
+except Exception:
+    HF_DOWNLOADER_XET_FIRST_BYTE_TIMEOUT_SECONDS = 25.0
+try:
+    HF_DOWNLOADER_XET_SLOW_SPEED_BPS = max(
+        64 * 1024,
+        int(str(os.environ.get("G4L_HF_XET_SLOW_SPEED_BPS", str(1 * 1024 * 1024))).strip()),
+    )
+except Exception:
+    HF_DOWNLOADER_XET_SLOW_SPEED_BPS = 1 * 1024 * 1024
+try:
+    HF_DOWNLOADER_XET_SLOW_SPEED_GRACE_SECONDS = max(
+        5.0, float(str(os.environ.get("G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS", "45")).strip())
+    )
+except Exception:
+    HF_DOWNLOADER_XET_SLOW_SPEED_GRACE_SECONDS = 45.0
+
+
+def _resolve_existing_uv_path() -> Optional[str]:
+    candidates = []
+    found_in_path = shutil.which("uv")
+    if found_in_path:
+        candidates.append(found_in_path)
+
+    home = os.path.expanduser("~")
+    candidates.extend([
+        os.path.join(home, ".local", "bin", "uv"),
+        os.path.join(home, "Library", "Application Support", "gary4local", "tools", "uv", "uv"),
+        os.path.join(home, "Library", "Application Support", "gary4local", "tools", "uv", "bin", "uv"),
+        os.path.join(home, "Library", "Application Support", "GaryLocalhost", "tools", "uv", "uv"),
+        os.path.join(home, "Library", "Application Support", "GaryLocalhost", "tools", "uv", "bin", "uv"),
+    ])
+
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        normalized = os.path.realpath(candidate)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if os.path.isfile(normalized) and os.access(normalized, os.X_OK):
+            return normalized
+    return None
+
+
+def _bootstrap_uv_if_needed() -> str:
+    resolved = _resolve_existing_uv_path()
+    if resolved:
+        return resolved
+
+    install_dir = os.path.join(
+        os.path.expanduser("~"),
+        "Library",
+        "Application Support",
+        "gary4local",
+        "tools",
+        "uv",
+    )
+    os.makedirs(install_dir, exist_ok=True)
+
+    env = os.environ.copy()
+    env["UV_UNMANAGED_INSTALL"] = install_dir
+    env["PATH"] = env.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin"
+
+    proc = subprocess.run(
+        ["/bin/sh", "-lc", "curl -LsSf https://astral.sh/uv/install.sh | sh"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"uv bootstrap failed (exit {proc.returncode}): {(proc.stderr or proc.stdout or '').strip()}"
+        )
+
+    resolved = _resolve_existing_uv_path()
+    if not resolved:
+        raise RuntimeError("uv bootstrap completed but uv executable was not found.")
+    print(f"[HF] shared downloader bootstrap: uv installed at {resolved}")
+    return resolved
+
+
+def _run_command_checked(args: list[str], *, env: Optional[dict] = None) -> None:
+    proc = subprocess.run(args, capture_output=True, text=True, env=env)
+    if proc.returncode == 0:
+        return
+    message = (proc.stderr or proc.stdout or "").strip()
+    raise RuntimeError(
+        f"command failed (exit {proc.returncode}): {' '.join(args)}"
+        + (f" | {message}" if message else "")
+    )
+
+
+def _ensure_hf_downloader_python() -> str:
+    global _hf_downloader_python_path
+
+    with _hf_downloader_lock:
+        if _hf_downloader_python_path and os.path.exists(_hf_downloader_python_path):
+            return _hf_downloader_python_path
+
+        uv_path = _bootstrap_uv_if_needed()
+        venv_dir = HF_DOWNLOADER_VENV_DIR
+        marker_path = os.path.join(venv_dir, HF_DOWNLOADER_MARKER_FILE)
+        desired_marker = {
+            "version": HF_DOWNLOADER_SPEC_VERSION,
+            "python": HF_DOWNLOADER_PYTHON_VERSION,
+            "packages": HF_DOWNLOADER_PACKAGES,
+        }
+        venv_python = os.path.join(venv_dir, "bin", "python")
+
+        os.makedirs(os.path.dirname(venv_dir), exist_ok=True)
+        if not os.path.exists(venv_python):
+            _run_command_checked([uv_path, "python", "install", HF_DOWNLOADER_PYTHON_VERSION])
+            _run_command_checked([
+                uv_path,
+                "venv",
+                "--python",
+                HF_DOWNLOADER_PYTHON_VERSION,
+                "--seed",
+                venv_dir,
+            ])
+
+        needs_install = True
+        if os.path.exists(marker_path):
+            try:
+                with open(marker_path, "r", encoding="utf-8") as f:
+                    marker_payload = json.load(f)
+                needs_install = marker_payload != desired_marker
+            except Exception:
+                needs_install = True
+
+        if needs_install:
+            _run_command_checked([
+                uv_path,
+                "pip",
+                "install",
+                "--python",
+                venv_python,
+                "--upgrade",
+                "pip",
+                "setuptools",
+                "wheel",
+            ])
+            _run_command_checked(
+                [uv_path, "pip", "install", "--python", venv_python, "--upgrade"]
+                + HF_DOWNLOADER_PACKAGES
+            )
+            with open(marker_path, "w", encoding="utf-8") as f:
+                json.dump(desired_marker, f)
+
+        _hf_downloader_python_path = venv_python
+        print(f"[HF] shared downloader env ready: {venv_python}")
+        return venv_python
+
+
+def _download_with_shared_hf_downloader_env(
+    *,
+    repo_id: str,
+    filename: str,
+    on_progress: Callable[[dict], None],
+) -> str:
+    def resolve_mode() -> str:
+        mode = HF_DOWNLOADER_XET_MODE
+        if mode in {"on", "off", "adaptive"}:
+            return mode
+        return "adaptive"
+
+    def terminate_process(process: subprocess.Popen) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=2)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+    def run_worker(
+        *,
+        use_xet: bool,
+        force_download: bool = False,
+    ) -> tuple[bool, Optional[str], Optional[str]]:
+        backend_label = "shared downloader env (xet)" if use_xet else "shared downloader env (http)"
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        if use_xet:
+            env["HF_HUB_DISABLE_XET"] = "0"
+            env["HF_XET_HIGH_PERFORMANCE"] = HF_DOWNLOADER_XET_HIGH_PERFORMANCE
+            if HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS:
+                env["HF_XET_NUM_CONCURRENT_RANGE_GETS"] = HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS
+            env.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+        else:
+            env["HF_HUB_DISABLE_XET"] = "1"
+            env["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+
+        worker_cmd = [downloader_python, worker_path, "--repo-id", repo_id, "--filename", filename]
+        if force_download:
+            worker_cmd.append("--force-download")
+
+        process = subprocess.Popen(
+            worker_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            bufsize=1,
+        )
+        if process.stdout is None:
+            terminate_process(process)
+            raise RuntimeError("failed to capture downloader worker output.")
+
+        worker_error = None
+        started_at = time.time()
+        first_byte_at = None
+        slow_since = None
+
+        while True:
+            if use_xet:
+                now = time.time()
+                if first_byte_at is None and (now - started_at) > HF_DOWNLOADER_XET_FIRST_BYTE_TIMEOUT_SECONDS:
+                    terminate_process(process)
+                    print(
+                        f"[HF] shared downloader xet timeout: no first byte for {repo_id}/{filename} "
+                        f"after {HF_DOWNLOADER_XET_FIRST_BYTE_TIMEOUT_SECONDS:.1f}s"
+                    )
+                    return False, "xet_no_first_byte", backend_label
+                if first_byte_at is not None and slow_since is not None and (
+                    now - slow_since
+                ) > HF_DOWNLOADER_XET_SLOW_SPEED_GRACE_SECONDS:
+                    terminate_process(process)
+                    print(
+                        f"[HF] shared downloader xet slow throughput for {repo_id}/{filename}: "
+                        f"< {HF_DOWNLOADER_XET_SLOW_SPEED_BPS} B/s for "
+                        f"{HF_DOWNLOADER_XET_SLOW_SPEED_GRACE_SECONDS:.1f}s"
+                    )
+                    return False, "xet_slow_throughput", backend_label
+
+            ready, _, _ = select.select([process.stdout], [], [], 0.4)
+            if not ready:
+                if process.poll() is not None:
+                    break
+                continue
+
+            raw_line = process.stdout.readline()
+            if raw_line == "":
+                if process.poll() is not None:
+                    break
+                continue
+
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+
+            event = str(payload.get("event") or "").lower()
+            if event == "progress":
+                on_progress(payload)
+                downloaded = int(payload.get("downloaded_bytes") or 0)
+                speed_bps = float(payload.get("speed_bps") or 0.0)
+                if downloaded > 0 and first_byte_at is None:
+                    first_byte_at = time.time()
+                if use_xet and downloaded > 0:
+                    if speed_bps >= HF_DOWNLOADER_XET_SLOW_SPEED_BPS:
+                        slow_since = None
+                    else:
+                        if slow_since is None:
+                            slow_since = time.time()
+            elif event == "error":
+                worker_error = str(payload.get("error") or "unknown downloader error")
+
+        return_code = process.wait()
+        if return_code != 0:
+            raise RuntimeError(worker_error or f"downloader worker failed with exit {return_code}.")
+        return True, None, backend_label
+
+    downloader_python = _ensure_hf_downloader_python()
+    worker_path = os.path.join(os.path.dirname(__file__), "hf_predownload_worker.py")
+    if not os.path.exists(worker_path):
+        raise RuntimeError(f"downloader worker is missing: {worker_path}")
+
+    mode = resolve_mode()
+    if mode == "off":
+        success, _, backend_label = run_worker(use_xet=False)
+        if not success:
+            raise RuntimeError("shared downloader env failed in HTTP mode.")
+        return backend_label or "shared downloader env (http)"
+
+    if mode == "on":
+        success, _, backend_label = run_worker(use_xet=True)
+        if not success:
+            raise RuntimeError("shared downloader env failed in forced XET mode.")
+        return backend_label or "shared downloader env (xet)"
+
+    # adaptive (default): try xet first, then fallback to http on bad TTFB/speed
+    success, fallback_reason, backend_label = run_worker(use_xet=True)
+    if success:
+        return backend_label or "shared downloader env (xet)"
+
+    print(
+        f"[HF] shared downloader adaptive fallback for {repo_id}/{filename}: "
+        f"{fallback_reason or 'unknown reason'} -> http"
+    )
+    success_http, _, backend_label_http = run_worker(
+        use_xet=False,
+        force_download=True,
+    )
+    if not success_http:
+        raise RuntimeError("shared downloader env failed in HTTP fallback mode.")
+    return backend_label_http or "shared downloader env (http fallback)"
+
+
+class _NullTqdmStream:
+    def write(self, message: str) -> int:
+        return len(message) if message is not None else 0
+
+    def flush(self) -> None:
+        return None
+
+    def isatty(self) -> bool:
+        return False
+
+
+_NULL_TQDM_STREAM = _NullTqdmStream()
+
+
+def _fmt_bytes(n: int) -> str:
+    f = float(max(0, int(n)))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if f < 1024.0 or unit == "TB":
+            return f"{f:.1f}{unit}" if unit != "B" else f"{int(f)}B"
+        f /= 1024.0
+    return f"{f:.1f}TB"
+
+
+def _build_stable_predownload_queue_status(
+    *,
+    status: str,
+    message: str,
+    target: str,
+    stage_name: str,
+    stage_index: int,
+    stage_total: int,
+    download_percent: int,
+    downloaded_bytes: int = 0,
+    total_bytes: int = 0,
+    speed_bps: float = 0.0,
+    repo_id: str = "",
+) -> dict:
+    payload = {
+        "status": status,
+        "message": message,
+        "position": 0,
+        "total_queued": 0,
+        "estimated_time": None,
+        "estimated_seconds": 0,
+        "source": "stable-audio-localhost",
+        "phase": "download",
+        "target": target,
+        "repo_id": repo_id,
+        "stage_name": stage_name,
+        "stage_index": stage_index,
+        "stage_total": stage_total,
+        "download_percent": max(0, min(100, int(download_percent))),
+        "downloaded_bytes": max(0, int(downloaded_bytes)),
+        "total_bytes": max(0, int(total_bytes)),
+        "speed_bps": max(0.0, float(speed_bps)),
+    }
+    return payload
+
+
+def _upsert_stable_predownload_session(
+    session_id: str,
+    *,
+    status: str | None = None,
+    progress: int | None = None,
+    queue_status: dict | None = None,
+    error: str | None = None,
+    target: str | None = None,
+) -> dict:
+    now = time.time()
+    with _stable_predownload_lock:
+        existing = _stable_predownload_sessions.get(session_id, {
+            "session_id": session_id,
+            "status": "warming",
+            "progress": 0,
+            "queue_status": {},
+            "error": None,
+            "target": "",
+            "updated_at": now,
+        })
+        if status is not None:
+            existing["status"] = status
+        if progress is not None:
+            existing["progress"] = max(0, min(100, int(progress)))
+        if queue_status is not None:
+            existing["queue_status"] = queue_status
+        if error is not None:
+            existing["error"] = str(error) if error else None
+        if target is not None:
+            existing["target"] = target
+        existing["updated_at"] = now
+        _stable_predownload_sessions[session_id] = existing
+
+        # Opportunistic TTL cleanup.
+        stale_before = now - STABLE_PREDOWNLOAD_TTL_SECONDS
+        stale_keys = [
+            key for key, value in _stable_predownload_sessions.items()
+            if float(value.get("updated_at", now)) < stale_before
+        ]
+        for key in stale_keys:
+            _stable_predownload_sessions.pop(key, None)
+
+        return dict(existing)
+
+
+def _read_stable_predownload_session(session_id: str) -> dict | None:
+    with _stable_predownload_lock:
+        existing = _stable_predownload_sessions.get(session_id)
+        if not existing:
+            return None
+        return dict(existing)
+
+
+def _resolve_hf_hub_cache_dir() -> Path:
+    explicit = str(os.environ.get("HUGGINGFACE_HUB_CACHE", "")).strip()
+    if explicit:
+        return Path(explicit).expanduser()
+
+    hf_home = str(os.environ.get("HF_HOME", "")).strip()
+    if hf_home:
+        return Path(hf_home).expanduser() / "hub"
+
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _repo_snapshot_dirs(repo_id: str) -> list[Path]:
+    cache_root = _resolve_hf_hub_cache_dir()
+    repo_dir = cache_root / f"models--{repo_id.replace('/', '--')}" / "snapshots"
+    if not repo_dir.exists():
+        return []
+    try:
+        return [path for path in repo_dir.iterdir() if path.is_dir()]
+    except Exception:
+        return []
+
+
+def _is_repo_file_cached(repo_id: str, filename: str) -> bool:
+    normalized = str(filename or "").strip().lstrip("/")
+    if not normalized:
+        return False
+    for snapshot_dir in _repo_snapshot_dirs(repo_id):
+        if (snapshot_dir / normalized).exists():
+            return True
+    return False
+
+
+def _list_cached_repo_checkpoints(repo_id: str) -> list[str]:
+    checkpoints = set()
+    for snapshot_dir in _repo_snapshot_dirs(repo_id):
+        try:
+            for match in snapshot_dir.rglob("*.ckpt"):
+                try:
+                    rel = match.relative_to(snapshot_dir).as_posix()
+                except Exception:
+                    rel = match.name
+                if rel:
+                    checkpoints.add(rel)
+        except Exception:
+            continue
+    return sorted(checkpoints, key=str.lower)
+
+
+def _normalize_optional_string_list(raw_value) -> list[str]:
+    if not isinstance(raw_value, list):
+        return []
+    out = []
+    seen = set()
+    for entry in raw_value:
+        value = str(entry or "").strip()
+        if not value:
+            continue
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+    return out
+
+
+def _build_pretrained_inventory_rows() -> list[dict]:
+    rows = []
+    for spec in _STABLE_PRETRAINED_MODEL_SPECS:
+        repo_id = str(spec.get("repo_id") or "").strip()
+        label = str(spec.get("label") or repo_id).strip()
+        config_candidates = list(spec.get("config_candidates") or [])
+        weight_candidates = list(spec.get("weight_candidates") or [])
+
+        has_config = any(_is_repo_file_cached(repo_id, candidate) for candidate in config_candidates)
+        has_weights = any(_is_repo_file_cached(repo_id, candidate) for candidate in weight_candidates)
+        downloaded = bool(has_config and has_weights)
+
+        missing = []
+        if not has_config:
+            missing.append("config")
+        if not has_weights:
+            missing.append("weights")
+
+        rows.append({
+            "repo_id": repo_id,
+            "label": label,
+            "downloaded": downloaded,
+            "missing": missing,
+        })
+    return rows
+
+
+def _predownload_overall_progress(stage_index: int, stage_total: int, stage_percent: int) -> int:
+    if stage_total <= 0:
+        return max(0, min(100, int(stage_percent)))
+    bounded_stage = max(0, min(100, int(stage_percent)))
+    raw = ((max(1, stage_index) - 1) + (bounded_stage / 100.0)) / max(stage_total, 1) * 100.0
+    if bounded_stage > 0:
+        return max(1, min(99, int(raw + 0.9999)))
+    return max(0, min(99, int(raw)))
+
+
+def _make_hf_tqdm_class(on_progress):
+    from huggingface_hub.utils import tqdm as hf_tqdm
+
+    class _CallbackTqdm(hf_tqdm):  # type: ignore[misc,valid-type]
+        def __init__(self, *args, **kwargs):
+            self._last_emit_t = 0.0
+            self._last_emit_pct = -1
+            self._last_emit_bytes = 0
+            kwargs.setdefault("file", _NULL_TQDM_STREAM)
+            kwargs.setdefault("leave", False)
+            kwargs["disable"] = False
+            super().__init__(*args, **kwargs)
+            self._emit(force=True)
+
+        def update(self, n=1):
+            out = super().update(n)
+            self._emit()
+            return out
+
+        def refresh(self, *args, **kwargs):
+            out = super().refresh(*args, **kwargs)
+            self._emit()
+            return out
+
+        def set_description(self, desc=None, refresh=True):
+            out = super().set_description(desc, refresh=refresh)
+            self._emit(force=True)
+            return out
+
+        def close(self):
+            self._emit(force=True)
+            return super().close()
+
+        def display(self, msg=None, pos=None):
+            return None
+
+        def _emit(self, force: bool = False) -> None:
+            now = time.time()
+            total = int(getattr(self, "total", 0) or 0)
+            downloaded = int(getattr(self, "n", 0) or 0)
+            percent = int((downloaded / total) * 100) if total > 0 else 0
+
+            if not force:
+                if (now - self._last_emit_t) < 0.25:
+                    return
+                pct_delta_ok = self._last_emit_pct < 0 or abs(percent - self._last_emit_pct) >= 1
+                bytes_delta_ok = (downloaded - self._last_emit_bytes) >= (1 * 1024 * 1024)
+                if not (pct_delta_ok or bytes_delta_ok):
+                    return
+
+            self._last_emit_t = now
+            self._last_emit_pct = percent
+            self._last_emit_bytes = downloaded
+
+            speed_bps = 0.0
+            try:
+                speed_bps = float((getattr(self, "format_dict", {}) or {}).get("rate") or 0.0)
+            except Exception:
+                speed_bps = 0.0
+
+            on_progress({
+                "downloaded_bytes": downloaded,
+                "total_bytes": total,
+                "download_percent": max(0, min(100, percent)),
+                "speed_bps": max(0.0, speed_bps),
+            })
+
+    return _CallbackTqdm
+
+
+@contextmanager
+def _patched_hf_download_tqdm_if_needed(tqdm_class):
+    supports_tqdm_class = "tqdm_class" in inspect.signature(hf_hub_download).parameters
+    if supports_tqdm_class:
+        yield {"tqdm_class": tqdm_class}
+        return
+
+    try:
+        import huggingface_hub.file_download as file_download
+    except Exception:
+        yield {}
+        return
+
+    original_tqdm = getattr(file_download, "tqdm", None)
+    if original_tqdm is None:
+        yield {}
+        return
+
+    file_download.tqdm = tqdm_class
+    try:
+        yield {}
+    finally:
+        file_download.tqdm = original_tqdm
+
+
+@contextmanager
+def _temporary_env(overrides: dict[str, str]):
+    previous = {}
+    try:
+        for key, value in overrides.items():
+            previous[key] = os.environ.get(key)
+            os.environ[key] = value
+        yield
+    finally:
+        for key, old in previous.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+
+
+def _evict_cached_hf_file(path: str) -> None:
+    path_obj = Path(path)
+    candidates = [path_obj]
+    try:
+        if path_obj.is_symlink():
+            candidates.append(path_obj.resolve())
+    except Exception:
+        pass
+
+    seen = set()
+    for candidate in candidates:
+        normalized = str(candidate)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            if candidate.is_symlink() or candidate.exists():
+                candidate.unlink()
+        except Exception as exc:
+            print(f"⚠️ failed to evict cached file {candidate}: {exc}")
+
+
+def _download_hf_with_profile(
+    *,
+    repo_id: str,
+    filename: str,
+    repo_type: str = "model",
+    force_download: bool = False,
+    local_files_only: bool = False,
+    env_profile: Optional[dict[str, str]] = None,
+    on_progress: Optional[Callable[[dict], None]] = None,
+) -> str:
+    kwargs = {
+        "repo_id": repo_id,
+        "filename": filename,
+        "repo_type": repo_type,
+    }
+    if force_download:
+        kwargs["force_download"] = True
+    if local_files_only:
+        kwargs["local_files_only"] = True
+
+    if on_progress is not None:
+        tqdm_class = _make_hf_tqdm_class(on_progress)
+        with _patched_hf_download_tqdm_if_needed(tqdm_class) as extra_kwargs:
+            kwargs_with_progress = dict(kwargs)
+            kwargs_with_progress.update(extra_kwargs)
+            if env_profile:
+                with _temporary_env(env_profile):
+                    return hf_hub_download(**kwargs_with_progress)
+            return hf_hub_download(**kwargs_with_progress)
+
+    if env_profile:
+        with _temporary_env(env_profile):
+            return hf_hub_download(**kwargs)
+    return hf_hub_download(**kwargs)
+
+
+def _download_hf_file_with_session_progress(
+    *,
+    session_id: str,
+    target: str,
+    stage_index: int,
+    stage_total: int,
+    stage_name: str,
+    repo_id: str,
+    filename: str,
+    repo_type: str = "model",
+    validate_checkpoint: bool = False,
+) -> str:
+    checkpoint_like_extensions = (".ckpt", ".safetensors", ".bin", ".pt", ".pth")
+    prefer_runtime_downloader = str(filename or "").lower().endswith(checkpoint_like_extensions)
+
+    def on_progress(evt: dict) -> None:
+        downloaded = int(evt.get("downloaded_bytes") or 0)
+        total = int(evt.get("total_bytes") or 0)
+        stage_percent = int(evt.get("download_percent") or evt.get("percent") or 0)
+        speed_bps = float(evt.get("speed_bps") or 0.0)
+        overall = _predownload_overall_progress(stage_index, stage_total, stage_percent)
+        status = "warming" if overall <= 1 else "processing"
+        speed_suffix = f" • {_fmt_bytes(int(speed_bps))}/s" if speed_bps > 0 else ""
+        message = (
+            f"stage {stage_index}/{stage_total}: {stage_name} ({filename}) "
+            f"from {repo_id} ({_fmt_bytes(downloaded)}/{_fmt_bytes(total)} • {stage_percent}%{speed_suffix})"
+        )
+        queue = _build_stable_predownload_queue_status(
+            status=status,
+            message=message,
+            target=target,
+            stage_name=stage_name,
+            stage_index=stage_index,
+            stage_total=stage_total,
+            download_percent=stage_percent,
+            downloaded_bytes=downloaded,
+            total_bytes=total,
+            speed_bps=speed_bps,
+            repo_id=repo_id,
+        )
+        _upsert_stable_predownload_session(
+            session_id,
+            status=status,
+            progress=overall,
+            queue_status=queue,
+            error=None,
+            target=target,
+        )
+
+    starting_queue = _build_stable_predownload_queue_status(
+        status="warming",
+        message=f"stage {stage_index}/{stage_total}: downloading {filename} from {repo_id}",
+        target=target,
+        stage_name=stage_name,
+        stage_index=stage_index,
+        stage_total=stage_total,
+        download_percent=0,
+        repo_id=repo_id,
+    )
+    _upsert_stable_predownload_session(
+        session_id,
+        status="warming",
+        progress=_predownload_overall_progress(stage_index, stage_total, 0),
+        queue_status=starting_queue,
+        error=None,
+        target=target,
+    )
+
+    def _checkpoint_is_valid(path: str) -> bool:
+        if not validate_checkpoint:
+            return True
+        try:
+            _load_finetune_state_dict(path)
+            return True
+        except Exception as validation_error:
+            print(
+                f"⚠️ stable predownload checkpoint validation failed for "
+                f"{repo_id}/{filename}: {validation_error}"
+            )
+            return False
+
+    downloaded_path = ""
+    if prefer_runtime_downloader:
+        print(
+            f"[HF] stable predownload using runtime downloader for "
+            f"{repo_id}/{filename} (checkpoint reliability path)"
+        )
+
+        # Prefer an already-cached artifact. For finetune checkpoints, validate
+        # that cache entry before trusting it.
+        try:
+            cached_path = _download_hf_with_profile(
+                repo_id=repo_id,
+                filename=filename,
+                repo_type=repo_type,
+                local_files_only=True,
+                on_progress=on_progress,
+            )
+            if _checkpoint_is_valid(cached_path):
+                downloaded_path = cached_path
+            else:
+                _evict_cached_hf_file(cached_path)
+        except Exception:
+            downloaded_path = ""
+
+        if not downloaded_path:
+            runtime_profiles = [
+                {},
+                {"HF_HUB_DISABLE_XET": "1", "HF_HUB_ENABLE_HF_TRANSFER": "1"},
+                {"HF_HUB_DISABLE_XET": "1", "HF_HUB_ENABLE_HF_TRANSFER": "0"},
+            ]
+            attempt_errors = []
+
+            for attempt_index, env_profile in enumerate(runtime_profiles, start=1):
+                profile_label = (
+                    "default"
+                    if not env_profile
+                    else ", ".join(f"{k}={v}" for k, v in env_profile.items())
+                )
+                try:
+                    _upsert_stable_predownload_session(
+                        session_id,
+                        status="warming",
+                        progress=_predownload_overall_progress(stage_index, stage_total, 0),
+                        queue_status=_build_stable_predownload_queue_status(
+                            status="warming",
+                            message=(
+                                f"stage {stage_index}/{stage_total}: download attempt "
+                                f"{attempt_index}/{len(runtime_profiles)} ({profile_label})"
+                            ),
+                            target=target,
+                            stage_name=stage_name,
+                            stage_index=stage_index,
+                            stage_total=stage_total,
+                            download_percent=0,
+                            repo_id=repo_id,
+                        ),
+                        error=None,
+                        target=target,
+                    )
+
+                    candidate_path = _download_hf_with_profile(
+                        repo_id=repo_id,
+                        filename=filename,
+                        repo_type=repo_type,
+                        force_download=True,
+                        env_profile=env_profile or None,
+                        on_progress=on_progress,
+                    )
+                    if not _checkpoint_is_valid(candidate_path):
+                        _evict_cached_hf_file(candidate_path)
+                        raise ValueError("downloaded checkpoint failed validation")
+
+                    downloaded_path = candidate_path
+                    break
+                except Exception as runtime_download_error:
+                    attempt_errors.append(
+                        f"attempt {attempt_index} ({profile_label}): {runtime_download_error}"
+                    )
+                    print(
+                        f"⚠️ stable predownload runtime attempt {attempt_index} failed for "
+                        f"{repo_id}/{filename}: {runtime_download_error}"
+                    )
+
+            if not downloaded_path:
+                raise RuntimeError(
+                    f"failed to download {repo_id}/{filename}: {' | '.join(attempt_errors)}"
+                )
+    else:
+        try:
+            _upsert_stable_predownload_session(
+                session_id,
+                status="warming",
+                progress=_predownload_overall_progress(stage_index, stage_total, 0),
+                queue_status=_build_stable_predownload_queue_status(
+                    status="warming",
+                    message=f"stage {stage_index}/{stage_total}: preparing shared downloader env for {filename}",
+                    target=target,
+                    stage_name=stage_name,
+                    stage_index=stage_index,
+                    stage_total=stage_total,
+                    download_percent=0,
+                    repo_id=repo_id,
+                ),
+                error=None,
+                target=target,
+            )
+            backend_label = _download_with_shared_hf_downloader_env(
+                repo_id=repo_id,
+                filename=filename,
+                on_progress=on_progress,
+            )
+            print(
+                f"[HF] stable predownload shared downloader selected for {repo_id}/{filename}: "
+                f"{backend_label}"
+            )
+            downloaded_path = _download_hf_with_profile(
+                repo_id=repo_id,
+                filename=filename,
+                repo_type=repo_type,
+                local_files_only=True,
+            )
+        except Exception as shared_download_error:
+            print(
+                f"[HF] stable predownload shared downloader failed for {repo_id}/{filename}; "
+                f"falling back to runtime env: {shared_download_error}"
+            )
+            _upsert_stable_predownload_session(
+                session_id,
+                status="warming",
+                progress=_predownload_overall_progress(stage_index, stage_total, 0),
+                queue_status=_build_stable_predownload_queue_status(
+                    status="warming",
+                    message=(
+                        f"stage {stage_index}/{stage_total}: shared downloader failed, "
+                        f"falling back to runtime env for {filename}"
+                    ),
+                    target=target,
+                    stage_name=stage_name,
+                    stage_index=stage_index,
+                    stage_total=stage_total,
+                    download_percent=0,
+                    repo_id=repo_id,
+                ),
+                error=None,
+                target=target,
+            )
+            downloaded_path = _download_hf_with_profile(
+                repo_id=repo_id,
+                filename=filename,
+                repo_type=repo_type,
+                on_progress=on_progress,
+            )
+
+    completed_overall = _predownload_overall_progress(stage_index, stage_total, 100)
+    completed_queue = _build_stable_predownload_queue_status(
+        status="processing" if completed_overall < 100 else "completed",
+        message=f"stage {stage_index}/{stage_total}: {stage_name} ready ({filename})",
+        target=target,
+        stage_name=stage_name,
+        stage_index=stage_index,
+        stage_total=stage_total,
+        download_percent=100,
+        repo_id=repo_id,
+    )
+    _upsert_stable_predownload_session(
+        session_id,
+        status="processing" if completed_overall < 100 else "completed",
+        progress=completed_overall,
+        queue_status=completed_queue,
+        error=None,
+        target=target,
+    )
+    return downloaded_path
+
 
 @contextmanager
 def resource_cleanup():
@@ -586,6 +1600,340 @@ def list_checkpoints():
             "success": False,
             "error": str(e)
         }), 500
+
+
+@app.route('/models/predownload_inventory', methods=['POST'])
+@app.route('/api/models/predownload_inventory', methods=['POST'])
+def predownload_inventory():
+    """
+    Return cache-backed inventory for stable predownload UI.
+
+    Optional JSON body:
+    {
+        "finetune_repo": "thepatch/jerry_grunge",
+        "checkpoints": ["foo.ckpt", "bar.ckpt"]
+    }
+    """
+    try:
+        payload = request.get_json(silent=True) or {}
+        finetune_repo = str(payload.get("finetune_repo", "")).strip()
+        requested_checkpoints = _normalize_optional_string_list(payload.get("checkpoints"))
+
+        finetune_checkpoint_rows = []
+        cached_finetune_rows = []
+
+        if finetune_repo:
+            if requested_checkpoints:
+                checkpoint_names = requested_checkpoints
+            else:
+                checkpoint_names = _list_cached_repo_checkpoints(finetune_repo)
+
+            finetune_checkpoint_rows = [
+                {
+                    "name": checkpoint_name,
+                    "downloaded": _is_repo_file_cached(finetune_repo, checkpoint_name),
+                }
+                for checkpoint_name in checkpoint_names
+            ]
+
+            cached_finetune_rows = [
+                checkpoint_name for checkpoint_name in checkpoint_names
+                if _is_repo_file_cached(finetune_repo, checkpoint_name)
+            ]
+
+        return jsonify({
+            "success": True,
+            "known_models": _build_pretrained_inventory_rows(),
+            "finetune_repo": finetune_repo,
+            "finetune_checkpoints": finetune_checkpoint_rows,
+            "cached_finetunes": cached_finetune_rows,
+            "cache_root": str(_resolve_hf_hub_cache_dir()),
+        })
+    except Exception as e:
+        print(f"Predownload inventory error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+def _run_stable_predownload_task(session_id: str, payload: dict):
+    from huggingface_hub.errors import EntryNotFoundError
+
+    target_type = str(payload.get("target_type", "pretrained")).strip().lower()
+    target_repo = str(payload.get("repo_id", "")).strip()
+    finetune_repo = str(payload.get("finetune_repo", "")).strip()
+    finetune_checkpoint = str(payload.get("finetune_checkpoint", "")).strip()
+    base_repo = str(payload.get("base_repo", "stabilityai/stable-audio-open-small")).strip()
+    require_token = bool(payload.get("require_token", False))
+
+    target_label = ""
+    if target_type == "finetune":
+        target_label = f"{finetune_repo}/{finetune_checkpoint}"
+    else:
+        target_label = target_repo or "stabilityai/stable-audio-open-small"
+
+    try:
+        hf_token = os.getenv("HF_TOKEN")
+        if require_token and not hf_token:
+            raise ValueError("HF_TOKEN is required. save your hugging face token first.")
+        if hf_token:
+            login(token=hf_token)
+
+        if target_type == "finetune":
+            if not finetune_repo or not finetune_checkpoint:
+                raise ValueError("finetune_repo and finetune_checkpoint are required.")
+
+            stage_total = 4
+            # 1) finetune checkpoint
+            _download_hf_file_with_session_progress(
+                session_id=session_id,
+                target=target_label,
+                stage_index=1,
+                stage_total=stage_total,
+                stage_name="finetune checkpoint",
+                repo_id=finetune_repo,
+                filename=finetune_checkpoint,
+                validate_checkpoint=True,
+            )
+
+            # 2) finetune config candidate (best effort)
+            config_candidates = []
+            version_match = re.match(r"(acid_v\d+)_", finetune_checkpoint)
+            if version_match:
+                version_prefix = version_match.group(1)
+                checkpoint_base = finetune_checkpoint.replace(".ckpt", "")
+                config_candidates.extend([
+                    f"{checkpoint_base}_model_config.json",
+                    f"{version_prefix}_base_model_config.json",
+                    f"{version_prefix}_model_config.json",
+                    f"{version_prefix}_config.json",
+                ])
+            config_candidates.extend(["base_model_config.json", "model_config.json"])
+
+            downloaded_config_name = None
+            for candidate in config_candidates:
+                try:
+                    _download_hf_file_with_session_progress(
+                        session_id=session_id,
+                        target=target_label,
+                        stage_index=2,
+                        stage_total=stage_total,
+                        stage_name="finetune config",
+                        repo_id=finetune_repo,
+                        filename=candidate,
+                    )
+                    downloaded_config_name = candidate
+                    break
+                except EntryNotFoundError:
+                    continue
+
+            if downloaded_config_name is None:
+                queue = _build_stable_predownload_queue_status(
+                    status="processing",
+                    message=f"stage 2/{stage_total}: no repo config found, using base repo config at runtime",
+                    target=target_label,
+                    stage_name="finetune config",
+                    stage_index=2,
+                    stage_total=stage_total,
+                    download_percent=100,
+                    repo_id=finetune_repo,
+                )
+                _upsert_stable_predownload_session(
+                    session_id,
+                    status="processing",
+                    progress=_predownload_overall_progress(2, stage_total, 100),
+                    queue_status=queue,
+                    error=None,
+                    target=target_label,
+                )
+
+            # 3) base config from base repo (fallback between naming variants)
+            base_config_candidates = ["base_model_config.json", "model_config.json"]
+            base_config_downloaded = False
+            for candidate in base_config_candidates:
+                try:
+                    _download_hf_file_with_session_progress(
+                        session_id=session_id,
+                        target=target_label,
+                        stage_index=3,
+                        stage_total=stage_total,
+                        stage_name="base config",
+                        repo_id=base_repo,
+                        filename=candidate,
+                    )
+                    base_config_downloaded = True
+                    break
+                except EntryNotFoundError:
+                    continue
+            if not base_config_downloaded:
+                raise ValueError(f"base config missing in {base_repo} (tried base_model_config.json and model_config.json)")
+
+            # 4) base checkpoint from base repo (fallback between naming variants)
+            base_checkpoint_candidates = ["base_model.ckpt", "model.safetensors", "model.ckpt"]
+            base_checkpoint_downloaded = False
+            for candidate in base_checkpoint_candidates:
+                try:
+                    _download_hf_file_with_session_progress(
+                        session_id=session_id,
+                        target=target_label,
+                        stage_index=4,
+                        stage_total=stage_total,
+                        stage_name="base checkpoint",
+                        repo_id=base_repo,
+                        filename=candidate,
+                    )
+                    base_checkpoint_downloaded = True
+                    break
+                except EntryNotFoundError:
+                    continue
+            if not base_checkpoint_downloaded:
+                raise ValueError(f"base checkpoint missing in {base_repo} (tried base_model.ckpt, model.safetensors, model.ckpt)")
+
+        else:
+            repo_id = target_repo or "stabilityai/stable-audio-open-small"
+            target_label = repo_id
+            stage_total = 2
+
+            _download_hf_file_with_session_progress(
+                session_id=session_id,
+                target=target_label,
+                stage_index=1,
+                stage_total=stage_total,
+                stage_name="model config",
+                repo_id=repo_id,
+                filename="model_config.json",
+            )
+
+            # Try safetensors first, then ckpt fallback (matches get_pretrained_model behavior)
+            try:
+                _download_hf_file_with_session_progress(
+                    session_id=session_id,
+                    target=target_label,
+                    stage_index=2,
+                    stage_total=stage_total,
+                    stage_name="model weights",
+                    repo_id=repo_id,
+                    filename="model.safetensors",
+                )
+            except EntryNotFoundError:
+                _download_hf_file_with_session_progress(
+                    session_id=session_id,
+                    target=target_label,
+                    stage_index=2,
+                    stage_total=stage_total,
+                    stage_name="model weights",
+                    repo_id=repo_id,
+                    filename="model.ckpt",
+                )
+
+        _upsert_stable_predownload_session(
+            session_id,
+            status="completed",
+            progress=100,
+            queue_status=_build_stable_predownload_queue_status(
+                status="completed",
+                message=f"{target_label} is ready for offline use.",
+                target=target_label,
+                stage_name="completed",
+                stage_index=0,
+                stage_total=0,
+                download_percent=100,
+            ),
+            error=None,
+            target=target_label,
+        )
+    except Exception as e:
+        _upsert_stable_predownload_session(
+            session_id,
+            status="failed",
+            progress=0,
+            queue_status=_build_stable_predownload_queue_status(
+                status="failed",
+                message=str(e),
+                target=target_label,
+                stage_name="failed",
+                stage_index=0,
+                stage_total=0,
+                download_percent=0,
+            ),
+            error=str(e),
+            target=target_label,
+        )
+
+
+@app.route('/models/predownload', methods=['POST'])
+@app.route('/api/models/predownload', methods=['POST'])
+def start_model_predownload():
+    try:
+        payload = request.get_json(silent=True) or {}
+        target_type = str(payload.get("target_type", "pretrained")).strip().lower()
+        repo_id = str(payload.get("repo_id", "")).strip()
+        finetune_repo = str(payload.get("finetune_repo", "")).strip()
+        finetune_checkpoint = str(payload.get("finetune_checkpoint", "")).strip()
+
+        if target_type not in {"pretrained", "finetune"}:
+            return jsonify({"success": False, "error": "target_type must be 'pretrained' or 'finetune'"}), 400
+
+        if target_type == "finetune":
+            if not finetune_repo or not finetune_checkpoint:
+                return jsonify({"success": False, "error": "finetune_repo and finetune_checkpoint are required"}), 400
+            model_name = f"{finetune_repo}/{finetune_checkpoint}"
+        else:
+            model_name = repo_id or "stabilityai/stable-audio-open-small"
+
+        session_id = str(uuid.uuid4())
+        _upsert_stable_predownload_session(
+            session_id,
+            status="warming",
+            progress=0,
+            queue_status=_build_stable_predownload_queue_status(
+                status="warming",
+                message=f"preparing download for {model_name}",
+                target=model_name,
+                stage_name="prepare",
+                stage_index=0,
+                stage_total=0,
+                download_percent=0,
+            ),
+            error=None,
+            target=model_name,
+        )
+
+        threading.Thread(
+            target=_run_stable_predownload_task,
+            args=(session_id, payload),
+            daemon=True,
+        ).start()
+
+        return jsonify({
+            "success": True,
+            "session_id": session_id,
+            "model_name": model_name,
+            "message": f"started pre-download for {model_name}",
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/models/predownload_status/<session_id>', methods=['GET'])
+@app.route('/api/models/predownload_status/<session_id>', methods=['GET'])
+def get_model_predownload_status(session_id: str):
+    session = _read_stable_predownload_session(session_id)
+    if session is None:
+        return jsonify({"success": False, "error": "predownload session not found"}), 404
+
+    return jsonify({
+        "success": True,
+        "session_id": session_id,
+        "model_name": session.get("target"),
+        "status": session.get("status", "unknown"),
+        "progress": int(session.get("progress", 0)),
+        "queue_status": session.get("queue_status", {}),
+        "error": session.get("error"),
+    })
     
 @app.route('/models/switch', methods=['POST'])
 def switch_model():
@@ -1089,6 +2437,102 @@ def _torch_load_any(path):
         return torch.load(path, map_location="cpu")
 
 
+def _extract_state_dict_from_payload(payload):
+    if isinstance(payload, dict):
+        nested = payload.get("state_dict")
+        if isinstance(nested, dict):
+            return nested
+        return payload
+    return None
+
+
+def _load_finetune_state_dict(path):
+    torch_error = None
+    try:
+        payload = _torch_load_any(path)
+        state_dict = _extract_state_dict_from_payload(payload)
+        if isinstance(state_dict, dict):
+            return state_dict
+    except Exception as exc:
+        torch_error = exc
+
+    ckpt_error = None
+    try:
+        payload = load_ckpt_state_dict(path)
+        state_dict = _extract_state_dict_from_payload(payload)
+        if isinstance(state_dict, dict):
+            return state_dict
+    except Exception as exc:
+        ckpt_error = exc
+
+    safetensors_error = None
+    try:
+        from safetensors.torch import load_file as load_safetensors_file
+        payload = load_safetensors_file(path)
+        state_dict = _extract_state_dict_from_payload(payload)
+        if isinstance(state_dict, dict):
+            return state_dict
+    except Exception as exc:
+        safetensors_error = exc
+
+    details = []
+    if torch_error is not None:
+        details.append(f"torch.load failed: {torch_error}")
+    if ckpt_error is not None:
+        details.append(f"load_ckpt_state_dict failed: {ckpt_error}")
+    if safetensors_error is not None:
+        details.append(f"safetensors load failed: {safetensors_error}")
+    detail_text = " | ".join(details) if details else "unknown checkpoint format"
+    raise ValueError(f"unable to parse finetune checkpoint: {detail_text}")
+
+
+def _load_finetune_state_dict_with_redownload(
+    *,
+    finetune_repo: str,
+    finetune_checkpoint: str,
+    initial_path: str,
+):
+    try:
+        return _load_finetune_state_dict(initial_path)
+    except Exception as first_error:
+        print(
+            f"⚠️ finetune checkpoint parse failed for {finetune_repo}/{finetune_checkpoint}; "
+            f"retrying with force download: {first_error}"
+        )
+        redownload_profiles = [
+            {"HF_HUB_DISABLE_XET": "1", "HF_HUB_ENABLE_HF_TRANSFER": "1"},
+            {"HF_HUB_DISABLE_XET": "1", "HF_HUB_ENABLE_HF_TRANSFER": "0"},
+        ]
+        attempt_errors = []
+        cached_path = initial_path
+
+        for index, env_profile in enumerate(redownload_profiles, start=1):
+            try:
+                _evict_cached_hf_file(cached_path)
+                repaired_path = _download_hf_with_profile(
+                    repo_id=finetune_repo,
+                    filename=finetune_checkpoint,
+                    repo_type="model",
+                    force_download=True,
+                    env_profile=env_profile,
+                )
+                cached_path = repaired_path
+                return _load_finetune_state_dict(repaired_path)
+            except Exception as redownload_error:
+                attempt_errors.append(
+                    f"attempt {index} {env_profile}: {redownload_error}"
+                )
+                print(
+                    f"⚠️ re-download attempt {index} failed for "
+                    f"{finetune_repo}/{finetune_checkpoint}: {redownload_error}"
+                )
+
+        raise ValueError(
+            f"unable to load finetune checkpoint {finetune_repo}/{finetune_checkpoint} "
+            f"after clean re-download attempts: {' | '.join(attempt_errors)}"
+        )
+
+
 def _resolve_mlx_finetune_assets(finetune_repo, finetune_checkpoint, base_repo):
     cache_key = (finetune_repo, finetune_checkpoint, base_repo)
 
@@ -1131,10 +2575,11 @@ def _resolve_mlx_finetune_assets(finetune_repo, finetune_checkpoint, base_repo):
             print(f"🔧 Preparing merged MLX finetune checkpoint: {finetune_repo}/{finetune_checkpoint}")
 
             base_state_dict = load_ckpt_state_dict(base_ckpt_path)
-            finetune_payload = _torch_load_any(finetune_ckpt_path)
-            finetune_state_dict = finetune_payload.get("state_dict", finetune_payload)
-            if not isinstance(finetune_state_dict, dict):
-                raise ValueError("Unsupported finetune checkpoint format: expected state_dict dictionary")
+            finetune_state_dict = _load_finetune_state_dict_with_redownload(
+                finetune_repo=finetune_repo,
+                finetune_checkpoint=finetune_checkpoint,
+                initial_path=finetune_ckpt_path,
+            )
 
             ema_prefix = "diffusion_ema.ema_model."
             ema_keys = [k for k in finetune_state_dict.keys() if str(k).startswith(ema_prefix)]

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-import io
 from typing import Callable, Optional, TypedDict
 
 
@@ -14,13 +13,29 @@ class DownloadProgressEvent(TypedDict):
     done: bool
 
 
+class _NullTqdmStream:
+    """A write sink that discards tqdm output without buffering in memory."""
+
+    def write(self, message: str) -> int:
+        return len(message) if message is not None else 0
+
+    def flush(self) -> None:
+        return None
+
+    def isatty(self) -> bool:
+        return False
+
+
+_NULL_TQDM_STREAM = _NullTqdmStream()
+
+
 def make_hf_tqdm_class(
     *,
     repo_id: str,
     on_progress: Optional[Callable[[DownloadProgressEvent], None]],
     min_interval_s: float = 0.25,
     min_percent_step: int = 1,
-    min_bytes_step: int = 5 * 1024 * 1024,
+    min_bytes_step: int = 1 * 1024 * 1024,
     silence_output: bool = True,
 ):
     """
@@ -50,14 +65,14 @@ def make_hf_tqdm_class(
             self._last_emit_bytes = 0
             self._progress_name = kwargs.get("name")
 
-            # Avoid noisy server logs; keep tqdm enabled (so `n`/`total` update),
-            # but render to an in-memory stream instead of stderr.
+            # Keep tqdm enabled so `n`/`total` counters still update, while
+            # routing output to a sink to avoid noisy logs and buffer growth.
             if silence_output:
-                kwargs.setdefault("file", io.StringIO())
+                kwargs.setdefault("file", _NULL_TQDM_STREAM)
                 kwargs.setdefault("leave", False)
                 # `huggingface_hub` may pass disable=True (often due to NOTSET log level),
                 # which prevents tqdm from updating its internal counters. Force-enable
-                # so progress callbacks can fire while still silencing output via `file`.
+                # so progress callbacks can fire while still silencing output.
                 kwargs["disable"] = False
 
             super().__init__(*args, **kwargs)
@@ -81,6 +96,12 @@ def make_hf_tqdm_class(
         def close(self):
             self._emit(force=True)
             return super().close()
+
+        def display(self, msg=None, pos=None):
+            # Skip formatting/writes entirely when output is silenced.
+            if silence_output:
+                return None
+            return super().display(msg=msg, pos=pos)
 
         def _emit(self, force: bool = False) -> None:
             if self._on_progress is None:

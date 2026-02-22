@@ -223,9 +223,6 @@ def _derive_progress_from_queue_status(
         return 100
 
     normalized = max(0, min(100, int(progress)))
-    if normalized > 0:
-        return normalized
-
     if not isinstance(qstatus, dict):
         return normalized
 
@@ -240,9 +237,27 @@ def _derive_progress_from_queue_status(
         return normalized
 
     stage_percent = max(0, min(100, stage_percent))
-    derived = int(
-        (((stage_index - 1) + (stage_percent / 100.0)) / stage_total) * 100
-    )
+
+    # Keep global progress aligned to the dominant checkpoint transfer.
+    # For current predownload flow (5 stages), stage 1 is almost all bytes.
+    if stage_total == 5:
+        primary_stage_weight = 0.96
+        if stage_index <= 1:
+            derived_raw = (stage_percent / 100.0) * primary_stage_weight * 100.0
+        else:
+            secondary_stage_weight = (1.0 - primary_stage_weight) / 4.0
+            completed_secondary_stages = max(0, stage_index - 2)
+            derived_raw = (
+                primary_stage_weight
+                + (completed_secondary_stages * secondary_stage_weight)
+                + ((stage_percent / 100.0) * secondary_stage_weight)
+            ) * 100.0
+        derived = int(derived_raw + 0.9999)
+    else:
+        derived = int(
+            (((stage_index - 1) + (stage_percent / 100.0)) / stage_total) * 100
+        )
+
     if stage_percent > 0:
         derived = max(1, derived)
     return max(normalized, min(99, derived))
@@ -278,6 +293,8 @@ def _fmt_bytes(n: int) -> str:
 
 def run_model_predownload(session_id: str, model_name: str):
     """Background task to pre-download all assets required for offline model usage."""
+    stage_started_at: dict[tuple[int, str, str], float] = {}
+
     def progress_callback(evt: dict):
         try:
             stage_name = str(evt.get("stage_name") or "download")
@@ -289,6 +306,7 @@ def run_model_predownload(session_id: str, model_name: str):
             stage_index = int(evt.get("stage_index") or 0)
             unit = str(evt.get("unit") or "").strip().lower()
             progress_name = str(evt.get("progress_name") or "").strip()
+            speed_bps = float(evt.get("speed_bps") or 0.0)
             progress = int(evt.get("percent") or 0)
             if progress <= 0 and stage_total > 0 and stage_index > 0:
                 derived = int(
@@ -303,15 +321,25 @@ def run_model_predownload(session_id: str, model_name: str):
             store_session_progress(session_id, progress)
 
             stage_prefix = f"Stage {stage_index}/{stage_total} {stage_name}" if stage_total > 0 else stage_name
+            speed_suffix = f" • {_fmt_bytes(int(speed_bps))}/s" if speed_bps > 0 else ""
+            stage_key = (stage_index, stage_name, repo_id)
+            now = time.time()
+            started_at = stage_started_at.setdefault(stage_key, now)
+            prep_seconds = int(max(0, now - started_at))
             if unit in {"it", "item", "items", "file", "files"} and total > 0:
                 message = (
                     f"{stage_prefix}: {repo_id} "
                     f"({downloaded}/{total} files • {stage_percent}%)"
                 )
+            elif stage_percent <= 0 and downloaded <= 0 and prep_seconds >= 3:
+                message = (
+                    f"{stage_prefix}: {repo_id} "
+                    f"(preparing transfer... {prep_seconds}s)"
+                )
             elif total >= 4 * 1024 or downloaded >= 4 * 1024:
                 message = (
                     f"{stage_prefix}: {repo_id} "
-                    f"({_fmt_bytes(downloaded)}/{_fmt_bytes(total)} • {stage_percent}%)"
+                    f"({_fmt_bytes(downloaded)}/{_fmt_bytes(total)} • {stage_percent}%{speed_suffix})"
                 )
             elif progress_name:
                 message = f"{stage_prefix}: {repo_id} ({stage_percent}% • {progress_name})"
@@ -332,6 +360,7 @@ def run_model_predownload(session_id: str, model_name: str):
                 "download_percent": stage_percent,
                 "downloaded_bytes": downloaded,
                 "total_bytes": total,
+                "speed_bps": speed_bps,
                 "stage_name": stage_name,
                 "stage_index": stage_index,
                 "stage_total": stage_total,

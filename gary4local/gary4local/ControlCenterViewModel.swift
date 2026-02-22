@@ -74,6 +74,13 @@ struct DownloadModelSection: Identifiable {
     let models: [DownloadableModel]
 }
 
+struct StableAudioInventoryModelStatus: Identifiable {
+    let id: String
+    let label: String
+    let downloaded: Bool
+    let missing: [String]
+}
+
 @MainActor
 final class ControlCenterViewModel: ObservableObject {
     private static let stableAudioBackendDefaultsKey = "stableAudioBackendEngine"
@@ -94,6 +101,16 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var modelDownloadStatusMessage: String = ""
     @Published var isModelCatalogLoading: Bool = false
     @Published var isModelDownloadInProgress: Bool = false
+    @Published var stableAudioPredownloadRepoInput: String = "thepatch/jerry_grunge"
+    @Published var stableAudioPredownloadCheckpoints: [String] = []
+    @Published var stableAudioPredownloadCheckpointDownloaded: [String: Bool] = [:]
+    @Published var stableAudioInventoryModels: [StableAudioInventoryModelStatus] = []
+    @Published var stableAudioCachedFinetunes: [String] = []
+    @Published var stableAudioPredownloadSelectedCheckpoint: String = ""
+    @Published var isStableAudioCheckpointFetchInProgress: Bool = false
+    @Published var isStableAudioModelSwitchInProgress: Bool = false
+    @Published var stableAudioPredownloadProgress: Double = 0
+    @Published var stableAudioPredownloadTargetLabel: String = ""
     @Published var stableAudioBackendEngine: StableAudioBackendEngine = .mps
     @Published var melodyFlowBackendEngine: MelodyFlowBackendEngine = .mps
     @Published var melodyFlowBackendStatus: String = ""
@@ -103,6 +120,7 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var requirementsEditorPath: String = ""
     @Published var requirementsEditorText: String = ""
     @Published var requirementsEditorStatusMessage: String = ""
+    @Published var modelDownloadServiceID: String = "audiocraft_mlx"
 
     private var logRefreshTask: Task<Void, Never>?
     private var modelDownloadPollTask: Task<Void, Never>?
@@ -201,6 +219,57 @@ final class ControlCenterViewModel: ObservableObject {
         }
     }
 
+    private struct StableAudioCheckpointsResponse: Decodable {
+        let success: Bool
+        let repo: String?
+        let checkpoints: [String]?
+        let count: Int?
+        let error: String?
+    }
+
+    private struct StableAudioPredownloadInventoryResponse: Decodable {
+        let success: Bool
+        let knownModels: [StableAudioKnownModelRow]
+        let finetuneRepo: String?
+        let finetuneCheckpoints: [StableAudioCheckpointInventoryRow]
+        let cachedFinetunes: [String]
+        let error: String?
+
+        enum CodingKeys: String, CodingKey {
+            case success
+            case knownModels = "known_models"
+            case finetuneRepo = "finetune_repo"
+            case finetuneCheckpoints = "finetune_checkpoints"
+            case cachedFinetunes = "cached_finetunes"
+            case error
+        }
+    }
+
+    private struct StableAudioKnownModelRow: Decodable {
+        let repoID: String
+        let label: String
+        let downloaded: Bool
+        let missing: [String]
+
+        enum CodingKeys: String, CodingKey {
+            case repoID = "repo_id"
+            case label
+            case downloaded
+            case missing
+        }
+    }
+
+    private struct StableAudioCheckpointInventoryRow: Decodable {
+        let name: String
+        let downloaded: Bool
+    }
+
+    private struct StableAudioModelSwitchResponse: Decodable {
+        let success: Bool?
+        let message: String?
+        let error: String?
+    }
+
     init() {
         let savedBackend = UserDefaults.standard.string(forKey: Self.stableAudioBackendDefaultsKey) ?? StableAudioBackendEngine.mps.rawValue
         stableAudioBackendEngine = StableAudioBackendEngine.from(rawValue: savedBackend)
@@ -234,10 +303,19 @@ final class ControlCenterViewModel: ObservableObject {
     }
 
     var canManageModelDownloads: Bool {
-        guard let runtime = manager?.services.first(where: { $0.id == "audiocraft_mlx" }) else {
+        guard let runtime = manager?.services.first(where: { $0.id == modelDownloadServiceID }) else {
             return false
         }
         return runtime.processState == .running
+    }
+
+    var modelDownloadServiceDisplayName: String {
+        modelDownloadDisplayName(forServiceID: modelDownloadServiceID)
+    }
+
+    var canManageStableAudioPredownloads: Bool {
+        guard modelDownloadServiceID == "stable_audio" else { return false }
+        return canManageModelDownloads && stableAudioTokenConfigured
     }
 
     func loadManifest() {
@@ -459,12 +537,29 @@ final class ControlCenterViewModel: ObservableObject {
         }
     }
 
-    func openModelDownloadSheet() {
+    func openModelDownloadSheet(for serviceID: String) {
+        if isModelDownloadInProgress, modelDownloadServiceID != serviceID {
+            modelDownloadStatusMessage = "a model download is already in progress for \(modelDownloadServiceDisplayName)."
+            isModelDownloadSheetPresented = true
+            return
+        }
+        modelDownloadServiceID = serviceID
         isModelDownloadSheetPresented = true
-        refreshModelCatalogAndStatuses()
+        if serviceID == "stable_audio" {
+            prepareStableAudioPredownloadState()
+        } else {
+            refreshModelCatalogAndStatuses()
+        }
     }
 
     func refreshModelCatalogAndStatuses() {
+        if modelDownloadServiceID == "stable_audio" {
+            modelDownloadStatusMessage = "stable audio uses repo/checkpoint pre-download controls below."
+            isModelCatalogLoading = false
+            downloadableModels = []
+            return
+        }
+
         if isModelDownloadInProgress {
             modelDownloadStatusMessage = "a model download is already in progress."
             return
@@ -476,9 +571,9 @@ final class ControlCenterViewModel: ObservableObject {
         activeModelDownloadPath = nil
         isModelDownloadInProgress = false
 
-        guard let baseURL = audiocraftAPIBaseURL() else {
+        guard let baseURL = modelDownloadAPIBaseURL(for: modelDownloadServiceID) else {
             downloadableModels = []
-            modelDownloadStatusMessage = "start audiocraft mlx to manage model downloads."
+            modelDownloadStatusMessage = "start \(modelDownloadServiceDisplayName) to manage model downloads."
             isModelCatalogLoading = false
             return
         }
@@ -541,9 +636,313 @@ final class ControlCenterViewModel: ObservableObject {
         }
     }
 
+    func fetchStableAudioPredownloadCheckpoints() {
+        let serviceID = modelDownloadServiceID
+        guard serviceID == "stable_audio" else { return }
+        guard let baseURL = modelDownloadAPIBaseURL(for: serviceID) else {
+            modelDownloadStatusMessage = "start \(modelDownloadServiceDisplayName) to fetch checkpoints."
+            return
+        }
+
+        let repo = stableAudioPredownloadRepoInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !repo.isEmpty else {
+            modelDownloadStatusMessage = "enter a hugging face repo first."
+            return
+        }
+        guard !isStableAudioCheckpointFetchInProgress else { return }
+        guard !isModelDownloadInProgress else {
+            modelDownloadStatusMessage = "a model download is already running."
+            return
+        }
+
+        isStableAudioCheckpointFetchInProgress = true
+        modelDownloadStatusMessage = "fetching checkpoints from \(repo)..."
+
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.isStableAudioCheckpointFetchInProgress = false }
+            do {
+                var request = URLRequest(url: baseURL.appendingPathComponent("models/checkpoints"))
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONSerialization.data(withJSONObject: ["finetune_repo": repo])
+
+                let (data, response) = try await URLSession.shared.data(for: request)
+                try self.ensureHTTP200(response: response, body: data)
+                let payload = try JSONDecoder().decode(StableAudioCheckpointsResponse.self, from: data)
+                guard payload.success else {
+                    throw NSError(
+                        domain: "ControlCenterViewModel",
+                        code: 6,
+                        userInfo: [
+                            NSLocalizedDescriptionKey: payload.error ?? "failed to fetch checkpoints."
+                        ]
+                    )
+                }
+
+                let checkpoints = (payload.checkpoints ?? []).sorted {
+                    $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+                }
+                self.stableAudioPredownloadCheckpoints = checkpoints
+                self.stableAudioPredownloadSelectedCheckpoint = checkpoints.first ?? ""
+                self.stableAudioPredownloadCheckpointDownloaded = [:]
+                if checkpoints.isEmpty {
+                    self.modelDownloadStatusMessage = "no .ckpt files found in \(repo)."
+                } else {
+                    self.modelDownloadStatusMessage = "\(checkpoints.count) checkpoint\(checkpoints.count == 1 ? "" : "s") found."
+                }
+                self.refreshStableAudioPredownloadInventory(checkpointsHint: checkpoints)
+            } catch {
+                self.stableAudioPredownloadCheckpoints = []
+                self.stableAudioPredownloadCheckpointDownloaded = [:]
+                self.stableAudioPredownloadSelectedCheckpoint = ""
+                self.modelDownloadStatusMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func startStableAudioPredownloadOpenOne() {
+        startStableAudioPredownload(
+            payload: [
+                "target_type": "pretrained",
+                "repo_id": "stabilityai/stable-audio-open-1.0",
+                "require_token": true
+            ],
+            targetLabel: "stabilityai/stable-audio-open-1.0"
+        )
+    }
+
+    func startStableAudioPredownloadSelectedCheckpoint() {
+        let repo = stableAudioPredownloadRepoInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let checkpoint = stableAudioPredownloadSelectedCheckpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !repo.isEmpty else {
+            modelDownloadStatusMessage = "enter a finetune repo first."
+            return
+        }
+        guard !checkpoint.isEmpty else {
+            modelDownloadStatusMessage = "fetch and choose a checkpoint first."
+            return
+        }
+        startStableAudioPredownload(
+            payload: [
+                "target_type": "finetune",
+                "finetune_repo": repo,
+                "finetune_checkpoint": checkpoint,
+                "base_repo": "stabilityai/stable-audio-open-small",
+                "require_token": false
+            ],
+            targetLabel: "\(repo)/\(checkpoint)"
+        )
+    }
+
+    func useStableAudioSelectedCheckpoint() {
+        let serviceID = modelDownloadServiceID
+        guard serviceID == "stable_audio" else { return }
+        guard let baseURL = modelDownloadAPIBaseURL(for: serviceID) else {
+            modelDownloadStatusMessage = "start \(modelDownloadServiceDisplayName) to use a model."
+            return
+        }
+        let repo = stableAudioPredownloadRepoInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let checkpoint = stableAudioPredownloadSelectedCheckpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !repo.isEmpty else {
+            modelDownloadStatusMessage = "enter a finetune repo first."
+            return
+        }
+        guard !checkpoint.isEmpty else {
+            modelDownloadStatusMessage = "fetch and choose a checkpoint first."
+            return
+        }
+        guard !isModelDownloadInProgress else {
+            modelDownloadStatusMessage = "wait for the current download to finish."
+            return
+        }
+        guard !isStableAudioModelSwitchInProgress else {
+            modelDownloadStatusMessage = "model switch already in progress."
+            return
+        }
+
+        isStableAudioModelSwitchInProgress = true
+        modelDownloadStatusMessage = "loading \(repo)/\(checkpoint) into jerry cache..."
+
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.isStableAudioModelSwitchInProgress = false }
+            do {
+                var request = URLRequest(url: baseURL.appendingPathComponent("models/switch"))
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONSerialization.data(withJSONObject: [
+                    "model_type": "finetune",
+                    "finetune_repo": repo,
+                    "finetune_checkpoint": checkpoint
+                ])
+
+                let (data, response) = try await URLSession.shared.data(for: request)
+                try self.ensureHTTP200(response: response, body: data)
+                let payload = try JSONDecoder().decode(StableAudioModelSwitchResponse.self, from: data)
+                if payload.success == false {
+                    throw NSError(
+                        domain: "ControlCenterViewModel",
+                        code: 9,
+                        userInfo: [NSLocalizedDescriptionKey: payload.error ?? payload.message ?? "failed to switch model."]
+                    )
+                }
+                self.modelDownloadStatusMessage = payload.message ?? "selected model is now active in jerry."
+            } catch {
+                self.modelDownloadStatusMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func startStableAudioPredownload(payload: [String: Any], targetLabel: String) {
+        let serviceID = modelDownloadServiceID
+        guard serviceID == "stable_audio" else { return }
+        guard stableAudioTokenConfigured else {
+            modelDownloadStatusMessage = "save your hugging face token first."
+            return
+        }
+        guard let baseURL = modelDownloadAPIBaseURL(for: serviceID) else {
+            modelDownloadStatusMessage = "start \(modelDownloadServiceDisplayName) to pre-download models."
+            return
+        }
+        guard !isModelDownloadInProgress else {
+            modelDownloadStatusMessage = "a model download is already running."
+            return
+        }
+
+        modelDownloadPollTask?.cancel()
+        modelDownloadPollTask = nil
+        activeModelDownloadSessionID = nil
+        activeModelDownloadPath = targetLabel
+        stableAudioPredownloadTargetLabel = targetLabel
+        stableAudioPredownloadProgress = 0
+        isModelDownloadInProgress = true
+        modelDownloadStatusMessage = "starting \(targetLabel)..."
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                var request = URLRequest(url: baseURL.appendingPathComponent("models/predownload"))
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+                let (data, response) = try await URLSession.shared.data(for: request)
+                try self.ensureHTTP200(response: response, body: data)
+                let startResponse = try JSONDecoder().decode(RemotePredownloadStartResponse.self, from: data)
+                guard startResponse.success else {
+                    throw NSError(
+                        domain: "ControlCenterViewModel",
+                        code: 7,
+                        userInfo: [NSLocalizedDescriptionKey: "unable to start stable audio predownload."]
+                    )
+                }
+
+                self.activeModelDownloadSessionID = startResponse.sessionID
+                self.modelDownloadStatusMessage = startResponse.message ?? "downloading \(targetLabel)..."
+                self.startModelDownloadPolling(
+                    sessionID: startResponse.sessionID,
+                    modelPath: targetLabel,
+                    serviceID: serviceID,
+                    baseURL: baseURL,
+                    statusPathPrefix: "models/predownload_status"
+                )
+            } catch {
+                self.isModelDownloadInProgress = false
+                self.activeModelDownloadPath = nil
+                self.activeModelDownloadSessionID = nil
+                self.stableAudioPredownloadProgress = 0
+                self.modelDownloadStatusMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func prepareStableAudioPredownloadState() {
+        downloadableModels = []
+        isModelCatalogLoading = false
+        stableAudioPredownloadProgress = 0
+        stableAudioInventoryModels = []
+        stableAudioCachedFinetunes = []
+        if stableAudioPredownloadRepoInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            stableAudioPredownloadRepoInput = "thepatch/jerry_grunge"
+        }
+        refreshStableAudioPredownloadInventory(checkpointsHint: stableAudioPredownloadCheckpoints)
+        if isModelDownloadInProgress, !stableAudioPredownloadTargetLabel.isEmpty {
+            modelDownloadStatusMessage = "downloading \(stableAudioPredownloadTargetLabel)..."
+            return
+        }
+        if stableAudioTokenConfigured {
+            modelDownloadStatusMessage = "choose a stable model or fetch finetune checkpoints to pre-download."
+        } else {
+            modelDownloadStatusMessage = "save your hugging face token in jerry setup first."
+        }
+    }
+
+    func refreshStableAudioPredownloadInventory(checkpointsHint: [String] = []) {
+        let serviceID = modelDownloadServiceID
+        guard serviceID == "stable_audio" else { return }
+        guard let baseURL = modelDownloadAPIBaseURL(for: serviceID) else {
+            stableAudioInventoryModels = []
+            stableAudioCachedFinetunes = []
+            stableAudioPredownloadCheckpointDownloaded = [:]
+            return
+        }
+
+        let repo = stableAudioPredownloadRepoInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hint = checkpointsHint.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                var body: [String: Any] = [:]
+                if !repo.isEmpty {
+                    body["finetune_repo"] = repo
+                }
+                if !hint.isEmpty {
+                    body["checkpoints"] = hint
+                }
+
+                var request = URLRequest(url: baseURL.appendingPathComponent("models/predownload_inventory"))
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+                let (data, response) = try await URLSession.shared.data(for: request)
+                try self.ensureHTTP200(response: response, body: data)
+                let payload = try JSONDecoder().decode(StableAudioPredownloadInventoryResponse.self, from: data)
+                guard payload.success else {
+                    throw NSError(
+                        domain: "ControlCenterViewModel",
+                        code: 8,
+                        userInfo: [NSLocalizedDescriptionKey: payload.error ?? "failed to load stable inventory."]
+                    )
+                }
+
+                self.stableAudioInventoryModels = payload.knownModels.map { row in
+                    StableAudioInventoryModelStatus(
+                        id: row.repoID,
+                        label: row.label,
+                        downloaded: row.downloaded,
+                        missing: row.missing
+                    )
+                }
+                self.stableAudioCachedFinetunes = payload.cachedFinetunes
+                self.stableAudioPredownloadCheckpointDownloaded = Dictionary(
+                    uniqueKeysWithValues: payload.finetuneCheckpoints.map { ($0.name, $0.downloaded) }
+                )
+            } catch {
+                if self.stableAudioInventoryModels.isEmpty {
+                    self.modelDownloadStatusMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
     func startModelDownload(_ modelPath: String) {
-        guard let baseURL = audiocraftAPIBaseURL() else {
-            modelDownloadStatusMessage = "start audiocraft mlx to download models."
+        let serviceID = modelDownloadServiceID
+        let serviceDisplayName = modelDownloadDisplayName(forServiceID: serviceID)
+        guard let baseURL = modelDownloadAPIBaseURL(for: serviceID) else {
+            modelDownloadStatusMessage = "start \(serviceDisplayName) to download models."
             return
         }
         guard !isModelDownloadInProgress else {
@@ -587,6 +986,7 @@ final class ControlCenterViewModel: ObservableObject {
                 self.startModelDownloadPolling(
                     sessionID: startResponse.sessionID,
                     modelPath: modelPath,
+                    serviceID: serviceID,
                     baseURL: baseURL
                 )
             } catch {
@@ -951,11 +1351,13 @@ final class ControlCenterViewModel: ObservableObject {
     private func startModelDownloadPolling(
         sessionID: String,
         modelPath: String,
-        baseURL: URL
+        serviceID: String,
+        baseURL: URL,
+        statusPathPrefix: String = "api/models/predownload_status"
     ) {
         modelDownloadPollTask?.cancel()
         let statusURL = baseURL
-            .appendingPathComponent("api/models/predownload_status")
+            .appendingPathComponent(statusPathPrefix)
             .appendingPathComponent(sessionID)
         modelDownloadPollTask = Task { [weak self] in
             guard let self else { return }
@@ -998,6 +1400,9 @@ final class ControlCenterViewModel: ObservableObject {
                         progress: progress,
                         statusMessage: statusMessage
                     )
+                    if serviceID == "stable_audio" {
+                        self.stableAudioPredownloadProgress = progress
+                    }
                     self.modelDownloadStatusMessage = statusMessage
 
                     if pollResponse.status == "completed" {
@@ -1005,7 +1410,14 @@ final class ControlCenterViewModel: ObservableObject {
                         self.activeModelDownloadPath = nil
                         self.activeModelDownloadSessionID = nil
                         self.modelDownloadPollTask = nil
-                        self.refreshModelCatalogAndStatuses()
+                        if self.modelDownloadServiceID == serviceID,
+                           serviceID != "stable_audio" {
+                            self.refreshModelCatalogAndStatuses()
+                        } else if serviceID == "stable_audio" {
+                            self.refreshStableAudioPredownloadInventory(
+                                checkpointsHint: self.stableAudioPredownloadCheckpoints
+                            )
+                        }
                         return
                     }
 
@@ -1027,6 +1439,9 @@ final class ControlCenterViewModel: ObservableObject {
                         progress: 0,
                         statusMessage: "download polling failed"
                     )
+                    if serviceID == "stable_audio" {
+                        self.stableAudioPredownloadProgress = 0
+                    }
                     self.modelDownloadStatusMessage = error.localizedDescription
                     self.modelDownloadPollTask = nil
                     return
@@ -1054,10 +1469,28 @@ final class ControlCenterViewModel: ObservableObject {
         }
 
         let stagePercent = max(0, min(100, queue.downloadPercent ?? 0))
-        let derivedRaw = (
-            (Double(stageIndex - 1) + (Double(stagePercent) / 100.0))
-            / Double(stageTotal)
-        ) * 100.0
+        let derivedRaw: Double
+        if stageTotal == 5 {
+            // Match backend weighting so checkpoint transfer drives visible progress.
+            let primaryStageWeight = 0.96
+            if stageIndex <= 1 {
+                derivedRaw = (Double(stagePercent) / 100.0) * primaryStageWeight * 100.0
+            } else {
+                let secondaryStageWeight = (1.0 - primaryStageWeight) / 4.0
+                let completedSecondaryStages = max(0, stageIndex - 2)
+                derivedRaw = (
+                    primaryStageWeight
+                    + (Double(completedSecondaryStages) * secondaryStageWeight)
+                    + ((Double(stagePercent) / 100.0) * secondaryStageWeight)
+                ) * 100.0
+            }
+        } else {
+            derivedRaw = (
+                (Double(stageIndex - 1) + (Double(stagePercent) / 100.0))
+                / Double(stageTotal)
+            ) * 100.0
+        }
+
         var derived = Int(derivedRaw.rounded(.up))
         derived = max(0, min(99, derived))
         if stagePercent > 0 {
@@ -1127,8 +1560,8 @@ final class ControlCenterViewModel: ObservableObject {
         downloadableModels[index].statusMessage = statusMessage
     }
 
-    private func audiocraftAPIBaseURL() -> URL? {
-        guard let runtime = manager?.services.first(where: { $0.id == "audiocraft_mlx" }) else {
+    private func modelDownloadAPIBaseURL(for serviceID: String) -> URL? {
+        guard let runtime = manager?.services.first(where: { $0.id == serviceID }) else {
             return nil
         }
         guard runtime.processState == .running else {
@@ -1144,6 +1577,22 @@ final class ControlCenterViewModel: ObservableObject {
         components.query = nil
         components.fragment = nil
         return components.url
+    }
+
+    private func modelDownloadDisplayName(forServiceID serviceID: String) -> String {
+        switch serviceID {
+        case "audiocraft_mlx":
+            return "gary (musicgen)"
+        case "melodyflow":
+            return "terry (melodyflow)"
+        case "stable_audio":
+            return "jerry (stable audio)"
+        default:
+            if let runtime = manager?.services.first(where: { $0.id == serviceID }) {
+                return runtime.service.name
+            }
+            return serviceID
+        }
     }
 
     private func ensureHTTP200(response: URLResponse, body: Data) throws {

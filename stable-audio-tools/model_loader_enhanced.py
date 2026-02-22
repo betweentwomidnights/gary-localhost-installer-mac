@@ -13,6 +13,7 @@ import threading
 import gc
 import torch
 from contextlib import contextmanager
+from pathlib import Path
 from huggingface_hub import login, hf_hub_download
 from stable_audio_tools import get_pretrained_model
 from stable_audio_tools.models import create_model_from_config
@@ -24,6 +25,116 @@ def pick_device() -> str:
     if torch.backends.mps.is_available():
         return "mps"
     return "cpu"
+
+
+@contextmanager
+def _temporary_env(overrides):
+    previous = {}
+    try:
+        for key, value in overrides.items():
+            previous[key] = os.environ.get(key)
+            os.environ[key] = value
+        yield
+    finally:
+        for key, old in previous.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+
+
+def _hf_download_prefer_local(repo_id: str, filename: str, *, repo_type: str = "model", force_download: bool = False):
+    if not force_download:
+        try:
+            return hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                repo_type=repo_type,
+                local_files_only=True,
+            )
+        except Exception:
+            pass
+
+    attempts = [
+        {},
+        {"HF_HUB_DISABLE_XET": "1", "HF_HUB_ENABLE_HF_TRANSFER": "1"},
+        {"HF_HUB_DISABLE_XET": "1", "HF_HUB_ENABLE_HF_TRANSFER": "0"},
+    ]
+    errors = []
+    for index, env_profile in enumerate(attempts, start=1):
+        try:
+            kwargs = {
+                "repo_id": repo_id,
+                "filename": filename,
+                "repo_type": repo_type,
+                "force_download": force_download,
+            }
+            if env_profile:
+                with _temporary_env(env_profile):
+                    return hf_hub_download(**kwargs)
+            return hf_hub_download(**kwargs)
+        except Exception as exc:
+            errors.append(f"attempt {index} {env_profile or {'default': True}}: {exc}")
+
+    raise RuntimeError(
+        f"failed to download {repo_id}/{filename}: {' | '.join(errors)}"
+    )
+
+
+def _evict_cached_hf_file(path: str):
+    path_obj = Path(path)
+    candidates = [path_obj]
+    try:
+        if path_obj.is_symlink():
+            candidates.append(path_obj.resolve())
+    except Exception:
+        pass
+
+    seen = set()
+    for candidate in candidates:
+        normalized = str(candidate)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            if candidate.is_symlink() or candidate.exists():
+                candidate.unlink()
+        except Exception:
+            pass
+
+
+def _load_finetune_state_dict(path: str):
+    torch_error = None
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        state_dict = payload.get("state_dict", payload) if isinstance(payload, dict) else payload
+        if isinstance(state_dict, dict):
+            return state_dict
+    except TypeError:
+        try:
+            payload = torch.load(path, map_location="cpu")
+            state_dict = payload.get("state_dict", payload) if isinstance(payload, dict) else payload
+            if isinstance(state_dict, dict):
+                return state_dict
+        except Exception as exc:
+            torch_error = exc
+    except Exception as exc:
+        torch_error = exc
+
+    ckpt_error = None
+    try:
+        payload = load_ckpt_state_dict(path)
+        state_dict = payload.get("state_dict", payload) if isinstance(payload, dict) else payload
+        if isinstance(state_dict, dict):
+            return state_dict
+    except Exception as exc:
+        ckpt_error = exc
+
+    raise RuntimeError(
+        "unable to parse finetune checkpoint"
+        + (f" | torch.load: {torch_error}" if torch_error else "")
+        + (f" | load_ckpt_state_dict: {ckpt_error}" if ckpt_error else "")
+    )
 
 class ModelManager:
     """Smart model cache with memory management for multiple model support"""
@@ -118,9 +229,9 @@ class ModelManager:
             for i, pattern in enumerate(patterns_to_try, 1):
                 try:
                     print(f"   🔍 Try {i}/{len(patterns_to_try)}: {pattern}")
-                    config_path = hf_hub_download(
+                    config_path = _hf_download_prefer_local(
                         repo_id=finetune_repo,
-                        filename=pattern
+                        filename=pattern,
                     )
                     print(f"   ✅ Config found and downloaded: {pattern}")
                     return config_path
@@ -134,9 +245,9 @@ class ModelManager:
         for config_name in ["base_model_config.json", "model_config.json"]:
             try:
                 print(f"   🔍 Trying {config_name} from {finetune_repo}...")
-                config_path = hf_hub_download(
+                config_path = _hf_download_prefer_local(
                     repo_id=finetune_repo,
-                    filename=config_name
+                    filename=config_name,
                 )
                 print(f"   ✅ Config downloaded from HF repo: {config_path}")
                 return config_path
@@ -271,13 +382,22 @@ class ModelManager:
             if config_path is None:
                 # Fallback: use base_repo config
                 print(f"📥 Downloading config from base_repo: {base_repo}")
-                config_path = hf_hub_download(repo_id=base_repo, filename="base_model_config.json")
+                config_path = _hf_download_prefer_local(
+                    repo_id=base_repo,
+                    filename="base_model_config.json",
+                )
 
             print(f"📥 Downloading base_model.ckpt from {base_repo}")
-            base_ckpt_path = hf_hub_download(repo_id=base_repo, filename="base_model.ckpt")
+            base_ckpt_path = _hf_download_prefer_local(
+                repo_id=base_repo,
+                filename="base_model.ckpt",
+            )
 
             print(f"📥 Downloading finetune checkpoint {checkpoint_name} from {repo}")
-            ft_ckpt_path = hf_hub_download(repo_id=repo, filename=checkpoint_name)
+            ft_ckpt_path = _hf_download_prefer_local(
+                repo_id=repo,
+                filename=checkpoint_name,
+            )
 
             # Build model from config
             with open(config_path, "r") as f:
@@ -290,14 +410,33 @@ class ModelManager:
 
             # Load base weights using copy_state_dict (like test script)
             print("🎯 Loading base_model.ckpt using copy_state_dict")
-            base_sd = load_ckpt_state_dict(base_ckpt_path)
+            try:
+                base_sd = load_ckpt_state_dict(base_ckpt_path)
+            except Exception as base_load_error:
+                print(f"⚠️ base checkpoint parse failed, forcing re-download: {base_load_error}")
+                _evict_cached_hf_file(base_ckpt_path)
+                base_ckpt_path = _hf_download_prefer_local(
+                    repo_id=base_repo,
+                    filename="base_model.ckpt",
+                    force_download=True,
+                )
+                base_sd = load_ckpt_state_dict(base_ckpt_path)
             copy_state_dict(model, base_sd)
             print(f"   ✅ Base weights loaded")
 
             # Load finetune checkpoint
             print("🎯 Loading finetune checkpoint...")
-            ckpt = torch.load(ft_ckpt_path, map_location="cpu")
-            state_dict = ckpt.get("state_dict", ckpt)
+            try:
+                state_dict = _load_finetune_state_dict(ft_ckpt_path)
+            except Exception as ft_load_error:
+                print(f"⚠️ finetune checkpoint parse failed, forcing re-download: {ft_load_error}")
+                _evict_cached_hf_file(ft_ckpt_path)
+                ft_ckpt_path = _hf_download_prefer_local(
+                    repo_id=repo,
+                    filename=checkpoint_name,
+                    force_download=True,
+                )
+                state_dict = _load_finetune_state_dict(ft_ckpt_path)
             
             # FIXED: Handle EMA weights (from test script)
             ema_keys = [k for k in state_dict.keys() if k.startswith("diffusion_ema.ema_model.")]

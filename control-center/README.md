@@ -4,7 +4,11 @@ Prototype macOS menu-bar control center for managing local Gary backend services
 
 ## What It Currently Does
 
-- Loads service config from `manifest/services.dev.json`
+- Loads service config by priority:
+  - `GARY_SERVICE_MANIFEST` (if set)
+  - `~/Library/Application Support/GaryLocalhost/manifest/services.json` (or `services.production.json` / `services.dev.json`)
+  - bundled `manifest/services*.json`
+  - local `manifest/services.dev.json`
 - Starts/stops/restarts each backend process
 - Rebuilds each service Python environment from manifest-defined bootstrap config
 - Guides Stable Audio Hugging Face access setup and stores token in macOS Keychain
