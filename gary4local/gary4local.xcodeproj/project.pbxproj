@@ -126,7 +126,9 @@
 			inputPaths = (
 				"$(PROJECT_DIR)/scripts/stage_runtime_resources.sh",
 				"$(PROJECT_DIR)/../audiocraft-mlx",
+				"$(PROJECT_DIR)/../ace-lego",
 				"$(PROJECT_DIR)/../melodyflow",
+				"$(PROJECT_DIR)/../scripts/download_carey_models.sh",
 				"$(PROJECT_DIR)/../stable-audio-tools",
 				"$(PROJECT_DIR)/../control-center/manifest/services.production.json",
 			);

@@ -758,6 +758,22 @@ final class ServiceManager: ObservableObject {
 
     private func makeEnvironment(for service: ResolvedService) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
+        // Prevent Xcode debug/Metal injection settings from leaking into Python backends.
+        // These can trigger Metal validation aborts in Torch MPS paths.
+        let strippedDebugKeys = [
+            "DYLD_INSERT_LIBRARIES",
+            "METAL_DEVICE_WRAPPER_TYPE",
+            "METAL_DEBUG_ERROR_MODE",
+            "__XPC_DYLD_FRAMEWORK_PATH",
+            "__XPC_DYLD_LIBRARY_PATH",
+            "DYLD_FRAMEWORK_PATH",
+            "DYLD_LIBRARY_PATH",
+            "__XCODE_BUILT_PRODUCTS_DIR_PATHS",
+            "SWIFTUI_VIEW_DEBUG"
+        ]
+        for key in strippedDebugKeys {
+            env.removeValue(forKey: key)
+        }
         env["PYTHONUNBUFFERED"] = "1"
         for (key, value) in service.environment {
             env[key] = value

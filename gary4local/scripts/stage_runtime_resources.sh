@@ -37,8 +37,17 @@ echo "[stage-runtime] staging runtime payload into ${RUNTIME_DST}"
 mkdir -p "${RUNTIME_DST}" "${MANIFEST_DST}"
 
 copy_tree "${REPO_ROOT}/audiocraft-mlx" "${RUNTIME_DST}/audiocraft-mlx"
+copy_tree "${REPO_ROOT}/ace-lego" "${RUNTIME_DST}/ace-lego"
 copy_tree "${REPO_ROOT}/melodyflow" "${RUNTIME_DST}/melodyflow"
 copy_tree "${REPO_ROOT}/stable-audio-tools" "${RUNTIME_DST}/stable-audio-tools"
+
+mkdir -p "${RUNTIME_DST}/scripts"
+cp "${REPO_ROOT}/scripts/download_carey_models.sh" "${RUNTIME_DST}/scripts/download_carey_models.sh"
+chmod +x "${RUNTIME_DST}/scripts/download_carey_models.sh"
+
+# Keep app bundle lean; checkpoints will be managed in cache/runtime.
+rm -rf "${RUNTIME_DST}/ace-lego/ACE-Step-1.5/checkpoints" || true
+rm -rf "${RUNTIME_DST}/ace-lego/smoke-tests" || true
 
 cp "${REPO_ROOT}/control-center/manifest/services.production.json" "${MANIFEST_DST}/services.production.json"
 

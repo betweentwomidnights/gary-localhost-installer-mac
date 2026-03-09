@@ -7,6 +7,7 @@
     "RUNTIME_ROOT": "${BUNDLE_RESOURCES}/runtime",
     "HF_HOME": "${APP_SUPPORT_DIR}/cache/huggingface",
     "HUGGINGFACE_HUB_CACHE": "${APP_SUPPORT_DIR}/cache/huggingface/hub",
+    "CAREY_CHECKPOINT_DIR": "${APP_SUPPORT_DIR}/cache/carey/checkpoints",
     "HF_HUB_DISABLE_XET": "1",
     "HF_XET_HIGH_PERFORMANCE": "0",
     "HF_XET_NUM_RANGE_IN_SEGMENT_BASE": "16",
@@ -22,7 +23,8 @@
     "TORCH_HOME": "${APP_SUPPORT_DIR}/cache/torch",
     "XDG_CACHE_HOME": "${APP_SUPPORT_DIR}/cache",
     "TMPDIR": "${APP_SUPPORT_DIR}/tmp",
-    "G4L_HF_SNAPSHOT_MAX_WORKERS": "64"
+    "G4L_HF_SNAPSHOT_MAX_WORKERS": "64",
+    "PYTORCH_ENABLE_MPS_FALLBACK": "1"
   },
   "default_log_directory": "${HOME}/Library/Logs/GaryLocalhost",
   "services": [
@@ -51,6 +53,7 @@
         "G4L_HF_XET_SLOW_SPEED_BPS": "${G4L_HF_XET_SLOW_SPEED_BPS}",
         "G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS": "${G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS}",
         "G4L_HF_SNAPSHOT_MAX_WORKERS": "${G4L_HF_SNAPSHOT_MAX_WORKERS}",
+        "PYTORCH_ENABLE_MPS_FALLBACK": "${PYTORCH_ENABLE_MPS_FALLBACK}",
         "TRANSFORMERS_CACHE": "${TRANSFORMERS_CACHE}",
         "TORCH_HOME": "${TORCH_HOME}",
         "XDG_CACHE_HOME": "${XDG_CACHE_HOME}",
@@ -66,6 +69,71 @@
       "log_file": "audiocraft-mlx.log",
       "health_check": {
         "url": "http://127.0.0.1:8000/health",
+        "expected_status": 200,
+        "interval_seconds": 3,
+        "timeout_seconds": 2
+      },
+      "auto_start": false,
+      "restart_on_crash": true,
+      "graceful_shutdown_seconds": 8
+    },
+    {
+      "id": "carey",
+      "name": "Carey (ACE Lego)",
+      "working_directory": "${RUNTIME_ROOT}/ace-lego/wrapper",
+      "executable": "/bin/bash",
+      "arguments": [
+        "${RUNTIME_ROOT}/ace-lego/wrapper/run_local_carey_stack.sh"
+      ],
+      "environment": {
+        "PYTHONUNBUFFERED": "${PYTHONUNBUFFERED}",
+        "PYTHONDONTWRITEBYTECODE": "${PYTHONDONTWRITEBYTECODE}",
+        "CAREY_PYTHON": "${APP_SUPPORT_DIR}/venvs/carey/bin/python",
+        "CAREY_API_ROOT": "${RUNTIME_ROOT}/ace-lego/ACE-Step-1.5",
+        "CAREY_WRAPPER_ROOT": "${RUNTIME_ROOT}/ace-lego/wrapper",
+        "CAREY_API_HOST": "127.0.0.1",
+        "CAREY_API_PORT": "8006",
+        "ACESTEP_URL": "http://127.0.0.1:8006",
+        "WRAPPER_PORT": "8001",
+        "ACESTEP_BACKEND": "local",
+        "ACESTEP_MANAGE_LIFECYCLE": "true",
+        "ACESTEP_CONFIG_PATH": "acestep-v15-base",
+        "ACESTEP_INIT_LLM": "false",
+        "ACESTEP_ALLOW_MAIN_AUTODOWNLOAD": "false",
+        "ACESTEP_UNLOAD_STRATEGY": "soft",
+        "ACESTEP_API_HOST": "127.0.0.1",
+        "ACESTEP_API_PORT": "8006",
+        "PYTORCH_ENABLE_MPS_FALLBACK": "${PYTORCH_ENABLE_MPS_FALLBACK}",
+        "ACESTEP_CHECKPOINT_DIR": "${CAREY_CHECKPOINT_DIR}",
+        "HF_HOME": "${HF_HOME}",
+        "HUGGINGFACE_HUB_CACHE": "${HUGGINGFACE_HUB_CACHE}",
+        "HF_HUB_DISABLE_XET": "${HF_HUB_DISABLE_XET}",
+        "HF_XET_HIGH_PERFORMANCE": "${HF_XET_HIGH_PERFORMANCE}",
+        "HF_XET_NUM_RANGE_IN_SEGMENT_BASE": "${HF_XET_NUM_RANGE_IN_SEGMENT_BASE}",
+        "G4L_HF_XET_MODE": "${G4L_HF_XET_MODE}",
+        "G4L_HF_XET_PROBE_TIMEOUT_SECONDS": "${G4L_HF_XET_PROBE_TIMEOUT_SECONDS}",
+        "G4L_HF_DOWNLOADER_XET_MODE": "${G4L_HF_DOWNLOADER_XET_MODE}",
+        "G4L_HF_DOWNLOADER_XET_HIGH_PERFORMANCE": "${G4L_HF_DOWNLOADER_XET_HIGH_PERFORMANCE}",
+        "G4L_HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS": "${G4L_HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS}",
+        "G4L_HF_XET_FIRST_BYTE_TIMEOUT_SECONDS": "${G4L_HF_XET_FIRST_BYTE_TIMEOUT_SECONDS}",
+        "G4L_HF_XET_SLOW_SPEED_BPS": "${G4L_HF_XET_SLOW_SPEED_BPS}",
+        "G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS": "${G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS}",
+        "G4L_HF_SNAPSHOT_MAX_WORKERS": "${G4L_HF_SNAPSHOT_MAX_WORKERS}",
+        "TRANSFORMERS_CACHE": "${TRANSFORMERS_CACHE}",
+        "TORCH_HOME": "${TORCH_HOME}",
+        "XDG_CACHE_HOME": "${XDG_CACHE_HOME}",
+        "TMPDIR": "${TMPDIR}"
+      },
+      "bootstrap": {
+        "python_executable": "python3.11",
+        "venv_directory": "${APP_SUPPORT_DIR}/venvs/carey",
+        "requirements_file": "${RUNTIME_ROOT}/ace-lego/ACE-Step-1.5/requirements.txt",
+        "upgrade_build_tools": true,
+        "pip_arguments": []
+      },
+      "log_file": "carey.log",
+      "health_check": {
+        "url": "http://127.0.0.1:8001/health",
         "expected_status": 200,
         "interval_seconds": 3,
         "timeout_seconds": 2

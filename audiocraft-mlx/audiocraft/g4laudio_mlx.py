@@ -1861,6 +1861,7 @@ def _generate_with_prompt(
             progress=False,
             progress_callback=progress_callback,
             return_tokens=False,
+            decode_continuation=False,
         )
         mx.eval(full_audio)
 

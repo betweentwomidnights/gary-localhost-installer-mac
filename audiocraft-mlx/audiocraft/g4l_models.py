@@ -26,9 +26,6 @@ MODEL_CATALOG: dict[str, list[str]] = {
         "thepatch/gary_orchestra_2",
         "thepatch/keygen-gary-v2-small-8",
         "thepatch/keygen-gary-v2-small-12",
-        "thepatch/keygen-gary-small-6",
-        "thepatch/keygen-gary-small-12",
-        "thepatch/keygen-gary-small-20",
     ],
     "medium": [
         "thepatch/bleeps-medium",
@@ -41,13 +38,8 @@ MODEL_CATALOG: dict[str, list[str]] = {
         "thepatch/bleeps-large-10",
         "thepatch/bleeps-large-14",
         "thepatch/bleeps-large-20",
-        "thepatch/keygen-gary-large-6",
-        "thepatch/keygen-gary-large-12",
-        "thepatch/keygen-gary-large-20",
         "thepatch/keygen-gary-v2-large-12",
         "thepatch/keygen-gary-v2-large-16",
-        "thepatch/gary-grunge-large-stereo-v2-4",
-        "thepatch/gary-grunge-large-stereo-12",
     ],
 }
 

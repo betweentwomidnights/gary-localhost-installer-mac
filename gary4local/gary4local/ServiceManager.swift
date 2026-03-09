@@ -63,6 +63,7 @@ final class ServiceManager: ObservableObject {
     private let manifest: ResolvedManifest
     private var stableAudioBackendEngine = "mps"
     private var melodyFlowBackendEngine = "mps"
+    private var careyBackendEngine = "mlx"
     private var processes: [String: Process] = [:]
     private var outputPipes: [String: Pipe] = [:]
     private var logHandles: [String: FileHandle] = [:]
@@ -100,6 +101,18 @@ final class ServiceManager: ObservableObject {
         }
     }
 
+    func setCareyBackendEngine(_ backend: String, restartIfRunning: Bool) {
+        let normalized = Self.normalizeCareyBackendEngine(backend)
+        guard careyBackendEngine != normalized else { return }
+        careyBackendEngine = normalized
+
+        guard restartIfRunning else { return }
+        guard let runtime = services.first(where: { $0.id == "carey" }) else { return }
+        if runtime.processState == .running || runtime.processState == .starting {
+            restart(serviceID: "carey")
+        }
+    }
+
     nonisolated private static func normalizeStableAudioBackendEngine(_ value: String) -> String {
         let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         switch normalized {
@@ -119,6 +132,16 @@ final class ServiceManager: ObservableObject {
             return "mlx_native_mlx_codec"
         default:
             return "mps"
+        }
+    }
+
+    nonisolated private static func normalizeCareyBackendEngine(_ value: String) -> String {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch normalized {
+        case "mps":
+            return "mps"
+        default:
+            return "mlx"
         }
     }
 
@@ -525,6 +548,7 @@ final class ServiceManager: ObservableObject {
             let logHandle = try FileHandle(forWritingTo: logURL)
             defer { try? logHandle.close() }
             logHandle.seekToEndOfFile()
+            let fileManager = FileManager.default
 
             writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild started ----", to: logHandle)
             if forceRecreateVenv {
@@ -537,14 +561,6 @@ final class ServiceManager: ObservableObject {
                 )
             }
 
-            if !FileManager.default.fileExists(atPath: bootstrap.requirementsFile.path) {
-                let message = "requirements file not found: \(bootstrap.requirementsFile.path)"
-                writeLogLine(message, to: logHandle)
-                writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
-                return BootstrapRunResult(success: false, message: message)
-            }
-
-            let fileManager = FileManager.default
             do {
                 try ensureBootstrapDirectories(
                     service: service,
@@ -564,6 +580,30 @@ final class ServiceManager: ObservableObject {
                 currentDirectory: service.workingDirectory,
                 logHandle: logHandle
             )
+            let careyPyprojectFile = service.workingDirectory.appendingPathComponent("pyproject.toml")
+            let careyLockFile = service.workingDirectory.appendingPathComponent("uv.lock")
+            let shouldUseCareyUVSync = service.id == "carey"
+                && uvExecutable != nil
+                && fileManager.fileExists(atPath: careyPyprojectFile.path)
+                && fileManager.fileExists(atPath: careyLockFile.path)
+
+            if service.id == "carey", uvExecutable != nil {
+                if shouldUseCareyUVSync {
+                    writeLogLine("Carey install strategy: uv sync (pyproject.toml + uv.lock).", to: logHandle)
+                } else {
+                    writeLogLine(
+                        "Carey install strategy: requirements fallback (uv sync prerequisites missing).",
+                        to: logHandle
+                    )
+                }
+            }
+
+            if !shouldUseCareyUVSync && !fileManager.fileExists(atPath: bootstrap.requirementsFile.path) {
+                let message = "requirements file not found: \(bootstrap.requirementsFile.path)"
+                writeLogLine(message, to: logHandle)
+                writeLogLine("---- \(timestamp()) [\(service.id)] Environment rebuild failed ----", to: logHandle)
+                return BootstrapRunResult(success: false, message: message)
+            }
 
             var pythonExecutable: URL?
             var pythonResolutionError: Error?
@@ -778,7 +818,36 @@ final class ServiceManager: ObservableObject {
             let installArgs = bootstrap.pipArguments + extraPipArguments
 
             let installStatus: Int32
-            if let uvExecutable {
+            if shouldUseCareyUVSync, let uvExecutable {
+                if !installArgs.isEmpty {
+                    writeLogLine(
+                        "Carey uses uv sync; ignoring pip installer arguments: \(installArgs.joined(separator: " "))",
+                        to: logHandle
+                    )
+                }
+
+                var uvSyncEnvironment = inheritedEnvironment
+                uvSyncEnvironment["VIRTUAL_ENV"] = bootstrap.venvDirectory.path
+                let venvBinPath = bootstrap.venvDirectory.appendingPathComponent("bin").path
+                let existingPath = uvSyncEnvironment["PATH"] ?? ""
+                uvSyncEnvironment["PATH"] = existingPath.isEmpty
+                    ? venvBinPath
+                    : "\(venvBinPath):\(existingPath)"
+
+                installStatus = try runCommand(
+                    executable: uvExecutable,
+                    arguments: [
+                        "sync",
+                        "--frozen",
+                        "--no-dev",
+                        "--active",
+                        "--project", service.workingDirectory.path
+                    ],
+                    currentDirectory: service.workingDirectory,
+                    environment: uvSyncEnvironment,
+                    logHandle: logHandle
+                )
+            } else if let uvExecutable {
                 var uvInstallArguments = ["pip", "install", "--python", venvPython.path]
                 uvInstallArguments.append(
                     contentsOf: normalizeInstallerArgumentsForUV(installArgs, logHandle: logHandle)
@@ -920,7 +989,8 @@ final class ServiceManager: ObservableObject {
             "HUGGINGFACE_HUB_CACHE",
             "TRANSFORMERS_CACHE",
             "TORCH_HOME",
-            "XDG_CACHE_HOME"
+            "XDG_CACHE_HOME",
+            "ACESTEP_CHECKPOINT_DIR"
         ]
 
         for key in pathKeys {
@@ -1262,6 +1332,22 @@ final class ServiceManager: ObservableObject {
 
     private func makeEnvironment(for service: ResolvedService) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
+        // Prevent Xcode debug/Metal injection settings from leaking into Python backends.
+        // These can trigger Metal validation aborts in Torch MPS paths.
+        let strippedDebugKeys = [
+            "DYLD_INSERT_LIBRARIES",
+            "METAL_DEVICE_WRAPPER_TYPE",
+            "METAL_DEBUG_ERROR_MODE",
+            "__XPC_DYLD_FRAMEWORK_PATH",
+            "__XPC_DYLD_LIBRARY_PATH",
+            "DYLD_FRAMEWORK_PATH",
+            "DYLD_LIBRARY_PATH",
+            "__XCODE_BUILT_PRODUCTS_DIR_PATHS",
+            "SWIFTUI_VIEW_DEBUG"
+        ]
+        for key in strippedDebugKeys {
+            env.removeValue(forKey: key)
+        }
         env["PYTHONUNBUFFERED"] = "1"
         for (key, value) in service.environment {
             env[key] = value
@@ -1277,6 +1363,10 @@ final class ServiceManager: ObservableObject {
         } else if service.id == "melodyflow" {
             env["MELODYFLOW_BACKEND_ENGINE"] = melodyFlowBackendEngine
             env["MELODYFLOW_REQUIRE_MPS"] = melodyFlowBackendEngine == "mps" ? "1" : "0"
+        } else if service.id == "carey" {
+            let useMlx = careyBackendEngine == "mlx"
+            env["ACESTEP_USE_MLX_DIT"] = useMlx ? "1" : "0"
+            env["ACESTEP_USE_MLX_VAE"] = useMlx ? "1" : "0"
         }
         return env
     }

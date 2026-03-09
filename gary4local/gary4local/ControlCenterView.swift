@@ -125,7 +125,7 @@ struct ControlCenterView: View {
                     onStop: { manager.stop(serviceID: runtime.id) },
                     onRestart: { manager.restart(serviceID: runtime.id) },
                     onRebuildEnv: { manager.rebuildEnvironment(serviceID: runtime.id) },
-                    onDownloadModels: (runtime.id == "audiocraft_mlx" || runtime.id == "melodyflow" || runtime.id == "stable_audio") ? {
+                    onDownloadModels: (runtime.id == "audiocraft_mlx" || runtime.id == "melodyflow" || runtime.id == "stable_audio" || runtime.id == "carey") ? {
                         viewModel.openModelDownloadSheet(for: runtime.id)
                     } : nil,
                     downloadModelsExtraDisabled: runtime.id == "stable_audio" && !viewModel.stableAudioTokenConfigured
@@ -293,6 +293,9 @@ struct ControlCenterView: View {
                 } else if runtime.id == "melodyflow" {
                     melodyFlowBackendPanel()
                     Divider()
+                } else if runtime.id == "carey" {
+                    careyBackendPanel()
+                    Divider()
                 }
 
                 Text("logs: \(displayName(for: runtime))")
@@ -446,6 +449,47 @@ struct ControlCenterView: View {
 
             if !viewModel.melodyFlowBackendStatus.isEmpty {
                 Text(viewModel.melodyFlowBackendStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.gray.opacity(0.08))
+        )
+    }
+
+    @ViewBuilder
+    private func careyBackendPanel() -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("carey backend")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("generation backend")
+                    .font(.subheadline)
+                Picker("generation backend", selection: Binding(
+                    get: { viewModel.careyBackendEngine },
+                    set: { viewModel.setCareyBackendEngine($0) }
+                )) {
+                    ForEach(CareyBackendEngine.allCases) { backend in
+                        Text(backend.displayName).tag(backend)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text(
+                    "mlx uses native MLX DiT/VAE for faster generation. "
+                    + "mps uses the torch+mps path for compatibility checks. "
+                    + "changing this restarts carey if it's running."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            if !viewModel.careyBackendStatus.isEmpty {
+                Text(viewModel.careyBackendStatus)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -705,6 +749,8 @@ private struct ModelDownloadSheet: View {
 
             if viewModel.modelDownloadServiceID == "stable_audio" {
                 stableAudioPredownloadContent
+            } else if viewModel.modelDownloadServiceID == "carey" {
+                careyPredownloadContent
             } else {
                 standardPredownloadContent
             }
@@ -713,6 +759,7 @@ private struct ModelDownloadSheet: View {
         .frame(minWidth: 760, minHeight: 520)
         .onAppear {
             if viewModel.modelDownloadServiceID != "stable_audio",
+               viewModel.modelDownloadServiceID != "carey",
                viewModel.downloadableModels.isEmpty {
                 viewModel.refreshModelCatalogAndStatuses()
             }
@@ -975,6 +1022,173 @@ private struct ModelDownloadSheet: View {
     }
 
     @ViewBuilder
+    private var careyPredownloadContent: some View {
+        Text("pre-download carey lego dependencies for offline use in gary4juce.")
+            .font(.subheadline)
+        Text("carey uses ace-step lego mode with `acestep_init_llm=false` and needs three component bundles.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        Text("for runtime behavior, start carey once and keep it loaded while generating.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+        if !viewModel.modelDownloadStatusMessage.isEmpty {
+            Text(viewModel.modelDownloadStatusMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        HStack(spacing: 8) {
+            Button("download required files") {
+                viewModel.startCareyFocusedDownload()
+            }
+            .disabled(
+                !viewModel.canRunCareyFocusedDownload
+                || viewModel.isModelDownloadInProgress
+                || viewModel.isCareyLifecycleActionInProgress
+            )
+
+            Button("refresh downloaded") {
+                viewModel.refreshCareyPredownloadInventory()
+            }
+            .disabled(viewModel.isCareyDownloadInProgress)
+
+            Spacer()
+        }
+
+        if !viewModel.canRunCareyFocusedDownload {
+            Text("download script missing. expected `runtime/scripts/download_carey_models.sh` or `scripts/download_carey_models.sh` in dev.")
+                .font(.caption)
+                .foregroundStyle(.red)
+        }
+
+        if viewModel.careyRequiredModels.isEmpty {
+            Text("no carey model inventory found yet.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else {
+            let groupedRows = careyGroupedRequiredModels(from: viewModel.careyRequiredModels)
+            let downloadedFileCount = viewModel.careyRequiredModels.filter(\.downloaded).count
+            let totalFileCount = viewModel.careyRequiredModels.count
+            VStack(alignment: .leading, spacing: 6) {
+                Text("required components (\(downloadedFileCount)/\(totalFileCount) files)")
+                    .font(.caption.weight(.semibold))
+                ForEach(groupedRows) { row in
+                    HStack(spacing: 8) {
+                        let indicatorColor: Color = row.isComplete
+                            ? .green
+                            : (row.downloadedFileCount > 0 ? .orange : Color.gray.opacity(0.5))
+                        Circle()
+                            .fill(indicatorColor)
+                            .frame(width: 8, height: 8)
+                        Text(row.label)
+                            .font(.caption.monospaced())
+                        Spacer()
+                        Text(
+                            row.isComplete
+                            ? formatByteCount(row.downloadedBytes)
+                            : "\(row.downloadedFileCount)/\(row.totalFileCount) files"
+                        )
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(row.relativePrefix)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+
+        Divider()
+
+        VStack(alignment: .leading, spacing: 8) {
+            Text("model lifecycle")
+                .font(.caption.weight(.semibold))
+            Text("start carey first. use these controls only when you want to manually load/unload the model.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("stop the service for a full memory release.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                Button("load model") {
+                    viewModel.loadCareyModel()
+                }
+                .disabled(
+                    !viewModel.canManageModelDownloads
+                    || viewModel.isCareyLifecycleActionInProgress
+                    || viewModel.isModelDownloadInProgress
+                )
+
+                Button("unload model") {
+                    viewModel.unloadCareyModel()
+                }
+                .disabled(
+                    !viewModel.canManageModelDownloads
+                    || viewModel.isCareyLifecycleActionInProgress
+                    || viewModel.isModelDownloadInProgress
+                )
+                Spacer()
+            }
+        }
+
+        if viewModel.isCareyDownloadInProgress {
+            ProgressView(value: viewModel.careyPredownloadProgress)
+                .controlSize(.small)
+            if !viewModel.careyPredownloadActiveLabel.isEmpty {
+                Text("active: \(viewModel.careyPredownloadActiveLabel)")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        if viewModel.isCareyLifecycleActionInProgress {
+            ProgressView()
+                .controlSize(.small)
+        }
+
+        Spacer()
+    }
+
+    private func formatByteCount(_ bytes: Int64) -> String {
+        guard bytes > 0 else { return "missing" }
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private func careyGroupedRequiredModels(
+        from rows: [CareyRequiredModelStatus]
+    ) -> [CareyRequiredGroupStatus] {
+        let groups: [(id: String, label: String, prefix: String)] = [
+            ("dit_base", "DiT Base", "checkpoints/acestep-v15-base/"),
+            ("qwen_encoder", "Qwen Text Encoder", "checkpoints/Qwen3-Embedding-0.6B/"),
+            ("vae", "VAE", "checkpoints/vae/"),
+        ]
+
+        return groups.compactMap { group in
+            let matched = rows.filter { $0.relativePath.hasPrefix(group.prefix) }
+            guard !matched.isEmpty else { return nil }
+
+            let downloadedFileCount = matched.filter(\.downloaded).count
+            let downloadedBytes = matched.reduce(into: Int64(0)) { partial, row in
+                if row.downloaded {
+                    partial += row.sizeBytes
+                }
+            }
+
+            return CareyRequiredGroupStatus(
+                id: group.id,
+                label: group.label,
+                relativePrefix: group.prefix,
+                downloadedFileCount: downloadedFileCount,
+                totalFileCount: matched.count,
+                downloadedBytes: downloadedBytes
+            )
+        }
+    }
+
+    @ViewBuilder
     private func statusPill(for model: DownloadableModel) -> some View {
         if model.downloaded {
             Text("downloaded")
@@ -998,6 +1212,19 @@ private struct ModelDownloadSheet: View {
                 .background(Color.gray.opacity(0.16))
                 .clipShape(Capsule())
         }
+    }
+}
+
+private struct CareyRequiredGroupStatus: Identifiable {
+    let id: String
+    let label: String
+    let relativePrefix: String
+    let downloadedFileCount: Int
+    let totalFileCount: Int
+    let downloadedBytes: Int64
+
+    var isComplete: Bool {
+        totalFileCount > 0 && downloadedFileCount == totalFileCount
     }
 }
 
@@ -1476,7 +1703,8 @@ private struct ServiceRow: View {
 
     private var downloadModelsDisabled: Bool {
         guard onDownloadModels != nil else { return true }
-        return !runtime.isRunning || runtime.isBootstrapping || downloadModelsExtraDisabled
+        let requiresRunning = runtime.id != "carey"
+        return (requiresRunning && !runtime.isRunning) || runtime.isBootstrapping || downloadModelsExtraDisabled
     }
 
     var body: some View {
@@ -1555,6 +1783,8 @@ private func displayName(for runtime: ServiceRuntime) -> String {
         return "terry (melodyflow)"
     case "stable_audio":
         return "jerry (stable audio)"
+    case "carey":
+        return "carey (ace lego)"
     default:
         return runtime.service.name
     }
@@ -1568,6 +1798,8 @@ private func displayName(forServiceID serviceID: String, fallback: String) -> St
         return "terry (melodyflow)"
     case "stable_audio":
         return "jerry (stable audio)"
+    case "carey":
+        return "carey (ace lego)"
     default:
         return fallback
     }

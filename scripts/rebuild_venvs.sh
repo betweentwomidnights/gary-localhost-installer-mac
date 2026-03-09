@@ -14,6 +14,7 @@ Usage: scripts/rebuild_venvs.sh [options]
 
 Rebuilds local Python virtualenvs for:
   - audiocraft-mlx
+  - carey (ace-lego/ACE-Step-1.5)
   - melodyflow
   - stable-audio-tools
 
@@ -63,6 +64,7 @@ fi
 
 SERVICES=(
   "audiocraft-mlx|audiocraft/requirements.txt"
+  "ace-lego/ACE-Step-1.5|requirements.txt"
   "melodyflow|requirements.txt"
   "stable-audio-tools|requirements.txt"
 )

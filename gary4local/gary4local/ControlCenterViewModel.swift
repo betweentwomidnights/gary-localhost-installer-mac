@@ -57,6 +57,26 @@ enum MelodyFlowBackendEngine: String, CaseIterable, Identifiable {
     }
 }
 
+enum CareyBackendEngine: String, CaseIterable, Identifiable {
+    case mps
+    case mlx
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .mps:
+            return "mps"
+        case .mlx:
+            return "mlx"
+        }
+    }
+
+    static func from(rawValue: String) -> CareyBackendEngine {
+        CareyBackendEngine(rawValue: rawValue.lowercased()) ?? .mlx
+    }
+}
+
 struct DownloadableModel: Identifiable {
     let id: String
     let size: String
@@ -81,10 +101,19 @@ struct StableAudioInventoryModelStatus: Identifiable {
     let missing: [String]
 }
 
+struct CareyRequiredModelStatus: Identifiable {
+    let id: String
+    let label: String
+    let relativePath: String
+    let downloaded: Bool
+    let sizeBytes: Int64
+}
+
 @MainActor
 final class ControlCenterViewModel: ObservableObject {
     private static let stableAudioBackendDefaultsKey = "stableAudioBackendEngine"
     private static let melodyFlowBackendDefaultsKey = "melodyFlowBackendEngine"
+    private static let careyBackendDefaultsKey = "careyBackendEngine"
 
     @Published var manager: ServiceManager?
     @Published var startupError: String?
@@ -111,9 +140,16 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var isStableAudioModelSwitchInProgress: Bool = false
     @Published var stableAudioPredownloadProgress: Double = 0
     @Published var stableAudioPredownloadTargetLabel: String = ""
+    @Published var careyRequiredModels: [CareyRequiredModelStatus] = []
+    @Published var isCareyDownloadInProgress: Bool = false
+    @Published var isCareyLifecycleActionInProgress: Bool = false
+    @Published var careyPredownloadProgress: Double = 0
+    @Published var careyPredownloadActiveLabel: String = ""
     @Published var stableAudioBackendEngine: StableAudioBackendEngine = .mps
     @Published var melodyFlowBackendEngine: MelodyFlowBackendEngine = .mps
+    @Published var careyBackendEngine: CareyBackendEngine = .mlx
     @Published var melodyFlowBackendStatus: String = ""
+    @Published var careyBackendStatus: String = ""
     @Published var rebuildFailureReport: RebuildFailureReport?
     @Published var rebuildDiagnosticsStatusMessage: String = ""
     @Published var isRequirementsEditorPresented: Bool = false
@@ -133,6 +169,29 @@ final class ControlCenterViewModel: ObservableObject {
     private let modelDownloadPollIntervalNanoseconds: UInt64 = 1_250_000_000
     private var activeModelDownloadPath: String?
     private var activeModelDownloadSessionID: String?
+    private var careyDownloadTask: Task<Void, Never>?
+    private var careyProgressByLabel: [String: Int] = [:]
+
+    private static let careyProgressPercentRegex = try! NSRegularExpression(
+        pattern: #"^[A-Za-z_]+:\s+([0-9]{1,3})%"#
+    )
+
+    private static let careyRequiredModelFiles: [(label: String, relativePath: String)] = [
+        ("DiT Base Weights", "checkpoints/acestep-v15-base/model.safetensors"),
+        ("DiT Base Config", "checkpoints/acestep-v15-base/config.json"),
+        ("DiT Silence Latent", "checkpoints/acestep-v15-base/silence_latent.pt"),
+        ("Qwen Weights", "checkpoints/Qwen3-Embedding-0.6B/model.safetensors"),
+        ("Qwen Config", "checkpoints/Qwen3-Embedding-0.6B/config.json"),
+        ("Qwen Tokenizer", "checkpoints/Qwen3-Embedding-0.6B/tokenizer.json"),
+        ("Qwen Tokenizer Config", "checkpoints/Qwen3-Embedding-0.6B/tokenizer_config.json"),
+        ("Qwen Merges", "checkpoints/Qwen3-Embedding-0.6B/merges.txt"),
+        ("Qwen Vocab", "checkpoints/Qwen3-Embedding-0.6B/vocab.json"),
+        ("Qwen Special Tokens", "checkpoints/Qwen3-Embedding-0.6B/special_tokens_map.json"),
+        ("Qwen Added Tokens", "checkpoints/Qwen3-Embedding-0.6B/added_tokens.json"),
+        ("Qwen Chat Template", "checkpoints/Qwen3-Embedding-0.6B/chat_template.jinja"),
+        ("VAE Weights", "checkpoints/vae/diffusion_pytorch_model.safetensors"),
+        ("VAE Config", "checkpoints/vae/config.json"),
+    ]
 
     private struct LogMetadata: Equatable {
         let fileSize: UInt64
@@ -277,6 +336,10 @@ final class ControlCenterViewModel: ObservableObject {
             forKey: Self.melodyFlowBackendDefaultsKey
         ) ?? MelodyFlowBackendEngine.mps.rawValue
         melodyFlowBackendEngine = MelodyFlowBackendEngine.from(rawValue: savedMelodyFlowBackend)
+        let savedCareyBackend = UserDefaults.standard.string(
+            forKey: Self.careyBackendDefaultsKey
+        ) ?? CareyBackendEngine.mlx.rawValue
+        careyBackendEngine = CareyBackendEngine.from(rawValue: savedCareyBackend)
         observeApplicationTermination()
         refreshStableAudioTokenState()
         loadManifest()
@@ -285,6 +348,7 @@ final class ControlCenterViewModel: ObservableObject {
     deinit {
         logRefreshTask?.cancel()
         modelDownloadPollTask?.cancel()
+        careyDownloadTask?.cancel()
     }
 
     var modelDownloadSections: [DownloadModelSection] {
@@ -318,12 +382,24 @@ final class ControlCenterViewModel: ObservableObject {
         return canManageModelDownloads && stableAudioTokenConfigured
     }
 
+    var canRunCareyFocusedDownload: Bool {
+        guard let runtime = manager?.services.first(where: { $0.id == "carey" }) else {
+            return false
+        }
+        return resolveCareyDownloadScriptURL(for: runtime) != nil
+    }
+
     func loadManifest() {
         modelDownloadPollTask?.cancel()
         modelDownloadPollTask = nil
+        careyDownloadTask?.cancel()
+        careyDownloadTask = nil
         isModelDownloadInProgress = false
+        isCareyDownloadInProgress = false
+        isCareyLifecycleActionInProgress = false
         activeModelDownloadPath = nil
         activeModelDownloadSessionID = nil
+        careyRequiredModels = []
         rebuildFailureReport = nil
         rebuildDiagnosticsStatusMessage = ""
         managerCancellables.removeAll()
@@ -338,6 +414,7 @@ final class ControlCenterViewModel: ObservableObject {
             let manager = ServiceManager(manifest: manifest)
             manager.setStableAudioBackendEngine(stableAudioBackendEngine.rawValue, restartIfRunning: false)
             manager.setMelodyFlowBackendEngine(melodyFlowBackendEngine.rawValue, restartIfRunning: false)
+            manager.setCareyBackendEngine(careyBackendEngine.rawValue, restartIfRunning: false)
             self.manager = manager
             bindManager(manager)
             startupError = nil
@@ -357,6 +434,7 @@ final class ControlCenterViewModel: ObservableObject {
             logRefreshTask?.cancel()
             logRefreshTask = nil
             downloadableModels = []
+            careyRequiredModels = []
             modelDownloadStatusMessage = ""
             isModelCatalogLoading = false
         }
@@ -529,6 +607,18 @@ final class ControlCenterViewModel: ObservableObject {
         }
     }
 
+    func setCareyBackendEngine(_ backend: CareyBackendEngine) {
+        guard careyBackendEngine != backend else { return }
+        careyBackendEngine = backend
+        UserDefaults.standard.set(backend.rawValue, forKey: Self.careyBackendDefaultsKey)
+        manager?.setCareyBackendEngine(backend.rawValue, restartIfRunning: true)
+        if manager?.services.first(where: { $0.id == "carey" })?.isRunning == true {
+            careyBackendStatus = "carey backend set to \(backend.displayName). service restarting..."
+        } else {
+            careyBackendStatus = "carey backend set to \(backend.displayName)."
+        }
+    }
+
     func updateLogViewerPinnedToBottom(_ pinnedToBottom: Bool) {
         guard isLogViewerPinnedToBottom != pinnedToBottom else { return }
         isLogViewerPinnedToBottom = pinnedToBottom
@@ -547,6 +637,8 @@ final class ControlCenterViewModel: ObservableObject {
         isModelDownloadSheetPresented = true
         if serviceID == "stable_audio" {
             prepareStableAudioPredownloadState()
+        } else if serviceID == "carey" {
+            prepareCareyPredownloadState()
         } else {
             refreshModelCatalogAndStatuses()
         }
@@ -557,6 +649,11 @@ final class ControlCenterViewModel: ObservableObject {
             modelDownloadStatusMessage = "stable audio uses repo/checkpoint pre-download controls below."
             isModelCatalogLoading = false
             downloadableModels = []
+            return
+        }
+
+        if modelDownloadServiceID == "carey" {
+            prepareCareyPredownloadState()
             return
         }
 
@@ -934,6 +1031,292 @@ final class ControlCenterViewModel: ObservableObject {
                 if self.stableAudioInventoryModels.isEmpty {
                     self.modelDownloadStatusMessage = error.localizedDescription
                 }
+            }
+        }
+    }
+
+    private func prepareCareyPredownloadState() {
+        downloadableModels = []
+        isModelCatalogLoading = false
+        if !isCareyDownloadInProgress {
+            careyPredownloadProgress = 0
+            careyPredownloadActiveLabel = ""
+            careyProgressByLabel = [:]
+        }
+        refreshCareyPredownloadInventory()
+        if isCareyDownloadInProgress {
+            modelDownloadStatusMessage = "downloading required carey files..."
+        } else if canRunCareyFocusedDownload {
+            modelDownloadStatusMessage = "download required lego files, then start carey to initialize models."
+        } else {
+            modelDownloadStatusMessage = "focused download script not found (expected in runtime/scripts or workspace/scripts)."
+        }
+    }
+
+    func refreshCareyPredownloadInventory() {
+        guard modelDownloadServiceID == "carey" else { return }
+        guard let runtime = manager?.services.first(where: { $0.id == "carey" }) else {
+            careyRequiredModels = []
+            return
+        }
+
+        let fileManager = FileManager.default
+        let checkpointDirectory = resolveCareyCheckpointDirectory(for: runtime)
+        let rows = Self.careyRequiredModelFiles.map { row in
+            let fileURL = Self.resolveCareyModelFileURL(
+                baseCheckpointDirectory: checkpointDirectory,
+                relativePath: row.relativePath
+            )
+            var isDirectory: ObjCBool = false
+            let exists = fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory) && !isDirectory.boolValue
+            let bytes: Int64
+            if exists,
+               let attrs = try? fileManager.attributesOfItem(atPath: fileURL.path),
+               let size = attrs[.size] as? NSNumber {
+                bytes = size.int64Value
+            } else {
+                bytes = 0
+            }
+            return CareyRequiredModelStatus(
+                id: row.relativePath,
+                label: row.label,
+                relativePath: row.relativePath,
+                downloaded: exists && bytes > 0,
+                sizeBytes: bytes
+            )
+        }
+
+        careyRequiredModels = rows
+        if !isCareyDownloadInProgress {
+            let downloadedCount = rows.filter(\.downloaded).count
+            if downloadedCount == rows.count {
+                modelDownloadStatusMessage = "all required carey files are downloaded."
+            } else {
+                modelDownloadStatusMessage = "\(downloadedCount)/\(rows.count) required carey files are downloaded."
+            }
+        }
+    }
+
+    func startCareyFocusedDownload() {
+        guard modelDownloadServiceID == "carey" else { return }
+        guard !isModelDownloadInProgress else {
+            modelDownloadStatusMessage = "a model download is already running."
+            return
+        }
+        guard let runtime = manager?.services.first(where: { $0.id == "carey" }) else {
+            modelDownloadStatusMessage = "carey service is not available in the loaded manifest."
+            return
+        }
+        guard let scriptURL = resolveCareyDownloadScriptURL(for: runtime) else {
+            modelDownloadStatusMessage = "focused download script not found."
+            return
+        }
+
+        modelDownloadPollTask?.cancel()
+        modelDownloadPollTask = nil
+        activeModelDownloadSessionID = nil
+        activeModelDownloadPath = "carey required files"
+        isModelDownloadInProgress = true
+        isCareyDownloadInProgress = true
+        careyPredownloadProgress = 0
+        careyPredownloadActiveLabel = ""
+        careyProgressByLabel = Dictionary(uniqueKeysWithValues: Self.careyRequiredModelFiles.map { ($0.label, 0) })
+        modelDownloadStatusMessage = "starting focused carey download..."
+
+        careyDownloadTask?.cancel()
+        careyDownloadTask = Task { [weak self] in
+            guard let self else { return }
+            let checkpointDirectory = self.resolveCareyCheckpointDirectory(for: runtime)
+            var scriptEnvironment = runtime.service.environment
+            scriptEnvironment["ACESTEP_CHECKPOINT_DIR"] = checkpointDirectory.path
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.runCareyDownloadScript(
+                    scriptURL: scriptURL,
+                    currentDirectory: runtime.service.workingDirectory,
+                    extraEnvironment: scriptEnvironment,
+                    onOutputLine: { line in
+                        Task { @MainActor [weak self] in
+                            self?.handleCareyDownloadOutputLine(line)
+                        }
+                    }
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+            self.isModelDownloadInProgress = false
+            self.isCareyDownloadInProgress = false
+            if result.exitCode == 0 {
+                self.careyPredownloadProgress = 1
+                self.careyProgressByLabel = Dictionary(
+                    uniqueKeysWithValues: Self.careyRequiredModelFiles.map { ($0.label, 100) }
+                )
+            }
+            self.activeModelDownloadPath = nil
+            self.activeModelDownloadSessionID = nil
+            self.careyDownloadTask = nil
+            self.refreshCareyPredownloadInventory()
+            self.modelDownloadStatusMessage = result.message
+        }
+    }
+
+    private func handleCareyDownloadOutputLine(_ line: String) {
+        guard isCareyDownloadInProgress else { return }
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        guard let (label, remainder) = Self.parseCareyProgressLabelAndRemainder(from: trimmed) else {
+            if trimmed.hasPrefix("All required") {
+                modelDownloadStatusMessage = trimmed
+            }
+            return
+        }
+
+        let normalizedRemainder = remainder.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowerRemainder = normalizedRemainder.lowercased()
+        careyPredownloadActiveLabel = label
+
+        if lowerRemainder.hasPrefix("ensuring ") {
+            modelDownloadStatusMessage = Self.careyProgressMessage(
+                label: label,
+                detail: "starting...",
+                totalCount: Self.careyRequiredModelFiles.count
+            )
+            return
+        }
+
+        if let percent = Self.parseCareyProgressPercent(from: normalizedRemainder) {
+            updateCareyProgress(label: label, percent: percent)
+            return
+        }
+
+        if lowerRemainder.hasPrefix("complete:")
+            || lowerRemainder.hasPrefix("refreshed:")
+            || lowerRemainder.hasPrefix("already complete:")
+        {
+            updateCareyProgress(label: label, percent: 100)
+            return
+        }
+    }
+
+    private func updateCareyProgress(label: String, percent: Int) {
+        let clampedPercent = max(0, min(100, percent))
+        let previous = careyProgressByLabel[label] ?? 0
+        careyProgressByLabel[label] = max(previous, clampedPercent)
+
+        let totalCount = Self.careyRequiredModelFiles.count
+        let totalPercent = Self.careyRequiredModelFiles.reduce(0) { partial, item in
+            partial + (careyProgressByLabel[item.label] ?? 0)
+        }
+        careyPredownloadProgress = Double(totalPercent) / Double(totalCount * 100)
+
+        modelDownloadStatusMessage = Self.careyProgressMessage(
+            label: label,
+            detail: "\(clampedPercent)%",
+            totalCount: totalCount
+        )
+    }
+
+    private static func parseCareyProgressLabelAndRemainder(from line: String) -> (label: String, remainder: String)? {
+        guard line.hasPrefix("["),
+              let closingBracket = line.firstIndex(of: "]")
+        else {
+            return nil
+        }
+
+        let labelStart = line.index(after: line.startIndex)
+        let label = line[labelStart..<closingBracket]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !label.isEmpty else { return nil }
+
+        let remainderStart = line.index(after: closingBracket)
+        let remainder = line[remainderStart...]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (label: String(label), remainder: String(remainder))
+    }
+
+    private static func parseCareyProgressPercent(from remainder: String) -> Int? {
+        let range = NSRange(remainder.startIndex..<remainder.endIndex, in: remainder)
+        guard let match = careyProgressPercentRegex.firstMatch(in: remainder, options: [], range: range),
+              match.numberOfRanges > 1,
+              let percentRange = Range(match.range(at: 1), in: remainder),
+              let percent = Int(remainder[percentRange])
+        else {
+            return nil
+        }
+        return percent
+    }
+
+    private static func careyProgressMessage(label: String, detail: String, totalCount: Int) -> String {
+        let index = careyRequiredModelFiles.firstIndex(where: {
+            $0.label.caseInsensitiveCompare(label) == .orderedSame
+        }).map { $0 + 1 } ?? 0
+        if index > 0 {
+            return "downloading \(label) (\(index)/\(totalCount)): \(detail)"
+        }
+        return "downloading \(label): \(detail)"
+    }
+
+    func loadCareyModel() {
+        runCareyLifecycleAction(
+            endpoint: "v1/load",
+            successFallbackMessage: "carey model loaded."
+        )
+    }
+
+    func unloadCareyModel() {
+        runCareyLifecycleAction(
+            endpoint: "v1/unload",
+            successFallbackMessage: "carey model unloaded."
+        )
+    }
+
+    private func runCareyLifecycleAction(endpoint: String, successFallbackMessage: String) {
+        guard modelDownloadServiceID == "carey" else { return }
+        guard !isCareyLifecycleActionInProgress else {
+            modelDownloadStatusMessage = "carey lifecycle action already in progress."
+            return
+        }
+        guard let baseURL = modelDownloadAPIBaseURL(for: "carey") else {
+            modelDownloadStatusMessage = "start carey to run model lifecycle actions."
+            return
+        }
+
+        isCareyLifecycleActionInProgress = true
+        modelDownloadStatusMessage = "sending /\(endpoint)..."
+
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.isCareyLifecycleActionInProgress = false }
+            do {
+                var request = URLRequest(url: baseURL.appendingPathComponent(endpoint))
+                request.httpMethod = "POST"
+                let (data, response) = try await URLSession.shared.data(for: request)
+                try self.ensureHTTP200(response: response, body: data)
+
+                if
+                    let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    let responseError = payload["error"] as? String,
+                    !responseError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                {
+                    throw NSError(
+                        domain: "ControlCenterViewModel",
+                        code: 10,
+                        userInfo: [NSLocalizedDescriptionKey: responseError]
+                    )
+                }
+
+                if
+                    let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    let responseData = payload["data"] as? [String: Any],
+                    let status = responseData["status"] as? String,
+                    !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                {
+                    self.modelDownloadStatusMessage = "carey model status: \(status)."
+                } else {
+                    self.modelDownloadStatusMessage = successFallbackMessage
+                }
+            } catch {
+                self.modelDownloadStatusMessage = error.localizedDescription
             }
         }
     }
@@ -1560,6 +1943,124 @@ final class ControlCenterViewModel: ObservableObject {
         downloadableModels[index].statusMessage = statusMessage
     }
 
+    private func resolveCareyDownloadScriptURL(for runtime: ServiceRuntime) -> URL? {
+        let runtimeRoot = runtime.service.workingDirectory
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .standardizedFileURL
+        let candidates = [
+            runtimeRoot.appendingPathComponent("scripts/download_carey_models.sh"),
+            runtimeRoot.appendingPathComponent("download_carey_models.sh"),
+        ]
+        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    private func resolveCareyCheckpointDirectory(for runtime: ServiceRuntime) -> URL {
+        let configured = runtime.service.environment["ACESTEP_CHECKPOINT_DIR"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !configured.isEmpty {
+            let expanded = NSString(string: configured).expandingTildeInPath
+            if expanded.hasPrefix("/") {
+                return URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL
+            }
+            return runtime.service.workingDirectory
+                .appendingPathComponent(expanded, isDirectory: true)
+                .standardizedFileURL
+        }
+        return runtime.service.workingDirectory
+            .appendingPathComponent("checkpoints", isDirectory: true)
+            .standardizedFileURL
+    }
+
+    private static func resolveCareyModelFileURL(
+        baseCheckpointDirectory: URL,
+        relativePath: String
+    ) -> URL {
+        let prefix = "checkpoints/"
+        let normalizedRelativePath: String
+        if relativePath.hasPrefix(prefix) {
+            normalizedRelativePath = String(relativePath.dropFirst(prefix.count))
+        } else {
+            normalizedRelativePath = relativePath
+        }
+        return baseCheckpointDirectory
+            .appendingPathComponent(normalizedRelativePath)
+            .standardizedFileURL
+    }
+
+    nonisolated private static func runCareyDownloadScript(
+        scriptURL: URL,
+        currentDirectory: URL,
+        extraEnvironment: [String: String] = [:],
+        onOutputLine: (@Sendable (String) -> Void)? = nil
+    ) -> (exitCode: Int32, message: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [scriptURL.path]
+        process.currentDirectoryURL = currentDirectory
+        var environment = ProcessInfo.processInfo.environment
+        for (key, value) in extraEnvironment {
+            environment[key] = value
+        }
+        process.environment = environment
+
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+
+        do {
+            try process.run()
+            let outputReader = outputPipe.fileHandleForReading
+            var lineBuffer = Data()
+            var outputLines: [String] = []
+
+            func emitLine(_ rawLine: String) {
+                let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !line.isEmpty else { return }
+                outputLines.append(line)
+                if outputLines.count > 200 {
+                    outputLines.removeFirst(outputLines.count - 200)
+                }
+                onOutputLine?(line)
+            }
+
+            while true {
+                let chunk = outputReader.availableData
+                if chunk.isEmpty {
+                    break
+                }
+                lineBuffer.append(chunk)
+
+                while let newlineIndex = lineBuffer.firstIndex(of: 0x0A) {
+                    let lineData = lineBuffer.subdata(in: lineBuffer.startIndex..<newlineIndex)
+                    lineBuffer.removeSubrange(lineBuffer.startIndex...newlineIndex)
+                    emitLine(String(decoding: lineData, as: UTF8.self))
+                }
+            }
+
+            if !lineBuffer.isEmpty {
+                emitLine(String(decoding: lineBuffer, as: UTF8.self))
+            }
+            process.waitUntilExit()
+
+            let tailLines = outputLines.suffix(4).joined(separator: " | ")
+
+            if process.terminationStatus == 0 {
+                let message = tailLines.isEmpty
+                    ? "carey focused download completed."
+                    : "carey focused download completed. \(tailLines)"
+                return (0, message)
+            }
+
+            let message = tailLines.isEmpty
+                ? "carey focused download failed (exit \(process.terminationStatus))."
+                : "carey focused download failed (exit \(process.terminationStatus)): \(tailLines)"
+            return (process.terminationStatus, message)
+        } catch {
+            return (1, "failed to launch carey focused download: \(error.localizedDescription)")
+        }
+    }
+
     private func modelDownloadAPIBaseURL(for serviceID: String) -> URL? {
         guard let runtime = manager?.services.first(where: { $0.id == serviceID }) else {
             return nil
@@ -1587,6 +2088,8 @@ final class ControlCenterViewModel: ObservableObject {
             return "terry (melodyflow)"
         case "stable_audio":
             return "jerry (stable audio)"
+        case "carey":
+            return "carey (ace lego)"
         default:
             if let runtime = manager?.services.first(where: { $0.id == serviceID }) {
                 return runtime.service.name
@@ -1633,6 +2136,7 @@ final class ControlCenterViewModel: ObservableObject {
             .sink { [weak self] _ in
                 self?.logRefreshTask?.cancel()
                 self?.modelDownloadPollTask?.cancel()
+                self?.careyDownloadTask?.cancel()
                 self?.manager?.shutdownForApplicationTermination()
             }
             .store(in: &cancellables)

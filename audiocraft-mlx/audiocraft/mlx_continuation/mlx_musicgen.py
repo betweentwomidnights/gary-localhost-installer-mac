@@ -68,7 +68,7 @@ class TextConditioner(nn.Module):
 
 
 class KVCache:
-    def __init__(self, head_dim, n_kv_heads):
+    def __init__(self, head_dim, n_kv_heads, max_len: Optional[int] = None):
         self.n_kv_heads = n_kv_heads
         if isinstance(head_dim, int):
             self.k_head_dim = self.v_head_dim = head_dim
@@ -76,6 +76,7 @@ class KVCache:
             self.k_head_dim, self.v_head_dim = head_dim
         else:
             raise ValueError("head_dim must be an int or a tuple of two ints")
+        self.max_len = int(max_len) if (max_len is not None and int(max_len) > 0) else None
         self.keys = None
         self.values = None
         self.offset = 0
@@ -83,21 +84,34 @@ class KVCache:
 
     def update_and_fetch(self, keys, values):
         prev = self.offset
-        if self.keys is None or (prev + keys.shape[2]) > self.keys.shape[2]:
+        required = prev + keys.shape[2]
+
+        if self.keys is None:
             B = keys.shape[0]
-            n_steps = (self.step + keys.shape[2] - 1) // self.step
-            k_shape = (B, self.n_kv_heads, n_steps * self.step, self.k_head_dim)
-            v_shape = (B, self.n_kv_heads, n_steps * self.step, self.v_head_dim)
+            alloc_len = self.max_len
+            if alloc_len is None:
+                n_steps = (self.step + keys.shape[2] - 1) // self.step
+                alloc_len = n_steps * self.step
+            alloc_len = max(int(alloc_len), int(required))
+            k_shape = (B, self.n_kv_heads, alloc_len, self.k_head_dim)
+            v_shape = (B, self.n_kv_heads, alloc_len, self.v_head_dim)
             new_k = mx.zeros(k_shape, keys.dtype)
             new_v = mx.zeros(v_shape, values.dtype)
-            if self.keys is not None:
-                if prev % self.step != 0:
-                    self.keys = self.keys[..., :prev, :]
-                    self.values = self.values[..., :prev, :]
-                self.keys = mx.concatenate([self.keys, new_k], axis=2)
-                self.values = mx.concatenate([self.values, new_v], axis=2)
+            self.keys, self.values = new_k, new_v
+        elif required > self.keys.shape[2]:
+            B = keys.shape[0]
+            if self.max_len is not None:
+                alloc_len = max(int(self.max_len), int(required))
             else:
-                self.keys, self.values = new_k, new_v
+                n_steps = (self.step + required - 1) // self.step
+                alloc_len = n_steps * self.step
+            k_shape = (B, self.n_kv_heads, alloc_len, self.k_head_dim)
+            v_shape = (B, self.n_kv_heads, alloc_len, self.v_head_dim)
+            new_k = mx.zeros(k_shape, keys.dtype)
+            new_v = mx.zeros(v_shape, values.dtype)
+            new_k[..., :prev, :] = self.keys[..., :prev, :]
+            new_v[..., :prev, :] = self.values[..., :prev, :]
+            self.keys, self.values = new_k, new_v
 
         self.offset += keys.shape[2]
         self.keys[..., prev : self.offset, :] = keys
@@ -325,7 +339,8 @@ class MusicGen(nn.Module):
 
         head_dim = self.hidden_size // self.num_attention_heads
         cache = [
-            KVCache(head_dim, self.num_attention_heads) for _ in range(len(self.layers))
+            KVCache(head_dim, self.num_attention_heads, max_len=max_steps + 1)
+            for _ in range(len(self.layers))
         ]
         for offset in tqdm(range(max_steps)):
             audio_input = mx.tile(audio_seq[:, offset : offset + 1], [2, 1, 1])
@@ -579,7 +594,8 @@ class MusicGenContinuation(MusicGen):
 
         head_dim = self.hidden_size // self.num_attention_heads
         cache = [
-            KVCache(head_dim, self.num_attention_heads) for _ in range(len(self.layers))
+            KVCache(head_dim, self.num_attention_heads, max_len=max_steps + 1)
+            for _ in range(len(self.layers))
         ]
 
         total_iters = range(max_steps)
@@ -673,7 +689,8 @@ class MusicGenContinuation(MusicGen):
 
         head_dim = self.hidden_size // self.num_attention_heads
         cache = [
-            KVCache(head_dim, self.num_attention_heads) for _ in range(len(self.layers))
+            KVCache(head_dim, self.num_attention_heads, max_len=max_steps + 1)
+            for _ in range(len(self.layers))
         ]
 
         total_iters = range(max_steps)
@@ -729,6 +746,7 @@ class MusicGenContinuation(MusicGen):
         progress_callback: Optional[Callable[[int, int], None]] = None,
         return_tokens: bool = False,
         prepend_bos: bool = False,
+        decode_continuation: bool = True,
     ):
         tokens = self._generate_tokens_with_prompt(
             text=text,
@@ -745,14 +763,14 @@ class MusicGenContinuation(MusicGen):
         prompt_frames = prompt_tokens.shape[-1]
         cont_tokens = tokens[:, prompt_frames:]
         full_audio = self.decode_tokens(tokens)
-        cont_audio = (
-            self.decode_tokens(cont_tokens)
-            if int(cont_tokens.shape[1]) > 0
-            else mx.zeros(
+        should_decode_cont = bool(decode_continuation) or bool(return_tokens)
+        if should_decode_cont and int(cont_tokens.shape[1]) > 0:
+            cont_audio = self.decode_tokens(cont_tokens)
+        else:
+            cont_audio = mx.zeros(
                 (int(full_audio.shape[0]), 0, int(full_audio.shape[-1])),
                 dtype=full_audio.dtype,
             )
-        )
         if return_tokens:
             return full_audio, cont_audio, tokens
         return full_audio, cont_audio
