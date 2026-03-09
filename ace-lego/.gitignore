@@ -1,0 +1,63 @@
+# ── Model checkpoints (large, mounted at runtime) ──────────────────────────────
+checkpoints/
+ACE-Step-1.5/checkpoints/
+
+# ── Audio data / generated output ──────────────────────────────────────────────
+data/
+ACE-Step-1.5/data/
+acestep_output/
+ACE-Step-1.5/acestep_output/
+
+# Root-level experiment audio (source stems and generated candidates)
+/*.wav
+/*.mp3
+/*.flac
+/*.aac
+/*.ogg
+/*.asd
+
+# Local smoke-test outputs
+/smoke-tests/
+
+# ── Python ──────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+*.so
+
+# ── ML model artifacts ──────────────────────────────────────────────────────────
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+*.gguf
+
+# ── Training / logging ──────────────────────────────────────────────────────────
+wandb/
+runs/
+tensorboard_logs/
+ACE-Step-1.5/gradio_temp/
+ACE-Step-1.5/tmp/
+*.log
+
+# ── Env / secrets ───────────────────────────────────────────────────────────────
+.env
+.env.*
+*.secret
+
+# ── OS cruft ────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editor ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo

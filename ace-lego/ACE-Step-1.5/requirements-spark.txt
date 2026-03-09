@@ -1,0 +1,47 @@
+# requirements-spark.txt
+# ACE-Step 1.5 dependencies for DGX Spark (Linux aarch64, CUDA 13.0 / Python 3.12)
+#
+# Excluded intentionally — handled elsewhere or incompatible on this platform:
+#   torch / torchvision / torchaudio  — installed from cu130 NIGHTLY index (see Dockerfile.spark)
+#                                        stable 2.10.0+cu130 lacks sm_12.1 (GB10); nightly 2.12.0.dev20260219 includes it
+#   triton                            — no aarch64 wheels on PyPI; nano-vllm skips it on py3.12
+#   flash-attn                        — no aarch64 wheel (x86_64-only upstream gate)
+#   torchcodec                        — upstream already gates on platform_machine != 'aarch64'
+#   mlx / mlx-lm                     — macOS only (upstream gate)
+#   nano-vllm                         — installed from local path (acestep/third_parts/nano-vllm)
+
+# Core
+safetensors==0.7.0
+transformers>=4.51.0,<4.58.0
+diffusers>=0.29.0,<0.36.0
+accelerate>=1.12.0
+einops>=0.8.1
+
+# Audio
+scipy>=1.10.1
+soundfile>=0.13.1
+numba>=0.63.1
+
+# Quantization / generation
+torchao
+vector-quantize-pytorch>=1.27.15
+
+# API / server
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+gradio==6.2.0
+diskcache
+typer-slim>=0.21.1
+
+# Utilities
+matplotlib>=3.7.5
+loguru>=0.7.3
+toml
+xxhash
+modelscope
+
+# Training (LoRA / LoKr — needed for import resolution even in inference-only containers)
+peft>=0.18.0
+lycoris-lora
+lightning>=2.0.0
+tensorboard>=2.0.0

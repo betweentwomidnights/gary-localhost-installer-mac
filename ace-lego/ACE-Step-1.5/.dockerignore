@@ -1,0 +1,54 @@
+# .dockerignore — keep the ACE-Step build context lean
+.git
+.gitignore
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.eggs
+dist
+build
+
+# Logs and temp files
+*.log
+*.tmp
+*.bak
+
+# Env / secrets
+.env
+.env.*
+
+# Virtual environments (uv / venv)
+.venv
+venv
+venv_rocm
+
+# Model checkpoints — mount at runtime via -v /host/checkpoints:/checkpoints
+checkpoints/
+
+# Audio data — mount at runtime via -v /host/data:/data
+data/
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.aac
+
+# Dev / docs overhead
+docs/
+assets/
+examples/
+openrouter/
+
+# Windows / macOS launchers
+*.bat
+*.ps1
+start_gradio_ui*.sh
+start_api_server*.sh
+check_update.*
+merge_config.*
+install_uv.*
+quick_test.*
+test_*.sh
+test_*.bat

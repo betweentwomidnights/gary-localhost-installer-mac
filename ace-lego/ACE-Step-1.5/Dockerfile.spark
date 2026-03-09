@@ -1,0 +1,115 @@
+# Dockerfile.spark
+# ACE-Step 1.5 — DGX Spark (Linux aarch64, CUDA 13.0)
+# REST API server exposed on :8001
+#
+# Build:
+#   docker build -f Dockerfile.spark -t ace-step-spark:latest .
+#
+# Run (first launch downloads models to /app/checkpoints automatically):
+#   docker run --gpus all -p 8001:8001 \
+#     -v /home/kev/ace/checkpoints:/app/checkpoints \
+#     -v /home/kev/ace/data:/app/data \
+#     ace-step-spark:latest
+#
+# NOTE: api_server.py resolves checkpoints as os.path.join(project_root, "checkpoints")
+# where project_root = dirname(dirname(__file__)) = /app.  Mount MUST be /app/checkpoints.
+#
+# Health check:  curl http://localhost:8001/health
+# Models list:   curl http://localhost:8001/v1/models
+
+# ── Base: proven CUDA 13.0 arm64 image used across this DGX Spark ─────────────
+FROM nvidia/cuda:13.0.1-runtime-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# ── System packages ────────────────────────────────────────────────────────────
+# libsndfile1 : soundfile / soundfile-based audio I/O (torchcodec excluded on aarch64)
+# ffmpeg      : audio codec support
+# git         : required by modelscope and huggingface_hub for model downloads
+# curl        : used in HEALTHCHECK
+# build-essential : C extensions (numba, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-dev \
+        build-essential \
+        git \
+        curl \
+        libsndfile1 \
+        ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# ── Step 1: PyTorch nightly cu130 — sm_12.1 (GB10) support ───────────────────
+# torch 2.10.0+cu130 (stable) only supports sm_12.0; the GB10 is sm_12.1 →
+# ALL cuBLAS GEMMs fail with CUBLAS_STATUS_INVALID_VALUE on the stable build.
+# The nightly (2026-02-19) includes sm_12.1 SASS kernels.
+# torchaudio nightly version trails torch by one minor: 2.11.x for torch 2.12.x.
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+        torch==2.12.0.dev20260219+cu130 \
+        torchvision==0.26.0.dev20260219+cu130 \
+        torchaudio==2.11.0.dev20260219+cu130 \
+        --extra-index-url https://download.pytorch.org/whl/nightly/cu130
+
+# ── Step 2: Repo source ────────────────────────────────────────────────────────
+# .dockerignore strips checkpoints/, data/, docs/, assets/, *.bat, *.sh etc.
+COPY . /app
+
+# ── Step 3: nano-vllm (local third-party, not on PyPI) ────────────────────────
+# Python 3.12 skips nano-vllm's triton gate (pinned to python_version == '3.11').
+# No flash-attn wheel exists for aarch64, so it's also skipped cleanly.
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+        -e /app/acestep/third_parts/nano-vllm
+
+# ── Step 4: ACE-Step dependencies ─────────────────────────────────────────────
+# requirements-spark.txt excludes torch, triton, flash-attn, torchcodec, mlx.
+# See comments at the top of that file for the full exclusion rationale.
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+        -r /app/requirements-spark.txt
+
+# ── Step 4b: Patch transformers Qwen3RotaryEmbedding (k=1 degenerate matmul) ──
+# freqs = inv_freq_expanded @ position_ids_expanded is a batched Sgemm with k=1
+# (outer product form).  Replace @ with * (broadcast multiply) — mathematically
+# identical, avoids cuBLAS entirely for this degenerate case.
+# See docker-patches/fix_qwen3_rope.py for full explanation.
+RUN python3 /app/docker-patches/fix_qwen3_rope.py
+
+# ── Step 4c: Patch diffusers torchao_quantizer.py (logger ordering bug) ───────
+# diffusers 0.35.x/0.36.x define `logger` after calling _update_torch_safe_globals()
+# at module load time; the except branch crashes with NameError on our torchao version.
+# See docker-patches/fix_torchao_quantizer.py for full explanation.
+RUN python3 /app/docker-patches/fix_torchao_quantizer.py
+
+# ── Step 5: Register ACE-Step entry points ────────────────────────────────────
+# --no-deps: all dependencies satisfied above; avoids pip chasing nano-vllm on PyPI.
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+        --no-deps -e /app
+
+# ── Validate torch sees CUDA (build-time smoke test, GPU not required here) ───
+RUN python3 -c "import torch; print('torch', torch.__version__, '| CUDA build:', torch.version.cuda)"
+
+# ── Runtime configuration ──────────────────────────────────────────────────────
+# ACESTEP_INIT_LLM=false  : DiT-only mode for first bring-up (no LM, fastest start)
+# Set to 'auto' or 'true' once baseline text2music is confirmed working.
+# ACESTEP_CONFIG_PATH : DiT model to load on startup.
+#   acestep-v15-turbo (default) — fast, text2music, repaint, cover
+#   acestep-v15-base            — required for lego mode (separate HF repo: ACE-Step/acestep-v15-base)
+# ACESTEP_INIT_LLM    : false = DiT only (fastest start); true = also load 5Hz LM for thinking/lego quality
+ENV ACESTEP_CONFIG_PATH=acestep-v15-turbo \
+    ACESTEP_INIT_LLM=false \
+    ACESTEP_DOWNLOAD_SOURCE=huggingface
+
+# Model checkpoints and audio I/O — mount from host at runtime
+# api_server.py writes to /app/checkpoints and /app/data (project_root-relative)
+VOLUME ["/app/checkpoints", "/app/data"]
+
+EXPOSE 8001
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
+    CMD curl -sf http://localhost:8001/health || exit 1
+
+# Direct python entry for clear stack traces (matches AGENTS_additional_context.md recommendation)
+CMD ["python3", "acestep/api_server.py", "--host", "0.0.0.0", "--port", "8001"]

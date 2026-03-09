@@ -1,0 +1,103 @@
+# Dockerfile.t4
+# ACE-Step 1.5 — NVIDIA T4 (Linux x86_64, CUDA 12.x)
+# REST API server exposed on :8001
+# Model is NOT loaded at startup — the wrapper calls POST /v1/load before each
+# generation and POST /v1/unload after, ensuring zero VRAM between jobs.
+#
+# Build:
+#   docker build -f Dockerfile.t4 -t ace-step-t4:latest .
+#
+# Run:
+#   docker run --gpus all -p 8001:8001 \
+#     -v /path/to/checkpoints:/app/checkpoints \
+#     -e ACESTEP_CONFIG_PATH=acestep-v15-base \
+#     ace-step-t4:latest
+#
+# Health check:  curl http://localhost:8001/health
+# Load model:    curl -X POST http://localhost:8001/v1/load
+# Unload model:  curl -X POST http://localhost:8001/v1/unload
+
+# ── Base: CUDA 12.4, Ubuntu 22.04, x86_64 ─────────────────────────────────────
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# ── System packages ────────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-dev \
+        build-essential \
+        git \
+        curl \
+        libsndfile1 \
+        ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# ── Step 1: PyTorch stable cu124 — T4 (sm_75) ─────────────────────────────────
+# T4 is Turing (sm_75), fully supported by PyTorch stable CUDA 12.4 builds.
+# No nightly required.
+RUN python3 -m pip install --no-cache-dir \
+        torch==2.5.1+cu124 \
+        torchvision==0.20.1+cu124 \
+        torchaudio==2.5.1+cu124 \
+        --extra-index-url https://download.pytorch.org/whl/cu124
+
+# ── Step 2: Repo source ────────────────────────────────────────────────────────
+COPY . /app
+
+# ── Step 3: nano-vllm (local third-party) ─────────────────────────────────────
+# LM is disabled on T4 (ACESTEP_INIT_LLM=false) but nano-vllm is still needed
+# as a package dependency. With enforce_eager always True on CUDA (our fix in
+# llm_inference.py), no CUDA graph capture is ever attempted.
+RUN python3 -m pip install --no-cache-dir \
+        -e /app/acestep/third_parts/nano-vllm
+
+# ── Step 4: ACE-Step dependencies ─────────────────────────────────────────────
+# Use requirements.txt (x86_64 — no aarch64 exclusions needed).
+# If packages conflict, fall back to requirements-spark.txt minus the
+# aarch64-specific comments.
+RUN python3 -m pip install --no-cache-dir \
+        -r /app/requirements.txt || \
+    python3 -m pip install --no-cache-dir \
+        -r /app/requirements-spark.txt
+
+# ── Step 4b: torchao quantizer patch (diffusers logger ordering bug) ──────────
+# Safe to apply on all platforms. No-op if already fixed upstream.
+RUN python3 /app/docker-patches/fix_torchao_quantizer.py 2>/dev/null || true
+
+# NOTE: The Qwen3 RoPE / cuBLAS k=1 GEMM patch (fix_qwen3_rope.py) is NOT
+# applied here — that bug is specific to the GB10's sm_12.1 / CUDA 13.0 build.
+
+# ── Step 5: Register ACE-Step entry points ────────────────────────────────────
+RUN python3 -m pip install --no-cache-dir --no-deps -e /app
+
+# ── Validate torch sees CUDA ──────────────────────────────────────────────────
+RUN python3 -c "import torch; print('torch', torch.__version__, '| CUDA build:', torch.version.cuda)"
+
+# ── Runtime configuration ──────────────────────────────────────────────────────
+# ACESTEP_NO_INIT=true    : Skip model loading at startup. Model lives in VRAM
+#                           only during active generation (loaded by wrapper via
+#                           POST /v1/load, unloaded via POST /v1/unload).
+# ACESTEP_CONFIG_PATH     : Must be acestep-v15-base for lego mode.
+# ACESTEP_INIT_LLM=false  : No LM on T4 — not enough VRAM alongside other models,
+#                           and thinking=false is always used for lego mode.
+ENV ACESTEP_CONFIG_PATH=acestep-v15-base \
+    ACESTEP_INIT_LLM=false \
+    ACESTEP_NO_INIT=true \
+    ACESTEP_DOWNLOAD_SOURCE=huggingface
+
+# Model checkpoints and audio I/O — mount from host at runtime
+VOLUME ["/app/checkpoints", "/app/data"]
+
+EXPOSE 8001
+
+# Health check does not require the model to be loaded.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
+    CMD curl -sf http://localhost:8001/health || exit 1
+
+CMD ["python3", "acestep/api_server.py", "--host", "0.0.0.0", "--port", "8001"]
