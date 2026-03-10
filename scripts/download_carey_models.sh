@@ -61,16 +61,16 @@ bootstrap_uv_if_needed() {
   local install_dir="${HOME}/Library/Application Support/gary4local/tools/uv"
   mkdir -p "${install_dir}"
 
-  echo "uv not found. bootstrapping uv into ${install_dir}..."
+  echo "uv not found. bootstrapping uv into ${install_dir}..." >&2
   UV_UNMANAGED_INSTALL="${install_dir}" PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
-    /bin/sh -lc 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+    /bin/sh -lc 'curl -LsSf https://astral.sh/uv/install.sh | sh' >&2
 
   if resolved="$(resolve_uv_path)"; then
     printf '%s\n' "${resolved}"
     return 0
   fi
 
-  echo "failed to locate uv after bootstrap."
+  echo "failed to locate uv after bootstrap." >&2
   return 1
 }
 
@@ -95,6 +95,11 @@ resolve_worker_path() {
 ensure_shared_downloader_python() {
   local uv_path
   uv_path="$(bootstrap_uv_if_needed)"
+  uv_path="$(printf '%s\n' "${uv_path}" | tail -n 1)"
+  if [[ -z "${uv_path}" || ! -x "${uv_path}" ]]; then
+    echo "failed to resolve uv executable path." >&2
+    return 1
+  fi
 
   mkdir -p "$(dirname "${HF_DOWNLOADER_VENV_DIR}")"
   local venv_python="${HF_DOWNLOADER_VENV_DIR}/bin/python"
