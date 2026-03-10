@@ -849,6 +849,11 @@ final class ServiceManager: ObservableObject {
                 )
             } else if let uvExecutable {
                 var uvInstallArguments = ["pip", "install", "--python", venvPython.path]
+                if service.id == "carey" {
+                    // Carey requirements mix CUDA extra indexes with PyPI; allow uv to
+                    // consider all trusted indexes during fallback resolution.
+                    uvInstallArguments.append(contentsOf: ["--index-strategy", "unsafe-best-match"])
+                }
                 uvInstallArguments.append(
                     contentsOf: normalizeInstallerArgumentsForUV(installArgs, logHandle: logHandle)
                 )
