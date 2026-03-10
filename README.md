@@ -6,6 +6,7 @@ It pairs with [gary4juce](https://github.com/betweentwomidnights/gary4juce) and 
 
 ## Monorepo Layout
 
+- `ace-lego/`: Carey (ACE-Step) localhost backend + wrapper used by `gary4local`
 - `audiocraft-mlx/`: MusicGen continuation localhost backend (MLX path)
 - `melodyflow/`: MelodyFlow localhost backend (custom MPS-enabled AudioCraft fork)
 - `stable-audio-tools/`: Stable Audio localhost backend (custom MPS-enabled fork)
@@ -16,6 +17,7 @@ It pairs with [gary4juce](https://github.com/betweentwomidnights/gary4juce) and 
 
 These staging repos are used to validate MLX integrations before promoting minimal runtime code into this repo:
 
+- [ace-lego](https://github.com/betweentwomidnights/ace-lego) (staging ground for the `ace-lego/` folder vendored in this repository)
 - [stable-audio-mlx](https://github.com/betweentwomidnights/stable-audio-mlx)
 - [melodyflow-mlx](https://github.com/betweentwomidnights/melodyflow-mlx)
 
@@ -63,6 +65,7 @@ These staging repos are used to validate MLX integrations before promoting minim
 ### DMG Runtime Packaging (current approach)
 
 - `gary4local` now stages runtime backend source code into app resources during build:
+  - `Contents/Resources/runtime/ace-lego`
   - `Contents/Resources/runtime/audiocraft-mlx`
   - `Contents/Resources/runtime/melodyflow`
   - `Contents/Resources/runtime/stable-audio-tools`
