@@ -1252,15 +1252,6 @@ def _queue_transform_job(
 
             input_path = _write_base64_audio_to_file(audio_data, session_id)
 
-            _set_progress(session_id, 0, status="processing", message="transforming... 0%")
-            _upsert_juce_session(
-                session_id,
-                status="processing",
-                progress=0,
-                error=None,
-                queue_status=_build_queue_status("processing", "transforming...", 0),
-            )
-
             input_waveform = load_audio_from_file(input_path)
             processed_waveform = process_audio(
                 input_waveform,

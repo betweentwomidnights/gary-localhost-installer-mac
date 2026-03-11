@@ -26,9 +26,16 @@ copy_tree() {
   rsync -a --delete \
     --exclude ".git/" \
     --exclude ".venv/" \
+    --exclude ".claude/" \
+    --exclude ".cache/" \
+    --exclude ".pytest_cache/" \
     --exclude ".mlx_cache/" \
+    --exclude "checkpoints/" \
     --exclude "__pycache__/" \
     --exclude "*.pyc" \
+    --exclude "smoke-tests/" \
+    --exclude "smoke.wav" \
+    --exclude "smoke.mp3" \
     --exclude ".DS_Store" \
     "${source_dir}/" "${destination_dir}/"
 }
@@ -48,6 +55,16 @@ chmod +x "${RUNTIME_DST}/scripts/download_carey_models.sh"
 # Keep app bundle lean; checkpoints will be managed in cache/runtime.
 rm -rf "${RUNTIME_DST}/ace-lego/ACE-Step-1.5/checkpoints" || true
 rm -rf "${RUNTIME_DST}/ace-lego/smoke-tests" || true
+rm -rf "${RUNTIME_DST}/ace-lego/ACE-Step-1.5/.cache" || true
+rm -f "${RUNTIME_DST}/ace-lego/smoke.wav" || true
+# Remove non-runtime ACE-Step content (docs/media/examples/repo metadata).
+rm -rf "${RUNTIME_DST}/ace-lego/ACE-Step-1.5/docs" || true
+rm -rf "${RUNTIME_DST}/ace-lego/ACE-Step-1.5/examples" || true
+rm -rf "${RUNTIME_DST}/ace-lego/ACE-Step-1.5/assets" || true
+rm -rf "${RUNTIME_DST}/ace-lego/ACE-Step-1.5/.github" || true
+rm -rf "${RUNTIME_DST}/ace-lego/ACE-Step-1.5/.githooks" || true
+rm -rf "${RUNTIME_DST}/ace-lego/ACE-Step-1.5/docker-patches" || true
+rm -rf "${RUNTIME_DST}/ace-lego/ACE-Step-1.5/gradio_outputs" || true
 
 cp "${REPO_ROOT}/control-center/manifest/services.production.json" "${MANIFEST_DST}/services.production.json"
 
