@@ -1,0 +1,8 @@
+Repository: https://github.com/RoyalCities/RC-stable-audio-tools
+Vendored commit: f1f13af77cb9bc34dd6eb001b2430b3c85375ea2
+Purpose: Foundation-1 prompt engine parity with the Windows gary-localhost-installer service.
+
+Notes:
+- This vendored tree is used by foundation/api_foundation.py for the /randomize prompt engine path.
+- The macOS Foundation runtime still uses the local MLX saomlx generation stack for inference and audio2audio.
+- The old foundation/RC-stable-audio-tools developer checkout is intentionally ignored and treated only as a fallback.

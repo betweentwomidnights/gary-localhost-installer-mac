@@ -1,0 +1,1 @@
+Put models inside separate folders along their matching configs files. 1 folder can support multiple checkpoints from the same training run.

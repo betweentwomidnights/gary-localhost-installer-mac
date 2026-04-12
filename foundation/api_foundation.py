@@ -83,9 +83,12 @@ def _load_rc_prompt():
     except ModuleNotFoundError:
         pass
 
-    # Try local RC-stable-audio-tools directory
+    # Prefer the vendored RC prompt engine we ship with the Foundation runtime.
+    # Keep the old local checkout path as a fallback for developer worktrees
+    # that still have foundation/RC-stable-audio-tools around.
     import importlib.util
     candidates = [
+        Path(__file__).parent / "third_party" / "rc-stable-audio-tools" / "stable_audio_tools" / "interface" / "prompts" / "master_prompt_map.py",
         Path(__file__).parent / "RC-stable-audio-tools" / "stable_audio_tools" / "interface" / "prompts" / "master_prompt_map.py",
     ]
     for candidate in candidates:
@@ -96,10 +99,8 @@ def _load_rc_prompt():
             _rc_prompt = mod
             return mod
 
-    raise ImportError(
-        "RC prompt engine not found. Clone RC-stable-audio-tools into "
-        f"{Path(__file__).parent / 'RC-stable-audio-tools'}"
-    )
+    tried = ", ".join(str(candidate) for candidate in candidates)
+    raise ImportError(f"RC prompt engine not found. Tried {tried}")
 
 
 # ---------------------------------------------------------------------------
