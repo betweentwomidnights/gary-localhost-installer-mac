@@ -4,6 +4,11 @@ This repository combines the local backend environments used by the Gary plugin 
 
 It pairs with [gary4juce](https://github.com/betweentwomidnights/gary4juce) and now includes a working macOS Swift app target (`gary4local`) that manages local services from a window + menu bar control center.
 
+## Current Note
+
+- `foundation-1` has now been successfully added to `gary4local`, including model download flow, prompt randomization support, text generation, and audio2audio on the macOS MLX path.
+- TODO: bring the Carey service to parity with Windows by adding `ace-step-v15-xl-*` model support behind a toggle in `gary4local`, matching the behavior in `gary-localhost-installer`.
+
 ## Monorepo Layout
 
 - `ace-lego/`: Carey (ACE-Step) localhost backend + wrapper used by `gary4local`
