@@ -238,6 +238,57 @@
       "auto_start": false,
       "restart_on_crash": true,
       "graceful_shutdown_seconds": 8
+    },
+    {
+      "id": "foundation",
+      "name": "foundation-1",
+      "working_directory": "${RUNTIME_ROOT}/foundation",
+      "executable": "${APP_SUPPORT_DIR}/venvs/foundation/bin/python",
+      "arguments": [
+        "api_foundation.py"
+      ],
+      "environment": {
+        "PYTHONUNBUFFERED": "${PYTHONUNBUFFERED}",
+        "PYTHONDONTWRITEBYTECODE": "${PYTHONDONTWRITEBYTECODE}",
+        "FOUNDATION_SAOMLX_ROOT": "${RUNTIME_ROOT}/stable-audio-tools",
+        "FOUNDATION_MODEL_DIR": "${APP_SUPPORT_DIR}/cache/foundation-1",
+        "PORT": "8015",
+        "HF_HOME": "${HF_HOME}",
+        "HUGGINGFACE_HUB_CACHE": "${HUGGINGFACE_HUB_CACHE}",
+        "HF_HUB_DISABLE_XET": "${HF_HUB_DISABLE_XET}",
+        "HF_XET_HIGH_PERFORMANCE": "${HF_XET_HIGH_PERFORMANCE}",
+        "G4L_HF_XET_MODE": "${G4L_HF_XET_MODE}",
+        "G4L_HF_XET_PROBE_TIMEOUT_SECONDS": "${G4L_HF_XET_PROBE_TIMEOUT_SECONDS}",
+        "G4L_HF_DOWNLOADER_XET_MODE": "${G4L_HF_DOWNLOADER_XET_MODE}",
+        "G4L_HF_DOWNLOADER_XET_HIGH_PERFORMANCE": "${G4L_HF_DOWNLOADER_XET_HIGH_PERFORMANCE}",
+        "G4L_HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS": "${G4L_HF_DOWNLOADER_XET_NUM_CONCURRENT_RANGE_GETS}",
+        "G4L_HF_XET_FIRST_BYTE_TIMEOUT_SECONDS": "${G4L_HF_XET_FIRST_BYTE_TIMEOUT_SECONDS}",
+        "G4L_HF_XET_SLOW_SPEED_BPS": "${G4L_HF_XET_SLOW_SPEED_BPS}",
+        "G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS": "${G4L_HF_XET_SLOW_SPEED_GRACE_SECONDS}",
+        "G4L_HF_SNAPSHOT_MAX_WORKERS": "${G4L_HF_SNAPSHOT_MAX_WORKERS}",
+        "PYTORCH_ENABLE_MPS_FALLBACK": "${PYTORCH_ENABLE_MPS_FALLBACK}",
+        "TRANSFORMERS_CACHE": "${TRANSFORMERS_CACHE}",
+        "TORCH_HOME": "${TORCH_HOME}",
+        "XDG_CACHE_HOME": "${XDG_CACHE_HOME}",
+        "TMPDIR": "${TMPDIR}"
+      },
+      "bootstrap": {
+        "python_executable": "python3.11",
+        "venv_directory": "${APP_SUPPORT_DIR}/venvs/foundation",
+        "requirements_file": "${RUNTIME_ROOT}/foundation/requirements.txt",
+        "upgrade_build_tools": true,
+        "pip_arguments": []
+      },
+      "log_file": "foundation.log",
+      "health_check": {
+        "url": "http://127.0.0.1:8015/health",
+        "expected_status": 200,
+        "interval_seconds": 3,
+        "timeout_seconds": 2
+      },
+      "auto_start": false,
+      "restart_on_crash": true,
+      "graceful_shutdown_seconds": 8
     }
   ]
 }

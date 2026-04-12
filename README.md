@@ -69,12 +69,15 @@ These staging repos are used to validate MLX integrations before promoting minim
   - `Contents/Resources/runtime/audiocraft-mlx`
   - `Contents/Resources/runtime/melodyflow`
   - `Contents/Resources/runtime/stable-audio-tools`
+  - `Contents/Resources/runtime/foundation`
 - Production manifest is staged to:
   - `Contents/Resources/manifest/services.production.json`
 - Mutable user data remains outside the app bundle:
   - venvs/caches: `~/Library/Application Support/GaryLocalhost/`
   - logs: `~/Library/Logs/GaryLocalhost/`
 - See `control-center/docs/CODE_SIGNING.md` for signing + notarization workflow.
+- For a trusted Apple Silicon handoff build from an Intel Mac, use `./scripts/build_gary4local_adhoc_dmg.sh`.
+- For a notarized Developer ID DMG, use `./scripts/build_gary4local_release_dmg.sh`.
 
 ## Rebuild Python Environments
 

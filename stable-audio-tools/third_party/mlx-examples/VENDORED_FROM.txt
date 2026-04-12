@@ -1,0 +1,13 @@
+Source repository: https://github.com/ml-explore/mlx-examples
+Pinned commit: 796f5b53cab69a3d48a44233ce21aae889e94a08
+Commit date: 2026-04-06
+
+Vendored subdirectories:
+- t5/
+- encodec/
+
+Purpose:
+- saomlx/t5_embedder.py expects third_party/mlx-examples/t5
+- saomlx/encodec48.py expects third_party/mlx-examples/encodec
+
+The upstream repository is MIT licensed. See LICENSE in this directory.

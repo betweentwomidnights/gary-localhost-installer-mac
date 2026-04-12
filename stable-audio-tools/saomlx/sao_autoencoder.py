@@ -14,16 +14,22 @@ from .hf_download import download_file
 
 
 def _ensure_sat_import_path() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    sat_dir = repo_root / "third_party" / "stable-audio-tools"
-    if not sat_dir.exists():
-        raise FileNotFoundError(
-            f"Could not find stable-audio-tools at {sat_dir}. "
-            "Run ./scripts/pin_deps.sh first."
-        )
-    sat_path = str(sat_dir)
-    if sat_path not in sys.path:
-        sys.path.insert(0, sat_path)
+    repo_root = Path(__file__).resolve().parents[1]
+    candidates = [
+        repo_root,
+        repo_root / "third_party" / "stable-audio-tools",
+    ]
+    for sat_dir in candidates:
+        if (sat_dir / "stable_audio_tools").exists():
+            sat_path = str(sat_dir)
+            if sat_path not in sys.path:
+                sys.path.insert(0, sat_path)
+            return
+    tried = ", ".join(str(path) for path in candidates)
+    raise FileNotFoundError(
+        f"Could not find stable-audio-tools package. Tried: {tried}. "
+        "Run ./scripts/pin_deps.sh first."
+    )
 
 
 @dataclass(frozen=True)

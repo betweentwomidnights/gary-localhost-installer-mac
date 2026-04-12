@@ -39,13 +39,14 @@ def sample_rf_euler_mlx(
     *,
     steps: int,
     sigma_max: float = 1.0,
+    init_data: mx.array | None = None,
     callback=None,
     **extra_args,
 ) -> mx.array:
     """MLX Euler solver for rectified-flow / rf_denoiser models."""
     t = make_rf_schedule(steps=steps, sigma_max=sigma_max, dtype=x.dtype)
     ts = mx.ones((x.shape[0],), dtype=x.dtype)
-    h = x
+    h = _init_rf_state(x, sigma_max=sigma_max, init_data=init_data)
 
     for i in range(int(t.shape[0]) - 1):
         t_curr = t[i]
@@ -77,6 +78,7 @@ def sample_rf_dpmpp_mlx(
     *,
     steps: int,
     sigma_max: float = 1.0,
+    init_data: mx.array | None = None,
     callback=None,
     **extra_args,
 ) -> mx.array:
@@ -89,7 +91,7 @@ def sample_rf_dpmpp_mlx(
     def log_snr(val: mx.array) -> mx.array:
         return mx.log((1.0 - val) / val)
 
-    h = x
+    h = _init_rf_state(x, sigma_max=sigma_max, init_data=init_data)
     for i in range(int(t.shape[0]) - 1):
         t_curr = t[i]
         t_next = t[i + 1]
@@ -114,6 +116,28 @@ def sample_rf_dpmpp_mlx(
 
 def _get_alphas_sigmas(t: mx.array) -> tuple[mx.array, mx.array]:
     return mx.cos(t * mx.pi / 2.0), mx.sin(t * mx.pi / 2.0)
+
+
+def _init_rf_state(noise: mx.array, *, sigma_max: float, init_data: mx.array | None) -> mx.array:
+    sigma_max = min(float(sigma_max), 1.0)
+    if init_data is None:
+        return noise
+    return init_data * (1.0 - sigma_max) + noise * sigma_max
+
+
+def _init_k_state(noise: mx.array, *, sigmas: mx.array, init_data: mx.array | None) -> mx.array:
+    x = noise * sigmas[0]
+    if init_data is not None:
+        x = init_data + x
+    return x
+
+
+def _init_v_state(noise: mx.array, *, sigma_max: float, init_data: mx.array | None) -> mx.array:
+    sigma_max = min(float(sigma_max), 1.0)
+    if init_data is None:
+        return noise
+    alpha, sigma = _get_alphas_sigmas(mx.array(sigma_max, dtype=noise.dtype))
+    return init_data * alpha + noise * sigma
 
 
 def _append_dims(x: mx.array, target_dims: int) -> mx.array:
@@ -220,6 +244,7 @@ def sample_k_heun_mlx(
     s_tmin: float = 0.0,
     s_tmax: float = float("inf"),
     s_noise: float = 1.0,
+    init_data: mx.array | None = None,
     callback=None,
     **extra_args,
 ) -> mx.array:
@@ -231,7 +256,7 @@ def sample_k_heun_mlx(
         rho=rho,
         dtype=noise.dtype,
     )
-    x = noise * sigmas[0]
+    x = _init_k_state(noise, sigmas=sigmas, init_data=init_data)
     s_in = mx.ones((x.shape[0],), dtype=x.dtype)
 
     for i in range(int(sigmas.shape[0]) - 1):
@@ -273,6 +298,7 @@ def sample_k_lms_mlx(
     sigma_max: float = 100.0,
     rho: float = 1.0,
     order: int = 4,
+    init_data: mx.array | None = None,
     callback=None,
     **extra_args,
 ) -> mx.array:
@@ -286,7 +312,7 @@ def sample_k_lms_mlx(
     )
     sigmas_np = np.asarray(sigmas, dtype=np.float64)
 
-    x = noise * sigmas[0]
+    x = _init_k_state(noise, sigmas=sigmas, init_data=init_data)
     s_in = mx.ones((x.shape[0],), dtype=x.dtype)
     ds: list[mx.array] = []
 
@@ -323,6 +349,7 @@ def sample_k_dpm_2_mlx(
     s_tmin: float = 0.0,
     s_tmax: float = float("inf"),
     s_noise: float = 1.0,
+    init_data: mx.array | None = None,
     callback=None,
     **extra_args,
 ) -> mx.array:
@@ -334,7 +361,7 @@ def sample_k_dpm_2_mlx(
         rho=rho,
         dtype=noise.dtype,
     )
-    x = noise * sigmas[0]
+    x = _init_k_state(noise, sigmas=sigmas, init_data=init_data)
     s_in = mx.ones((x.shape[0],), dtype=x.dtype)
 
     for i in range(int(sigmas.shape[0]) - 1):
@@ -382,6 +409,7 @@ def sample_k_dpmpp_2s_ancestral_mlx(
     s_noise: float = 1.0,
     sde_noise_backend: str = "gaussian",
     seed: int | None = None,
+    init_data: mx.array | None = None,
     callback=None,
     **extra_args,
 ) -> mx.array:
@@ -393,7 +421,7 @@ def sample_k_dpmpp_2s_ancestral_mlx(
         rho=rho,
         dtype=noise.dtype,
     )
-    x = noise * sigmas[0]
+    x = _init_k_state(noise, sigmas=sigmas, init_data=init_data)
     s_in = mx.ones((x.shape[0],), dtype=x.dtype)
     eta = float(eta)
     s_noise = float(s_noise)
@@ -454,6 +482,7 @@ def sample_k_dpmpp_2m_mlx(
     sigma_min: float = 0.01,
     sigma_max: float = 100.0,
     rho: float = 1.0,
+    init_data: mx.array | None = None,
     callback=None,
     **extra_args,
 ) -> mx.array:
@@ -465,7 +494,7 @@ def sample_k_dpmpp_2m_mlx(
         rho=rho,
         dtype=noise.dtype,
     )
-    x = noise * sigmas[0]
+    x = _init_k_state(noise, sigmas=sigmas, init_data=init_data)
     s_in = mx.ones((x.shape[0],), dtype=x.dtype)
     old_denoised = None
 
@@ -508,6 +537,7 @@ def sample_k_dpmpp_2m_sde_mlx(
     sde_noise_backend: str = "gaussian",
     seed: int | None = None,
     solver_type: str = "midpoint",
+    init_data: mx.array | None = None,
     callback=None,
     **extra_args,
 ) -> mx.array:
@@ -524,7 +554,7 @@ def sample_k_dpmpp_2m_sde_mlx(
         rho=rho,
         dtype=noise.dtype,
     )
-    x = noise * sigmas[0]
+    x = _init_k_state(noise, sigmas=sigmas, init_data=init_data)
     s_in = mx.ones((x.shape[0],), dtype=x.dtype)
     eta = float(eta)
     s_noise = float(s_noise)
@@ -595,6 +625,7 @@ def sample_k_dpmpp_3m_sde_mlx(
     s_noise: float = 1.0,
     sde_noise_backend: str = "gaussian",
     seed: int | None = None,
+    init_data: mx.array | None = None,
     callback=None,
     **extra_args,
 ) -> mx.array:
@@ -608,7 +639,7 @@ def sample_k_dpmpp_3m_sde_mlx(
     )
 
     # SAT sample_k behavior: scale initial noise by the first sigma.
-    x = noise * sigmas[0]
+    x = _init_k_state(noise, sigmas=sigmas, init_data=init_data)
     s_in = mx.ones((x.shape[0],), dtype=x.dtype)
 
     denoised_1 = None
@@ -744,6 +775,7 @@ def sample_v_ddim_mlx(
     steps: int,
     eta: float = 0.0,
     sigma_max: float = 1.0,
+    init_data: mx.array | None = None,
     callback=None,
     cfg_pp: bool = False,
     **extra_args,
@@ -760,7 +792,7 @@ def sample_v_ddim_mlx(
     t = mx.linspace(sigma_max, 0.0, steps + 1, dtype=x.dtype)[:-1]
     alphas, sigmas = _get_alphas_sigmas(t)
 
-    h = x
+    h = _init_v_state(x, sigma_max=sigma_max, init_data=init_data)
     pred = None
     eta = float(eta)
 

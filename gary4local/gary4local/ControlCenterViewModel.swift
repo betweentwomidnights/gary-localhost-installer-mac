@@ -1853,7 +1853,7 @@ final class ControlCenterViewModel: ObservableObject {
 
         let stagePercent = max(0, min(100, queue.downloadPercent ?? 0))
         let derivedRaw: Double
-        if stageTotal == 5 {
+        if modelDownloadServiceID == "stable_audio", stageTotal == 5 {
             // Match backend weighting so checkpoint transfer drives visible progress.
             let primaryStageWeight = 0.96
             if stageIndex <= 1 {
@@ -1864,6 +1864,18 @@ final class ControlCenterViewModel: ObservableObject {
                 derivedRaw = (
                     primaryStageWeight
                     + (Double(completedSecondaryStages) * secondaryStageWeight)
+                    + ((Double(stagePercent) / 100.0) * secondaryStageWeight)
+                ) * 100.0
+            }
+        } else if modelDownloadServiceID == "foundation", stageTotal == 2 {
+            // Foundation's safetensors payload is effectively the whole download.
+            let primaryStageWeight = 0.99
+            if stageIndex <= 1 {
+                derivedRaw = (Double(stagePercent) / 100.0) * primaryStageWeight * 100.0
+            } else {
+                let secondaryStageWeight = 1.0 - primaryStageWeight
+                derivedRaw = (
+                    primaryStageWeight
                     + ((Double(stagePercent) / 100.0) * secondaryStageWeight)
                 ) * 100.0
             }
@@ -2090,6 +2102,8 @@ final class ControlCenterViewModel: ObservableObject {
             return "jerry (stable audio)"
         case "carey":
             return "carey (ace lego)"
+        case "foundation":
+            return "foundation-1"
         default:
             if let runtime = manager?.services.first(where: { $0.id == serviceID }) {
                 return runtime.service.name

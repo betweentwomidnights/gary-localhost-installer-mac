@@ -17,6 +17,7 @@ Rebuilds local Python virtualenvs for:
   - carey (ace-lego/ACE-Step-1.5)
   - melodyflow
   - stable-audio-tools
+  - foundation
 
 Options:
   --python <path>     Python interpreter to use (default: python3.11 or $PYTHON_BIN)
@@ -67,6 +68,7 @@ SERVICES=(
   "ace-lego/ACE-Step-1.5|requirements.txt"
   "melodyflow|requirements.txt"
   "stable-audio-tools|requirements.txt"
+  "foundation|requirements.txt"
 )
 
 echo "Using Python: $("$PYTHON_BIN" -V 2>&1)"

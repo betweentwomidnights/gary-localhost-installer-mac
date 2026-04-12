@@ -15,7 +15,7 @@ import numpy as np
 
 
 def _load_mlx_encodec_module() -> ModuleType:
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[1]
     encodec_file = repo_root / "third_party" / "mlx-examples" / "encodec" / "encodec.py"
     if not encodec_file.exists():
         raise FileNotFoundError(

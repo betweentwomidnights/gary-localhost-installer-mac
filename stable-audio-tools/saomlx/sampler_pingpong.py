@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import mlx.core as mx
 
-from .sampler_base import make_rf_schedule
+from .sampler_base import _init_rf_state, make_rf_schedule
 
 
 class PingPongSampler:
@@ -12,10 +12,18 @@ class PingPongSampler:
         self.steps = int(steps)
         self.sigma_max = float(sigma_max)
 
-    def sample(self, model_fn, latents: mx.array, *, callback=None, **kwargs) -> mx.array:
+    def sample(
+        self,
+        model_fn,
+        latents: mx.array,
+        *,
+        init_data: mx.array | None = None,
+        callback=None,
+        **kwargs,
+    ) -> mx.array:
         t = make_rf_schedule(self.steps, sigma_max=self.sigma_max, dtype=latents.dtype)
         ts = mx.ones((latents.shape[0],), dtype=latents.dtype)
-        x = latents
+        x = _init_rf_state(latents, sigma_max=self.sigma_max, init_data=init_data)
 
         for i in range(int(t.shape[0]) - 1):
             t_i = t[i]

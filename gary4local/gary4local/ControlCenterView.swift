@@ -125,7 +125,7 @@ struct ControlCenterView: View {
                     onStop: { manager.stop(serviceID: runtime.id) },
                     onRestart: { manager.restart(serviceID: runtime.id) },
                     onRebuildEnv: { manager.rebuildEnvironment(serviceID: runtime.id) },
-                    onDownloadModels: (runtime.id == "audiocraft_mlx" || runtime.id == "melodyflow" || runtime.id == "stable_audio" || runtime.id == "carey") ? {
+                    onDownloadModels: (runtime.id == "audiocraft_mlx" || runtime.id == "melodyflow" || runtime.id == "stable_audio" || runtime.id == "carey" || runtime.id == "foundation") ? {
                         viewModel.openModelDownloadSheet(for: runtime.id)
                     } : nil,
                     downloadModelsExtraDisabled: runtime.id == "stable_audio" && !viewModel.stableAudioTokenConfigured
@@ -1785,6 +1785,8 @@ private func displayName(for runtime: ServiceRuntime) -> String {
         return "jerry (stable audio)"
     case "carey":
         return "carey (ace lego)"
+    case "foundation":
+        return "foundation-1"
     default:
         return runtime.service.name
     }
@@ -1800,6 +1802,8 @@ private func displayName(forServiceID serviceID: String, fallback: String) -> St
         return "jerry (stable audio)"
     case "carey":
         return "carey (ace lego)"
+    case "foundation":
+        return "foundation-1"
     default:
         return fallback
     }

@@ -569,6 +569,55 @@ def _align_audio_length(audio_tc: np.ndarray, target_length: int) -> np.ndarray:
     return np.concatenate([audio_tc, pad], axis=0)
 
 
+def _coerce_channels_first_audio(audio: tp.Any) -> np.ndarray:
+    arr = np.asarray(_tensor_to_numpy(audio), dtype=np.float32)
+    if arr.ndim == 1:
+        return arr[None, :]
+    if arr.ndim == 3:
+        arr = arr[0]
+    if arr.ndim != 2:
+        raise ValueError(f"Expected mono/stereo audio tensor, got shape {arr.shape}")
+    if arr.shape[0] <= 8 and arr.shape[1] > arr.shape[0]:
+        return arr
+    if arr.shape[1] <= 8 and arr.shape[0] > arr.shape[1]:
+        return arr.T
+    return arr
+
+
+def _prepare_init_latents(
+    *,
+    init_audio: tuple[int, tp.Any],
+    sample_rate: int,
+    sample_size: int,
+    io_channels: int,
+    batch_size: int,
+    vae_mlx: SAOAutoencoderMLX,
+) -> mx.array:
+    import torch
+    from stable_audio_tools.inference.utils import prepare_audio
+
+    in_sr, raw_audio = init_audio
+    audio_ct = _coerce_channels_first_audio(raw_audio)
+    audio_tc = torch.from_numpy(np.asarray(audio_ct, dtype=np.float32))
+    prepared = prepare_audio(
+        audio_tc,
+        in_sr=int(in_sr),
+        target_sr=int(sample_rate),
+        target_length=int(sample_size),
+        target_channels=int(io_channels),
+        device="cpu",
+    )
+    prepared_mx = mx.array(np.asarray(prepared.detach().cpu().numpy(), dtype=np.float32))
+    init_latents = vae_mlx.encode(prepared_mx)
+    mx.eval(init_latents)
+    if int(batch_size) > 1 and int(init_latents.shape[0]) == 1:
+        init_latents = mx.broadcast_to(
+            init_latents,
+            (int(batch_size), int(init_latents.shape[1]), int(init_latents.shape[2])),
+        )
+    return init_latents
+
+
 def _make_initial_noise(
     *,
     batch_size: int,
@@ -660,6 +709,8 @@ def generate_diffusion_cond_mlx(
     cfg_scale: float = 1.0,
     cfg_interval: tuple[float, float] = (0.0, 1.0),
     batch_size: int = 1,
+    init_audio: tuple[int, tp.Any] | None = None,
+    init_noise_level: float = 1.0,
     sampler_type: str | None = None,
     sigma_max: float | None = None,
     sigma_min: float | None = None,
@@ -724,6 +775,11 @@ def generate_diffusion_cond_mlx(
             sigma_min = 0.3
         else:
             sigma_min = 0.01
+    if init_audio is not None:
+        init_noise_level = float(init_noise_level)
+        if not (0.0 < init_noise_level <= 1.0):
+            raise ValueError(f"init_noise_level must be in (0, 1], got {init_noise_level}")
+        sigma_max = init_noise_level
 
     if seed == -1:
         seed = int(np.random.randint(0, 2**32 - 1, dtype=np.uint32))
@@ -808,6 +864,17 @@ def generate_diffusion_cond_mlx(
         seed=int(seed),
         noise_backend=noise_backend,
     )
+    init_latents = None
+    if init_audio is not None:
+        init_latents = _prepare_init_latents(
+            init_audio=init_audio,
+            sample_rate=sample_rate,
+            sample_size=sample_size,
+            io_channels=int(model.pretransform.io_channels),
+            batch_size=int(batch_size),
+            vae_mlx=vae_mlx,
+        )
+    t_init_audio_ready = perf_counter()
     step_stats: list[dict[str, tp.Any]] = []
 
     def _sampling_callback(payload: dict[str, tp.Any]) -> None:
@@ -855,6 +922,7 @@ def generate_diffusion_cond_mlx(
         latents = PingPongSampler(steps=steps, sigma_max=sigma_max).sample(
             dit_mlx,
             noise,
+            init_data=init_latents,
             callback=_sampling_callback,
             **cond_args,
         )
@@ -864,6 +932,7 @@ def generate_diffusion_cond_mlx(
             noise,
             steps=steps,
             sigma_max=sigma_max,
+            init_data=init_latents,
             callback=_sampling_callback,
             **cond_args,
         )
@@ -873,6 +942,7 @@ def generate_diffusion_cond_mlx(
             noise,
             steps=steps,
             sigma_max=sigma_max,
+            init_data=init_latents,
             callback=_sampling_callback,
             **cond_args,
         )
@@ -883,6 +953,7 @@ def generate_diffusion_cond_mlx(
             steps=steps,
             eta=0.0,
             sigma_max=sigma_max,
+            init_data=init_latents,
             callback=_sampling_callback,
             **cond_args,
         )
@@ -893,6 +964,7 @@ def generate_diffusion_cond_mlx(
             steps=steps,
             eta=0.0,
             sigma_max=sigma_max,
+            init_data=init_latents,
             cfg_pp=True,
             callback=_sampling_callback,
             **cond_args,
@@ -905,6 +977,7 @@ def generate_diffusion_cond_mlx(
             sigma_min=sigma_min,
             sigma_max=sigma_max,
             rho=rho,
+            init_data=init_latents,
             callback=_sampling_callback,
             **cond_args,
         )
@@ -923,6 +996,7 @@ def generate_diffusion_cond_mlx(
             s_noise=s_noise,
             sde_noise_backend=sde_noise_backend,
             seed=brownian_seed,
+            init_data=init_latents,
             callback=_sampling_callback,
             **cond_args,
         )
@@ -935,6 +1009,7 @@ def generate_diffusion_cond_mlx(
             sigma_max=sigma_max,
             rho=rho,
             s_noise=s_noise,
+            init_data=init_latents,
             callback=_sampling_callback,
             **cond_args,
         )
@@ -946,6 +1021,7 @@ def generate_diffusion_cond_mlx(
             sigma_min=sigma_min,
             sigma_max=sigma_max,
             rho=rho,
+            init_data=init_latents,
             callback=_sampling_callback,
             **cond_args,
         )
@@ -964,6 +1040,7 @@ def generate_diffusion_cond_mlx(
             s_noise=s_noise,
             sde_noise_backend=sde_noise_backend,
             seed=brownian_seed,
+            init_data=init_latents,
             callback=_sampling_callback,
             **cond_args,
         )
@@ -976,6 +1053,7 @@ def generate_diffusion_cond_mlx(
             sigma_max=sigma_max,
             rho=rho,
             s_noise=s_noise,
+            init_data=init_latents,
             callback=_sampling_callback,
             **cond_args,
         )
@@ -996,6 +1074,7 @@ def generate_diffusion_cond_mlx(
             s_noise=s_noise,
             sde_noise_backend=sde_noise_backend,
             seed=brownian_seed,
+            init_data=init_latents,
             callback=_sampling_callback,
             **cond_args,
         )
@@ -1086,6 +1165,13 @@ def generate_diffusion_cond_mlx(
             "negative_prompt": negative_prompt,
             "conditioning_batch": conditioning,
         },
+        "init_audio": {
+            "provided": bool(init_audio is not None),
+            "noise_level": (float(init_noise_level) if init_audio is not None else None),
+            "latent_stats": (
+                tensor_stats(np.asarray(init_latents)).to_dict() if init_latents is not None else None
+            ),
+        },
         "conditioning_backend": conditioning_backend,
         "noise_backend": noise_backend,
         "text_embedding_stats": _summarize_conditioning_inputs(cond_inputs),
@@ -1118,8 +1204,9 @@ def generate_diffusion_cond_mlx(
             "conditioning_torch": (t_conditioning_ready - t_model_ready) if conditioning_backend == "torch" else 0.0,
             "conditioning_mlx": (t_conditioning_ready - t_model_ready) if conditioning_backend == "mlx" else 0.0,
             "mlx_convert": t_models_converted - t_conditioning_ready,
+            "init_audio": (t_init_audio_ready - t_models_converted) if init_audio is not None else 0.0,
             "dit_quantize": t_dit_quantized - t_models_converted,
-            "sampling_mlx": t_sampling_done - t_dit_quantized,
+            "sampling_mlx": t_sampling_done - t_init_audio_ready,
             "decode_mlx": t_decode_done - t_sampling_done,
             "total": t_decode_done - t0,
         },

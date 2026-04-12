@@ -150,7 +150,6 @@ six==1.17.0
 smmap==5.0.2
 soundfile==0.13.1
 soxr==1.0.0
--e .
 stack-data==0.6.3
 starlette==0.50.0
 sympy==1.13.1

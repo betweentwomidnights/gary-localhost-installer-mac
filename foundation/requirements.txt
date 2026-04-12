@@ -1,0 +1,17 @@
+# Foundation-1 macOS API service dependencies.
+#
+# Foundation imports stable_audio_tools via PYTHONPATH, so its venv only needs
+# the Stable Audio dependency set, not an editable install of the package
+# itself. Do not include requirements.runtime.txt here because it starts with
+# `-e .`, and `uv pip install -r` resolves that relative to Foundation's
+# directory inside the app bundle.
+
+# clip imports "from pkg_resources import packaging"; setuptools>=82 removed
+# pkg_resources, so keep setuptools on a compatible major version.
+setuptools<82
+
+# Foundation runs the MLX path locally and needs the MLX runtime in addition to
+# the locked Stable Audio dependency graph.
+mlx>=0.25.0
+
+-r ../stable-audio-tools/requirements.lock.txt

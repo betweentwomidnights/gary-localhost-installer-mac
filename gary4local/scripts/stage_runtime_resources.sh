@@ -47,6 +47,7 @@ copy_tree "${REPO_ROOT}/audiocraft-mlx" "${RUNTIME_DST}/audiocraft-mlx"
 copy_tree "${REPO_ROOT}/ace-lego" "${RUNTIME_DST}/ace-lego"
 copy_tree "${REPO_ROOT}/melodyflow" "${RUNTIME_DST}/melodyflow"
 copy_tree "${REPO_ROOT}/stable-audio-tools" "${RUNTIME_DST}/stable-audio-tools"
+copy_tree "${REPO_ROOT}/foundation" "${RUNTIME_DST}/foundation"
 
 mkdir -p "${RUNTIME_DST}/scripts"
 cp "${REPO_ROOT}/scripts/download_carey_models.sh" "${RUNTIME_DST}/scripts/download_carey_models.sh"

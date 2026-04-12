@@ -37,3 +37,9 @@ hf-screenshots/
 # Xcode local state
 **/xcuserdata/
 **/*.xcuserstate
+
+# Local build outputs
+build-artifacts/
+
+# Local prompt engine checkout for foundation randomize experiments
+foundation/RC-stable-audio-tools/

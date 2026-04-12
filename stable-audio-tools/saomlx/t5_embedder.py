@@ -1,4 +1,4 @@
-"""T5 embedding wrapper backed by third_party/mlx-examples/t5."""
+"""T5 embedding wrapper backed by bundled MLX T5 implementations."""
 
 from __future__ import annotations
 
@@ -23,21 +23,34 @@ class SAOT5Spec:
 
 
 def _load_t5_class():
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[1]
     t5_dir = repo_root / "third_party" / "mlx-examples" / "t5"
-    if not t5_dir.exists():
-        raise FileNotFoundError(
-            f"Could not find MLX T5 implementation at {t5_dir}. "
-            "Run ./scripts/pin_deps.sh first."
-        )
+    if t5_dir.exists():
+        t5_path = str(t5_dir)
+        if t5_path not in sys.path:
+            sys.path.insert(0, t5_path)
 
-    t5_path = str(t5_dir)
-    if t5_path not in sys.path:
-        sys.path.insert(0, t5_path)
+        from t5 import T5  # type: ignore
 
-    from t5 import T5  # type: ignore
+        return T5
 
-    return T5
+    # Gary's packaged macOS runtime already bundles the MLX T5 implementation
+    # under audiocraft-mlx, so fall back to that tree when the pinned
+    # third_party checkout is absent.
+    audiocraft_root = repo_root.parent / "audiocraft-mlx"
+    if audiocraft_root.exists():
+        audiocraft_path = str(audiocraft_root)
+        if audiocraft_path not in sys.path:
+            sys.path.insert(0, audiocraft_path)
+
+        from audiocraft.mlx_continuation.t5 import T5  # type: ignore
+
+        return T5
+
+    raise FileNotFoundError(
+        "Could not find an MLX T5 implementation. "
+        f"Tried {t5_dir} and {audiocraft_root / 'audiocraft' / 'mlx_continuation' / 't5.py'}."
+    )
 
 
 class T5Embedder:
