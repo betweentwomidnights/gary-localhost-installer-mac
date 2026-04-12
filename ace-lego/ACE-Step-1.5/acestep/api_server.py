@@ -3277,13 +3277,26 @@ def create_app() -> FastAPI:
     )
 
     @app.post("/v1/load")
-    async def load_model(_: None = Depends(verify_api_key)):
-        """Load the DiT model onto the GPU. No-op if already loaded.
-        Used by the T4 wrapper to load on demand before generation."""
+    async def load_model(
+        config_path: Optional[str] = Query(None, description="Override config to load (e.g. acestep-v15-turbo)"),
+        _: None = Depends(verify_api_key),
+    ):
+        """Load the DiT model onto the GPU. No-op if already loaded with the
+        same config.  Pass ``?config_path=acestep-v15-turbo`` to switch variants.
+        Used by the carey wrapper to swap between base and turbo on demand."""
         handler: AceStepHandler = app.state.handler
+
+        # If a specific config was requested, check if we need to switch.
+        if config_path and getattr(app.state, "_initialized", False):
+            current_config = getattr(app.state, "_loaded_config_path", None)
+            if current_config == config_path:
+                return _wrap_response({"status": "already_loaded", "model": config_path})
+            # Different config requested — force a hard unload first so we reload below.
+            await unload_model(mode="hard")
+
         if getattr(app.state, "_initialized", False):
             return _wrap_response({"status": "already_loaded"})
-        if getattr(app.state, "_soft_unloaded", False):
+        if getattr(app.state, "_soft_unloaded", False) and not config_path:
             has_warm_state = (
                 handler.model is not None
                 and handler.vae is not None
@@ -3297,7 +3310,8 @@ def create_app() -> FastAPI:
                 return _wrap_response(
                     {
                         "status": "loaded_warm",
-                        "model": os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-base"),
+                        "model": getattr(app.state, "_loaded_config_path", None)
+                            or os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-base"),
                     }
                 )
             app.state._soft_unloaded = False
@@ -3318,6 +3332,13 @@ def create_app() -> FastAPI:
                 "offload_dit_to_cpu": _env_bool("ACESTEP_OFFLOAD_DIT_TO_CPU", False),
                 "quantization": os.getenv("ACESTEP_QUANTIZATION"),
             }
+        else:
+            params = dict(params)
+
+        # Apply config_path override from query parameter
+        if config_path:
+            params["config_path"] = config_path
+
         status_msg, ok = handler.initialize_service(**{
             k: v for k, v in params.items()
             if k in ("project_root", "config_path", "device", "use_flash_attention",
@@ -3327,6 +3348,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=f"Model load failed: {status_msg}")
         app.state._initialized = True
         app.state._soft_unloaded = False
+        app.state._loaded_config_path = params.get("config_path")
         return _wrap_response({"status": "loaded", "model": params.get("config_path")})
 
     @app.post("/v1/unload")

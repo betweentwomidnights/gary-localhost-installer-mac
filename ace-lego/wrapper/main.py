@@ -20,7 +20,7 @@ Environment variables:
   ACESTEP_URL               URL of ACE-Step api_server       (auto-set by backend mode)
   ACESTEP_MANAGE_LIFECYCLE  "true"/"false" load/unload mgmt  (default: true if local)
   QUEUE_URL                 URL of gpu-queue-service          (default http://gpu-queue:8085)
-  WRAPPER_PORT              Port this service listens on      (default 8002)
+  WRAPPER_PORT              Port this service listens on      (default 8003)
   ACESTEP_MAX_CONCURRENT    Max simultaneous generations      (default 1)
 """
 
@@ -63,15 +63,31 @@ else:
 
 MANAGE_MODEL_LIFECYCLE = _default_lifecycle.lower() == "true"
 
+# Model variant configs for turbo/base switching
+DEFAULT_STARTUP_CONFIG = (os.getenv("ACESTEP_CONFIG_PATH") or "acestep-v15-base").strip()
+ACESTEP_BASE_CONFIG = (os.getenv("ACESTEP_BASE_CONFIG") or DEFAULT_STARTUP_CONFIG).strip()
+ACESTEP_TURBO_CONFIG = (os.getenv("ACESTEP_TURBO_CONFIG") or "acestep-v15-turbo").strip()
+
+# Track whether the backend starts with a model already loaded.
+# When ACESTEP_INIT_LLM is "false" or ACESTEP_NO_INIT is set, the backend
+# starts empty and the wrapper must explicitly /v1/load before the first job.
+_backend_starts_loaded = os.getenv("ACESTEP_INIT_LLM", "true").strip().lower() not in {"false", "0", "no"}
+_current_model: Optional[str] = DEFAULT_STARTUP_CONFIG if _backend_starts_loaded else None
+
 QUEUE_URL = os.getenv("QUEUE_URL", "http://gpu-queue:8085").rstrip("/")
-WRAPPER_PORT = int(os.getenv("WRAPPER_PORT", "8002"))
+WRAPPER_PORT = int(os.getenv("WRAPPER_PORT", "8003"))
 MAX_CONCURRENT = int(os.getenv("ACESTEP_MAX_CONCURRENT", "1"))
+EFFECTIVE_MAX_CONCURRENT = 1 if MANAGE_MODEL_LIFECYCLE else MAX_CONCURRENT
 
 # Generation constants
 INFERENCE_STEPS = 50
 POLL_INTERVAL = 1.5
-GENERATION_TIMEOUT = 600
+GENERATION_TIMEOUT = int(os.getenv("CAREY_GENERATION_TIMEOUT", "600"))
 JOB_TTL = 3600
+
+# Cover mode uses turbo model with locked inference params
+COVER_INFERENCE_STEPS = 8
+COVER_GUIDANCE_SCALE = 1.0
 
 # Default captions per track type (lego mode only)
 TRACK_CAPTIONS = {
@@ -186,8 +202,8 @@ class CoverRequest(BaseModel):
     key_scale: str = Field("", description="Optional key/scale e.g. 'F minor', 'C major'")
     cover_noise_strength: float = Field(0.2, description="0=pure noise, 1=closest to source. Recommended 0.2")
     audio_cover_strength: float = Field(0.3, description="Fraction of steps using semantic codes. 0.3 instrumental, 0.5-0.7 vocals")
-    guidance_scale: float = Field(7.0, description="CFG scale. 7-9 recommended")
-    inference_steps: int = Field(50, description="Diffusion steps. 50 default, 32-100 range")
+    guidance_scale: float = Field(1.0, description="Cover mode is locked to CFG 1.0 for turbo generation")
+    inference_steps: int = Field(8, description="Cover mode is locked to 8 diffusion steps for turbo generation")
     use_src_as_ref: bool = Field(False, description="Pass source as ref_audio for subtler transformation")
     time_signature: str = Field("4", description="Time signature numerator")
     batch_size: int = Field(1, description="Number of candidates")
@@ -211,7 +227,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def _init():
     global _generation_semaphore
-    _generation_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+    _generation_semaphore = asyncio.Semaphore(EFFECTIVE_MAX_CONCURRENT)
 
 
 # ---------------------------------------------------------------------------
@@ -366,17 +382,69 @@ async def _release_gpu_token(client: httpx.AsyncClient, session_id: str) -> None
         pass
 
 
-async def _load_model(client: httpx.AsyncClient) -> None:
-    resp = await client.post(f"{ACESTEP_URL}/v1/load", timeout=120)
+async def _load_model(client: httpx.AsyncClient, config_path: str) -> str:
+    global _current_model
+    resp = await client.post(
+        f"{ACESTEP_URL}/v1/load",
+        params={"config_path": config_path},
+        timeout=180,
+    )
     if resp.status_code != 200:
-        raise RuntimeError(f"ACE-Step /v1/load failed: {resp.text}")
+        raise RuntimeError(f"ACE-Step /v1/load failed for {config_path}: {resp.text}")
+    body = resp.json()
+    loaded = ((body.get("data") or {}).get("model") or config_path).strip()
+    _current_model = loaded
+    return loaded
 
 
 async def _unload_model(client: httpx.AsyncClient) -> None:
-    try:
-        await client.post(f"{ACESTEP_URL}/v1/unload", timeout=30)
-    except Exception:
-        pass
+    global _current_model
+    resp = await client.post(f"{ACESTEP_URL}/v1/unload", timeout=60)
+    _current_model = None
+    if resp.status_code != 200:
+        raise RuntimeError(f"ACE-Step /v1/unload failed: {resp.text}")
+
+
+def _required_config_for_task(task_type: str) -> str:
+    """Return the model config required for a given task type.
+    Cover mode uses turbo; lego and complete use base."""
+    if task_type == "cover":
+        return ACESTEP_TURBO_CONFIG
+    return ACESTEP_BASE_CONFIG
+
+
+def _effective_guidance_scale(task_type: str, requested: float) -> float:
+    if task_type == "cover":
+        return COVER_GUIDANCE_SCALE
+    return requested
+
+
+def _effective_inference_steps(task_type: str, requested: int) -> int:
+    if task_type == "cover":
+        return COVER_INFERENCE_STEPS
+    return requested
+
+
+async def _ensure_required_model(client: httpx.AsyncClient, job: Job) -> None:
+    """Switch between turbo and base models if needed."""
+    global _current_model
+
+    if not MANAGE_MODEL_LIFECYCLE:
+        return
+
+    required = _required_config_for_task(job.task_type)
+    if _current_model == required:
+        return
+
+    job.status = JobStatus.LOADING
+    job.progress = max(job.progress, 3)
+    job.progress_text = f"loading {required}..."
+
+    if _current_model is not None:
+        await _unload_model(client)
+        _current_model = None
+
+    _current_model = await _load_model(client, required)
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +466,9 @@ def _build_form_data(job: Job, req, send_path: str) -> dict:
         effective_caption = req.caption.strip()
         audio_duration = str(req.audio_duration)
 
+    effective_guidance = _effective_guidance_scale(job.task_type, req.guidance_scale)
+    effective_steps = _effective_inference_steps(job.task_type, req.inference_steps)
+
     data = {
         "task_type":        job.task_type,
         "caption":          effective_caption,
@@ -405,7 +476,7 @@ def _build_form_data(job: Job, req, send_path: str) -> dict:
         "language":         req.language,
         "bpm":              str(req.bpm),
         "time_signature":   req.time_signature,
-        "guidance_scale":   str(req.guidance_scale),
+        "guidance_scale":   str(effective_guidance),
         "thinking":         "false",
         "use_cot_caption":  "false",
         "use_cot_language": "false",
@@ -414,21 +485,19 @@ def _build_form_data(job: Job, req, send_path: str) -> dict:
         "audio_format":     req.audio_format,
     }
 
-    # Lego needs track_name and explicit repainting params
-    # Complete and cover let the backend handle repainting internally
     if job.task_type == "lego":
         data["track_name"] = req.track_name
         data["repainting_start"] = "0.0"
         data["repainting_end"] = "-1"
-        data["inference_steps"] = str(req.inference_steps)
+        data["inference_steps"] = str(effective_steps)
 
     elif job.task_type == "cover":
         data["cover_noise_strength"] = str(req.cover_noise_strength)
         data["audio_cover_strength"] = str(req.audio_cover_strength)
-        data["inference_steps"] = str(req.inference_steps)
+        data["inference_steps"] = str(effective_steps)
 
     else:  # complete
-        data["inference_steps"] = str(req.inference_steps)
+        data["inference_steps"] = str(effective_steps)
 
     # key_scale for cover and complete (optional, user-provided)
     if hasattr(req, 'key_scale') and req.key_scale.strip():
@@ -479,16 +548,16 @@ async def _run_generation(job: Job, req):
                 # --- GPU queue + model load (local mode) ---
                 use_gpu_queue = MANAGE_MODEL_LIFECYCLE and ACESTEP_BACKEND == "spark"
                 if MANAGE_MODEL_LIFECYCLE:
-                    job.status = JobStatus.LOADING
-                    job.progress_text = "loading model..."
                     if use_gpu_queue:
+                        job.status = JobStatus.LOADING
+                        job.progress_text = "acquiring gpu..."
                         ok = await _acquire_gpu_token(client, session_id)
                         if not ok:
                             raise RuntimeError("GPU queue unavailable")
 
                 try:
                     if MANAGE_MODEL_LIFECYCLE:
-                        await _load_model(client)
+                        await _ensure_required_model(client, job)
 
                     # --- Submit to ace-step ---
                     job.status = JobStatus.SUBMITTING
@@ -532,7 +601,10 @@ async def _run_generation(job: Job, req):
                     # For time-based progress estimation when ace-step
                     # doesn't report steps (e.g. cover mode)
                     gen_start_time = time.time()
-                    inference_steps = getattr(req, 'inference_steps', INFERENCE_STEPS)
+                    inference_steps = _effective_inference_steps(
+                        job.task_type,
+                        getattr(req, 'inference_steps', INFERENCE_STEPS),
+                    )
                     est_seconds_per_step = 0.35  # rough baseline
 
                     deadline = time.time() + GENERATION_TIMEOUT
@@ -684,10 +756,13 @@ async def _run_generation(job: Job, req):
                     job.progress_text = "complete"
 
                 finally:
-                    if MANAGE_MODEL_LIFECYCLE:
+                    # On localhost with lifecycle management, keep the model
+                    # loaded between jobs — _ensure_required_model handles
+                    # switching when the next task needs a different variant.
+                    # Only release GPU queue tokens (Spark mode).
+                    if MANAGE_MODEL_LIFECYCLE and use_gpu_queue:
                         await _unload_model(client)
-                        if use_gpu_queue:
-                            await _release_gpu_token(client, session_id)
+                        await _release_gpu_token(client, session_id)
 
         except Exception as e:
             job.status = JobStatus.FAILED
@@ -957,9 +1032,13 @@ async def health():
         "backend": ACESTEP_BACKEND,
         "acestep_url": ACESTEP_URL,
         "acestep_status": ace_status,
-        "manage_lifecycle": MANAGE_MODEL_LIFECYCLE,
+        "manage_model_lifecycle": MANAGE_MODEL_LIFECYCLE,
+        "current_model": _current_model,
+        "base_model": ACESTEP_BASE_CONFIG,
+        "turbo_model": ACESTEP_TURBO_CONFIG,
         "active_jobs": active_jobs,
-        "max_concurrent": MAX_CONCURRENT,
+        "max_concurrent": EFFECTIVE_MAX_CONCURRENT,
+        "configured_max_concurrent": MAX_CONCURRENT,
     }
 
 
