@@ -1,5 +1,6 @@
 """Download and precheck helpers for service initialization."""
 
+import json
 import os
 from pathlib import Path
 from typing import Optional, Tuple
@@ -30,6 +31,32 @@ class InitServiceDownloadsMixin:
             absolute_path = checkpoint_path / relative_path
             if not absolute_path.is_file():
                 missing.append(relative_path)
+        return missing
+
+    @staticmethod
+    def _missing_dit_weight_files(checkpoint_path: Path, config_path: str) -> list[str]:
+        model_dir = checkpoint_path / config_path
+        single_weight_path = model_dir / "model.safetensors"
+        if single_weight_path.is_file():
+            return []
+
+        index_path = model_dir / "model.safetensors.index.json"
+        if not index_path.is_file():
+            return [f"{config_path}/model.safetensors"]
+
+        try:
+            payload = json.loads(index_path.read_text(encoding="utf-8"))
+        except Exception as error:
+            return [f"{config_path}/model.safetensors.index.json ({error})"]
+
+        weight_map = payload.get("weight_map")
+        if not isinstance(weight_map, dict) or not weight_map:
+            return [f"{config_path}/model.safetensors.index.json (missing weight_map)"]
+
+        missing = []
+        for shard_name in sorted(set(str(value) for value in weight_map.values())):
+            if not (model_dir / shard_name).is_file():
+                missing.append(f"{config_path}/{shard_name}")
         return missing
 
     def _ensure_models_present(
@@ -97,10 +124,10 @@ class InitServiceDownloadsMixin:
 
         required_dit_files = [
             f"{config_path}/config.json",
-            f"{config_path}/model.safetensors",
             f"{config_path}/silence_latent.pt",
         ]
         missing_dit_files = self._missing_required_files(checkpoint_path, required_dit_files)
+        missing_dit_files.extend(self._missing_dit_weight_files(checkpoint_path, config_path))
         if missing_dit_files:
             missing_str = ", ".join(missing_dit_files)
             return (

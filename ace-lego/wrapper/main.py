@@ -63,15 +63,38 @@ else:
 
 MANAGE_MODEL_LIFECYCLE = _default_lifecycle.lower() == "true"
 
-# Model variant configs for turbo/base switching
-DEFAULT_STARTUP_CONFIG = (os.getenv("ACESTEP_CONFIG_PATH") or "acestep-v15-base").strip()
-ACESTEP_BASE_CONFIG = (os.getenv("ACESTEP_BASE_CONFIG") or DEFAULT_STARTUP_CONFIG).strip()
-ACESTEP_TURBO_CONFIG = (os.getenv("ACESTEP_TURBO_CONFIG") or "acestep-v15-turbo").strip()
+def _env_first(*names: str, default: str = "") -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and value.strip():
+            return value.strip()
+    return default
+
+
+# Model variant configs for complete/cover lifecycle switching.
+# Accept both the original Mac env names and the Windows-style *_CONFIG_PATH
+# names so we can converge behavior without a brittle manifest migration.
+DEFAULT_STARTUP_CONFIG = _env_first("ACESTEP_CONFIG_PATH", default="acestep-v15-base")
+ACESTEP_BASE_CONFIG = _env_first(
+    "ACESTEP_BASE_CONFIG_PATH",
+    "ACESTEP_BASE_CONFIG",
+    default=DEFAULT_STARTUP_CONFIG,
+)
+ACESTEP_SFT_CONFIG = _env_first(
+    "ACESTEP_SFT_CONFIG_PATH",
+    "ACESTEP_SFT_CONFIG",
+    default="acestep-v15-sft",
+)
+ACESTEP_TURBO_CONFIG = _env_first(
+    "ACESTEP_TURBO_CONFIG_PATH",
+    "ACESTEP_TURBO_CONFIG",
+    default="acestep-v15-turbo",
+)
 
 # Track whether the backend starts with a model already loaded.
-# When ACESTEP_INIT_LLM is "false" or ACESTEP_NO_INIT is set, the backend
-# starts empty and the wrapper must explicitly /v1/load before the first job.
-_backend_starts_loaded = os.getenv("ACESTEP_INIT_LLM", "true").strip().lower() not in {"false", "0", "no"}
+# With ACESTEP_NO_INIT=true, the backend starts empty and the wrapper must
+# explicitly /v1/load before the first job.
+_backend_starts_loaded = os.getenv("ACESTEP_NO_INIT", "").strip().lower() not in {"1", "true", "yes", "on"}
 _current_model: Optional[str] = DEFAULT_STARTUP_CONFIG if _backend_starts_loaded else None
 
 QUEUE_URL = os.getenv("QUEUE_URL", "http://gpu-queue:8085").rstrip("/")
@@ -190,6 +213,13 @@ class CompleteRequest(BaseModel):
     time_signature: str = Field("4", description="Time signature numerator")
     batch_size: int = Field(1, description="Number of candidates")
     audio_format: str = Field("wav", description="Output format: wav, mp3, flac")
+    model: str = Field(
+        "turbo",
+        description=(
+            "Complete model variant for localhost. Accepted values include "
+            "'turbo', 'base', and 'sft'. Turbo is fixed to 8 steps / cfg 1.0."
+        ),
+    )
 
 
 class CoverRequest(BaseModel):
@@ -312,6 +342,15 @@ def _coerce_progress_percent(value) -> Optional[int]:
     return max(0, min(int(value_f), 99))
 
 
+def _complete_model_variant(model_name: str) -> str:
+    normalized = (model_name or "").strip().lower()
+    if "turbo" in normalized:
+        return "turbo"
+    if "sft" in normalized:
+        return "sft"
+    return "base"
+
+
 def _extract_query_result_payload(raw_payload) -> list[dict]:
     """Decode /query_result 'result' payload into a list of dicts."""
     payload = raw_payload
@@ -405,34 +444,43 @@ async def _unload_model(client: httpx.AsyncClient) -> None:
         raise RuntimeError(f"ACE-Step /v1/unload failed: {resp.text}")
 
 
-def _required_config_for_task(task_type: str) -> str:
-    """Return the model config required for a given task type.
-    Cover mode uses turbo; lego and complete use base."""
+def _required_config_for_task(task_type: str, requested_model: str = "") -> str:
+    """Return the model config required for a given task type."""
     if task_type == "cover":
         return ACESTEP_TURBO_CONFIG
+    if task_type == "complete":
+        variant = _complete_model_variant(requested_model)
+        if variant == "turbo":
+            return ACESTEP_TURBO_CONFIG
+        if variant == "sft":
+            return ACESTEP_SFT_CONFIG
     return ACESTEP_BASE_CONFIG
 
 
-def _effective_guidance_scale(task_type: str, requested: float) -> float:
+def _effective_guidance_scale(task_type: str, requested: float, requested_model: str = "") -> float:
     if task_type == "cover":
+        return COVER_GUIDANCE_SCALE
+    if task_type == "complete" and _complete_model_variant(requested_model) == "turbo":
         return COVER_GUIDANCE_SCALE
     return requested
 
 
-def _effective_inference_steps(task_type: str, requested: int) -> int:
+def _effective_inference_steps(task_type: str, requested: int, requested_model: str = "") -> int:
     if task_type == "cover":
+        return COVER_INFERENCE_STEPS
+    if task_type == "complete" and _complete_model_variant(requested_model) == "turbo":
         return COVER_INFERENCE_STEPS
     return requested
 
 
-async def _ensure_required_model(client: httpx.AsyncClient, job: Job) -> None:
-    """Switch between turbo and base models if needed."""
+async def _ensure_required_model(client: httpx.AsyncClient, job: Job, req) -> None:
+    """Switch between complete/cover model variants if needed."""
     global _current_model
 
     if not MANAGE_MODEL_LIFECYCLE:
         return
 
-    required = _required_config_for_task(job.task_type)
+    required = _required_config_for_task(job.task_type, getattr(req, "model", ""))
     if _current_model == required:
         return
 
@@ -466,11 +514,12 @@ def _build_form_data(job: Job, req, send_path: str) -> dict:
         effective_caption = req.caption.strip()
         audio_duration = str(req.audio_duration)
 
-    effective_guidance = _effective_guidance_scale(job.task_type, req.guidance_scale)
-    effective_steps = _effective_inference_steps(job.task_type, req.inference_steps)
+    requested_model = getattr(req, "model", "")
+    effective_guidance = _effective_guidance_scale(job.task_type, req.guidance_scale, requested_model)
+    effective_steps = _effective_inference_steps(job.task_type, req.inference_steps, requested_model)
 
     data = {
-        "task_type":        job.task_type,
+        "task_type":        "repaint" if job.task_type == "complete" else job.task_type,
         "caption":          effective_caption,
         "lyrics":           req.lyrics,
         "language":         req.language,
@@ -497,6 +546,8 @@ def _build_form_data(job: Job, req, send_path: str) -> dict:
         data["inference_steps"] = str(effective_steps)
 
     else:  # complete
+        data["repainting_start"] = str(job.duration)
+        data["repainting_end"] = str(req.audio_duration)
         data["inference_steps"] = str(effective_steps)
 
     # key_scale for cover and complete (optional, user-provided)
@@ -557,7 +608,7 @@ async def _run_generation(job: Job, req):
 
                 try:
                     if MANAGE_MODEL_LIFECYCLE:
-                        await _ensure_required_model(client, job)
+                        await _ensure_required_model(client, job, req)
 
                     # --- Submit to ace-step ---
                     job.status = JobStatus.SUBMITTING
@@ -604,6 +655,7 @@ async def _run_generation(job: Job, req):
                     inference_steps = _effective_inference_steps(
                         job.task_type,
                         getattr(req, 'inference_steps', INFERENCE_STEPS),
+                        getattr(req, "model", ""),
                     )
                     est_seconds_per_step = 0.35  # rough baseline
 
@@ -1035,6 +1087,7 @@ async def health():
         "manage_model_lifecycle": MANAGE_MODEL_LIFECYCLE,
         "current_model": _current_model,
         "base_model": ACESTEP_BASE_CONFIG,
+        "sft_model": ACESTEP_SFT_CONFIG,
         "turbo_model": ACESTEP_TURBO_CONFIG,
         "active_jobs": active_jobs,
         "max_concurrent": EFFECTIVE_MAX_CONCURRENT,

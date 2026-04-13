@@ -10,6 +10,10 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 ACE_ROOT="${PROJECT_ROOT}/ace-lego/ACE-Step-1.5"
 CHECKPOINTS_DIR="${ACESTEP_CHECKPOINT_DIR:-${ACE_ROOT}/checkpoints}"
 LEGACY_CHECKPOINTS_DIR="${ACE_ROOT}/checkpoints"
+ACESTEP_BASE_CONFIG_PATH="${ACESTEP_BASE_CONFIG_PATH:-acestep-v15-base}"
+ACESTEP_SFT_CONFIG_PATH="${ACESTEP_SFT_CONFIG_PATH:-acestep-v15-sft}"
+ACESTEP_TURBO_CONFIG_PATH="${ACESTEP_TURBO_CONFIG_PATH:-acestep-v15-turbo}"
+CAREY_DOWNLOAD_TARGETS="${CAREY_DOWNLOAD_TARGETS:-all}"
 HF_DOWNLOADER_PYTHON_VERSION="${G4L_HF_DOWNLOADER_PYTHON_VERSION:-3.11}"
 HF_DOWNLOADER_VENV_DIR="${G4L_HF_DOWNLOADER_VENV_DIR:-${HOME}/Library/Application Support/GaryLocalhost/venvs/hf-downloader}"
 HF_DOWNLOADER_PACKAGES=(
@@ -20,12 +24,66 @@ HF_DOWNLOADER_PACKAGES=(
 
 DOWNLOADER_PYTHON=""
 WORKER_PATH=""
+DOWNLOAD_BASE=0
+DOWNLOAD_SFT=0
+DOWNLOAD_TURBO=0
+DOWNLOAD_SHARED=0
 
 if [[ ! -d "${ACE_ROOT}" ]]; then
   echo "ACE-Step repo not found at: ${ACE_ROOT}"
   echo "Expected: ${PROJECT_ROOT}/ace-lego/ACE-Step-1.5"
   exit 1
 fi
+
+normalize_carey_download_targets() {
+  local raw_targets
+  raw_targets="$(printf '%s' "${CAREY_DOWNLOAD_TARGETS}" | tr '[:upper:]' '[:lower:]')"
+  raw_targets="${raw_targets// /}"
+
+  if [[ -z "${raw_targets}" || "${raw_targets}" == "all" ]]; then
+    DOWNLOAD_BASE=1
+    DOWNLOAD_SFT=1
+    DOWNLOAD_TURBO=1
+    DOWNLOAD_SHARED=1
+    return 0
+  fi
+
+  local token=""
+  IFS=',' read -r -a target_tokens <<< "${raw_targets}"
+  for token in "${target_tokens[@]}"; do
+    case "${token}" in
+      base|acestep-v15-base|acestep-v15-xl-base)
+        DOWNLOAD_BASE=1
+        ;;
+      sft|acestep-v15-sft|acestep-v15-xl-sft)
+        DOWNLOAD_SFT=1
+        ;;
+      turbo|acestep-v15-turbo|acestep-v15-xl-turbo)
+        DOWNLOAD_TURBO=1
+        ;;
+      shared)
+        DOWNLOAD_SHARED=1
+        ;;
+      "")
+        ;;
+      *)
+        echo "Unknown CAREY_DOWNLOAD_TARGETS entry: ${token}" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  if (( DOWNLOAD_BASE == 0 && DOWNLOAD_SFT == 0 && DOWNLOAD_TURBO == 0 && DOWNLOAD_SHARED == 0 )); then
+    echo "CAREY_DOWNLOAD_TARGETS did not select any downloads." >&2
+    return 1
+  fi
+
+  if (( DOWNLOAD_BASE == 1 || DOWNLOAD_SFT == 1 || DOWNLOAD_TURBO == 1 )); then
+    DOWNLOAD_SHARED=1
+  fi
+
+  return 0
+}
 
 resolve_uv_path() {
   local candidates=()
@@ -375,44 +433,141 @@ download_required_file() {
     "${out_name}"
 }
 
+dit_repo_for_config() {
+  local config_name="$1"
+  if [[ "${config_name}" == "acestep-v15-turbo" ]]; then
+    printf '%s\n' "ACE-Step/Ace-Step1.5"
+  else
+    printf '%s\n' "ACE-Step/${config_name}"
+  fi
+}
+
+dit_hf_path_for_file() {
+  local config_name="$1"
+  local file_name="$2"
+  if [[ "${config_name}" == "acestep-v15-turbo" ]]; then
+    printf '%s\n' "${config_name}/${file_name}"
+  else
+    printf '%s\n' "${file_name}"
+  fi
+}
+
+download_dit_model_files() {
+  local label_prefix="$1"
+  local config_name="$2"
+  local repo
+  repo="$(dit_repo_for_config "${config_name}")"
+
+  download_required_file \
+    "${label_prefix} Config" \
+    "${repo}" \
+    "$(dit_hf_path_for_file "${config_name}" "config.json")" \
+    "${config_name}/config.json"
+
+  if [[ "${config_name}" == acestep-v15-xl-* ]]; then
+    download_required_file \
+      "${label_prefix} Weights Index" \
+      "${repo}" \
+      "$(dit_hf_path_for_file "${config_name}" "model.safetensors.index.json")" \
+      "${config_name}/model.safetensors.index.json"
+
+    local shard_index=1
+    local shard_name=""
+    for shard_name in \
+      "model-00001-of-00004.safetensors" \
+      "model-00002-of-00004.safetensors" \
+      "model-00003-of-00004.safetensors" \
+      "model-00004-of-00004.safetensors"; do
+      download_required_file \
+        "${label_prefix} Weights Shard ${shard_index}" \
+        "${repo}" \
+        "$(dit_hf_path_for_file "${config_name}" "${shard_name}")" \
+        "${config_name}/${shard_name}"
+      shard_index=$((shard_index + 1))
+    done
+  else
+    download_required_file \
+      "${label_prefix} Weights" \
+      "${repo}" \
+      "$(dit_hf_path_for_file "${config_name}" "model.safetensors")" \
+      "${config_name}/model.safetensors"
+  fi
+
+  download_required_file \
+    "${label_prefix} Silence Latent" \
+    "${repo}" \
+    "$(dit_hf_path_for_file "${config_name}" "silence_latent.pt")" \
+    "${config_name}/silence_latent.pt"
+}
+
 resolve_worker_path || {
   echo "could not locate hf_predownload_worker.py under runtime/workspace repositories."
   exit 1
 }
 
+normalize_carey_download_targets || exit 1
 ensure_shared_downloader_python
 
 echo "Using ACE root: ${ACE_ROOT}"
 echo "Checkpoints dir: ${CHECKPOINTS_DIR}"
 echo "Worker: ${WORKER_PATH}"
 echo "Shared downloader python: ${DOWNLOADER_PYTHON}"
+echo "Requested Carey download targets: ${CAREY_DOWNLOAD_TARGETS}"
+echo "Configured Carey models:"
+echo "  base:  ${ACESTEP_BASE_CONFIG_PATH}"
+echo "  sft:   ${ACESTEP_SFT_CONFIG_PATH}"
+echo "  turbo: ${ACESTEP_TURBO_CONFIG_PATH}"
 echo
 
-download_required_file "DiT Base Weights" "ACE-Step/acestep-v15-base" "model.safetensors" "acestep-v15-base/model.safetensors"
-download_required_file "DiT Base Config" "ACE-Step/acestep-v15-base" "config.json" "acestep-v15-base/config.json"
-download_required_file "DiT Silence Latent" "ACE-Step/acestep-v15-base" "silence_latent.pt" "acestep-v15-base/silence_latent.pt"
+if (( DOWNLOAD_BASE == 1 )); then
+  download_dit_model_files "DiT Base" "${ACESTEP_BASE_CONFIG_PATH}"
+fi
 
-download_required_file "Qwen Weights" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/model.safetensors" "Qwen3-Embedding-0.6B/model.safetensors"
-download_required_file "Qwen Config" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/config.json" "Qwen3-Embedding-0.6B/config.json"
-download_required_file "Qwen Tokenizer" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/tokenizer.json" "Qwen3-Embedding-0.6B/tokenizer.json"
-download_required_file "Qwen Tokenizer Config" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/tokenizer_config.json" "Qwen3-Embedding-0.6B/tokenizer_config.json"
-download_required_file "Qwen Merges" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/merges.txt" "Qwen3-Embedding-0.6B/merges.txt"
-download_required_file "Qwen Vocab" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/vocab.json" "Qwen3-Embedding-0.6B/vocab.json"
-download_required_file "Qwen Special Tokens" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/special_tokens_map.json" "Qwen3-Embedding-0.6B/special_tokens_map.json"
-download_required_file "Qwen Added Tokens" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/added_tokens.json" "Qwen3-Embedding-0.6B/added_tokens.json"
-download_required_file "Qwen Chat Template" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/chat_template.jinja" "Qwen3-Embedding-0.6B/chat_template.jinja"
+if (( DOWNLOAD_SFT == 1 )); then
+  download_dit_model_files "DiT SFT" "${ACESTEP_SFT_CONFIG_PATH}"
+fi
 
-download_required_file "VAE Weights" "ACE-Step/Ace-Step1.5" "vae/diffusion_pytorch_model.safetensors" "vae/diffusion_pytorch_model.safetensors"
-download_required_file "VAE Config" "ACE-Step/Ace-Step1.5" "vae/config.json" "vae/config.json"
+if (( DOWNLOAD_TURBO == 1 )); then
+  download_dit_model_files "DiT Turbo" "${ACESTEP_TURBO_CONFIG_PATH}"
+fi
+
+if (( DOWNLOAD_SHARED == 1 )); then
+  download_required_file "Qwen Weights" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/model.safetensors" "Qwen3-Embedding-0.6B/model.safetensors"
+  download_required_file "Qwen Config" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/config.json" "Qwen3-Embedding-0.6B/config.json"
+  download_required_file "Qwen Tokenizer" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/tokenizer.json" "Qwen3-Embedding-0.6B/tokenizer.json"
+  download_required_file "Qwen Tokenizer Config" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/tokenizer_config.json" "Qwen3-Embedding-0.6B/tokenizer_config.json"
+  download_required_file "Qwen Merges" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/merges.txt" "Qwen3-Embedding-0.6B/merges.txt"
+  download_required_file "Qwen Vocab" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/vocab.json" "Qwen3-Embedding-0.6B/vocab.json"
+  download_required_file "Qwen Special Tokens" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/special_tokens_map.json" "Qwen3-Embedding-0.6B/special_tokens_map.json"
+  download_required_file "Qwen Added Tokens" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/added_tokens.json" "Qwen3-Embedding-0.6B/added_tokens.json"
+  download_required_file "Qwen Chat Template" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/chat_template.jinja" "Qwen3-Embedding-0.6B/chat_template.jinja"
+
+  download_required_file "VAE Weights" "ACE-Step/Ace-Step1.5" "vae/diffusion_pytorch_model.safetensors" "vae/diffusion_pytorch_model.safetensors"
+  download_required_file "VAE Config" "ACE-Step/Ace-Step1.5" "vae/config.json" "vae/config.json"
+fi
 
 echo
 echo "All required Carey model files are present."
 echo "Quick check:"
-ls -lh \
-  "${CHECKPOINTS_DIR}/acestep-v15-base/model.safetensors" \
-  "${CHECKPOINTS_DIR}/acestep-v15-base/config.json" \
-  "${CHECKPOINTS_DIR}/acestep-v15-base/silence_latent.pt" \
-  "${CHECKPOINTS_DIR}/Qwen3-Embedding-0.6B/model.safetensors" \
-  "${CHECKPOINTS_DIR}/Qwen3-Embedding-0.6B/config.json" \
-  "${CHECKPOINTS_DIR}/Qwen3-Embedding-0.6B/tokenizer.json" \
-  "${CHECKPOINTS_DIR}/vae/diffusion_pytorch_model.safetensors"
+quick_check_paths=()
+if (( DOWNLOAD_BASE == 1 )); then
+  quick_check_paths+=("${CHECKPOINTS_DIR}/${ACESTEP_BASE_CONFIG_PATH}/config.json")
+fi
+if (( DOWNLOAD_SFT == 1 )); then
+  quick_check_paths+=("${CHECKPOINTS_DIR}/${ACESTEP_SFT_CONFIG_PATH}/config.json")
+fi
+if (( DOWNLOAD_TURBO == 1 )); then
+  quick_check_paths+=("${CHECKPOINTS_DIR}/${ACESTEP_TURBO_CONFIG_PATH}/config.json")
+fi
+if (( DOWNLOAD_SHARED == 1 )); then
+  quick_check_paths+=(
+    "${CHECKPOINTS_DIR}/Qwen3-Embedding-0.6B/model.safetensors"
+    "${CHECKPOINTS_DIR}/Qwen3-Embedding-0.6B/config.json"
+    "${CHECKPOINTS_DIR}/Qwen3-Embedding-0.6B/tokenizer.json"
+    "${CHECKPOINTS_DIR}/vae/diffusion_pytorch_model.safetensors"
+  )
+fi
+
+if (( ${#quick_check_paths[@]} > 0 )); then
+  ls -lh "${quick_check_paths[@]}"
+fi

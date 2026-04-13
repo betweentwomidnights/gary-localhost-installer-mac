@@ -1880,11 +1880,7 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
 
         noise = self.prepare_noise(context_latents, seed)
         bsz, device, dtype = context_latents.shape[0], context_latents.device, context_latents.dtype
-        is_mps_device = hasattr(device, "type") and device.type == "mps"
-        use_decoder_cache = bool(use_cache and not is_mps_device)
-        if use_cache and is_mps_device:
-            logger.info("[generate_audio] Disabling decoder KV cache on MPS for stability.")
-        past_key_values = EncoderDecoderCache(DynamicCache(), DynamicCache()) if use_decoder_cache else None
+        past_key_values = EncoderDecoderCache(DynamicCache(), DynamicCache())
         momentum_buffer = MomentumBuffer()
         
         # Cover noise initialization: blend noise with src_latents
@@ -1936,7 +1932,7 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
                     encoder_hidden_states = encoder_hidden_states_non_cover
                     encoder_attention_mask = encoder_attention_mask_non_cover
                     context_latents = context_latents_non_cover
-                    past_key_values = EncoderDecoderCache(DynamicCache(), DynamicCache()) if use_decoder_cache else None
+                    past_key_values = EncoderDecoderCache(DynamicCache(), DynamicCache())
                 
                 x = torch.cat([xt, xt], dim=0) if do_cfg_guidance else xt
                 t_curr_tensor = t_curr * torch.ones((x.shape[0],), device=device, dtype=dtype)
@@ -1948,13 +1944,12 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
                     encoder_hidden_states=encoder_hidden_states,
                     encoder_attention_mask=encoder_attention_mask,
                     context_latents=context_latents,
-                    use_cache=use_decoder_cache,
+                    use_cache=True,
                     past_key_values=past_key_values,
                 )
                 
                 vt = decoder_outputs[0]
-                if use_decoder_cache:
-                    past_key_values = decoder_outputs[1]
+                past_key_values = decoder_outputs[1]
                 apply_cfg_guidance = t_curr >= cfg_interval_start and t_curr <= cfg_interval_end
                 if do_cfg_guidance:
                     pred_cond, pred_null_cond = vt.chunk(2)

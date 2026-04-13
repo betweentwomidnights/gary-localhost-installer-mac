@@ -64,6 +64,7 @@ final class ServiceManager: ObservableObject {
     private var stableAudioBackendEngine = "mps"
     private var melodyFlowBackendEngine = "mps"
     private var careyBackendEngine = "mlx"
+    private var careyUseXlModels = false
     private var processes: [String: Process] = [:]
     private var outputPipes: [String: Pipe] = [:]
     private var logHandles: [String: FileHandle] = [:]
@@ -105,6 +106,17 @@ final class ServiceManager: ObservableObject {
         let normalized = Self.normalizeCareyBackendEngine(backend)
         guard careyBackendEngine != normalized else { return }
         careyBackendEngine = normalized
+
+        guard restartIfRunning else { return }
+        guard let runtime = services.first(where: { $0.id == "carey" }) else { return }
+        if runtime.processState == .running || runtime.processState == .starting {
+            restart(serviceID: "carey")
+        }
+    }
+
+    func setCareyUseXlModels(_ enabled: Bool, restartIfRunning: Bool) {
+        guard careyUseXlModels != enabled else { return }
+        careyUseXlModels = enabled
 
         guard restartIfRunning else { return }
         guard let runtime = services.first(where: { $0.id == "carey" }) else { return }
@@ -1370,8 +1382,17 @@ final class ServiceManager: ObservableObject {
             env["MELODYFLOW_REQUIRE_MPS"] = melodyFlowBackendEngine == "mps" ? "1" : "0"
         } else if service.id == "carey" {
             let useMlx = careyBackendEngine == "mlx"
+            let baseConfig = careyUseXlModels ? "acestep-v15-xl-base" : "acestep-v15-base"
+            let sftConfig = careyUseXlModels ? "acestep-v15-xl-sft" : "acestep-v15-sft"
+            let turboConfig = careyUseXlModels ? "acestep-v15-xl-turbo" : "acestep-v15-turbo"
+            env["ACESTEP_FORCE_TORCH_MPS"] = useMlx ? "0" : "1"
             env["ACESTEP_USE_MLX_DIT"] = useMlx ? "1" : "0"
             env["ACESTEP_USE_MLX_VAE"] = useMlx ? "1" : "0"
+            env["ACESTEP_NO_INIT"] = "true"
+            env["ACESTEP_CONFIG_PATH"] = baseConfig
+            env["ACESTEP_BASE_CONFIG_PATH"] = baseConfig
+            env["ACESTEP_SFT_CONFIG_PATH"] = sftConfig
+            env["ACESTEP_TURBO_CONFIG_PATH"] = turboConfig
         }
         return env
     }

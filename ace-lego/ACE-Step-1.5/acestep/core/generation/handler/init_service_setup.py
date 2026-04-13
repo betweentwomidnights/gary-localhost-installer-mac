@@ -12,6 +12,14 @@ from acestep import gpu_config
 class InitServiceSetupMixin:
     """Device/runtime normalization and status helpers."""
 
+    @staticmethod
+    def _env_bool_flag(name: str, default: bool) -> bool:
+        """Parse a conventional boolean environment flag."""
+        value = os.environ.get(name)
+        if value is None:
+            return default
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
     def _resolve_initialize_device(self, requested_device: str) -> str:
         """Resolve a concrete runtime device, applying backend fallback rules."""
         device = requested_device
@@ -81,6 +89,32 @@ class InitServiceSetupMixin:
                 normalized_quantization = None
 
         return normalized_compile, normalized_quantization, mlx_compile_requested
+
+    def _resolve_torch_runtime_device(
+        self,
+        *,
+        requested_device: str,
+        use_mlx_dit: bool,
+    ) -> str:
+        """Choose the PyTorch device used for non-MLX components.
+
+        When native MLX DiT/VAE backends are enabled on Apple Silicon, keeping the
+        PyTorch DiT/VAE/text-encoder stack on MPS duplicates large model residency
+        and defeats the point of the MLX path. In that mode we keep the PyTorch
+        components on CPU and let MLX own accelerator memory.
+        """
+        use_mlx_vae = self._env_bool_flag("ACESTEP_USE_MLX_VAE", True)
+        effective_use_mlx_dit = self._env_bool_flag("ACESTEP_USE_MLX_DIT", use_mlx_dit)
+        mlx_requested = effective_use_mlx_dit or use_mlx_vae
+
+        if requested_device == "mps" and mlx_requested:
+            logger.info(
+                "[initialize_service] MLX backend requested on Apple Silicon; "
+                "loading PyTorch DiT/VAE/text encoder on CPU to avoid duplicate MPS residency."
+            )
+            return "cpu"
+
+        return requested_device
 
     @staticmethod
     def _ensure_len_for_compile(model: Any, method_name: str) -> None:

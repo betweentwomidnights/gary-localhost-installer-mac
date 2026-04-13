@@ -55,6 +55,7 @@ class ConditioningBatchMixin:
             consumed by ``preprocess_batch`` and downstream generation.
         """
         batch_size = len(captions)
+        keep_raw_audio_on_cpu = bool(getattr(self, "use_mlx_vae", False) and getattr(self, "mlx_vae", None) is not None)
         audio_code_hints = self._normalize_audio_code_hints(audio_code_hints, batch_size)
 
         if refer_audios is None:
@@ -62,9 +63,12 @@ class ConditioningBatchMixin:
         for ii, refer_audio_list in enumerate(refer_audios):
             if isinstance(refer_audio_list, list):
                 for idx, _ in enumerate(refer_audio_list):
-                    refer_audio_list[idx] = refer_audio_list[idx].to(self.device).to(self._get_vae_dtype())
+                    if keep_raw_audio_on_cpu:
+                        refer_audio_list[idx] = refer_audio_list[idx].to("cpu")
+                    else:
+                        refer_audio_list[idx] = refer_audio_list[idx].to(self.device).to(self._get_vae_dtype())
             elif isinstance(refer_audio_list, torch.Tensor):
-                refer_audios[ii] = refer_audios[ii].to(self.device)
+                refer_audios[ii] = refer_audios[ii].to("cpu" if keep_raw_audio_on_cpu else self.device)
 
         if vocal_languages is None:
             vocal_languages = self._create_fallback_vocal_languages(batch_size)
@@ -110,7 +114,7 @@ class ConditioningBatchMixin:
 
         batch = {
             "keys": keys,
-            "target_wavs": target_wavs.to(self.device),
+            "target_wavs": target_wavs if keep_raw_audio_on_cpu else target_wavs.to(self.device),
             "refer_audioss": refer_audios,
             "wav_lengths": wav_lengths.to(self.device),
             "captions": captions,
@@ -134,6 +138,8 @@ class ConditioningBatchMixin:
         }
         for k, v in batch.items():
             if isinstance(v, torch.Tensor):
+                if keep_raw_audio_on_cpu and k == "target_wavs":
+                    continue
                 batch[k] = v.to(self.device)
                 if torch.is_floating_point(batch[k]):
                     batch[k] = batch[k].to(self.dtype)

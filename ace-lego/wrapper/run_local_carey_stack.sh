@@ -17,13 +17,20 @@ export WRAPPER_PORT="${WRAPPER_PORT:-8003}"
 # Carey performance defaults:
 # - Prefer native MLX DiT/VAE by default for Apple Silicon throughput.
 # - Keep an explicit opt-out for torch+MPS compatibility checks.
+# - Respect caller-provided ACESTEP_USE_MLX_* settings from the control center.
 # - Use FP16 MLX VAE by default for faster encode/decode.
-if [[ "${ACESTEP_FORCE_TORCH_MPS:-0}" == "1" ]]; then
+if [[ -n "${ACESTEP_USE_MLX_DIT:-}" || -n "${ACESTEP_USE_MLX_VAE:-}" ]]; then
+  export ACESTEP_USE_MLX_DIT="${ACESTEP_USE_MLX_DIT:-1}"
+  export ACESTEP_USE_MLX_VAE="${ACESTEP_USE_MLX_VAE:-1}"
+elif [[ "${ACESTEP_FORCE_TORCH_MPS:-0}" == "1" ]]; then
   export ACESTEP_USE_MLX_DIT=0
   export ACESTEP_USE_MLX_VAE=0
 else
   export ACESTEP_USE_MLX_DIT=1
   export ACESTEP_USE_MLX_VAE=1
+fi
+
+if [[ "${ACESTEP_USE_MLX_VAE}" == "1" ]]; then
   export ACESTEP_MLX_VAE_FP16="${ACESTEP_MLX_VAE_FP16:-1}"
 fi
 

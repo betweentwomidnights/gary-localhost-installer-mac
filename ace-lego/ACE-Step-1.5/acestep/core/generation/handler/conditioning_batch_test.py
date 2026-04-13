@@ -15,6 +15,8 @@ class _Host(ConditioningBatchMixin):
         self.device = "cpu"
         self.dtype = torch.float32
         self.sample_rate = 48000
+        self.use_mlx_vae = False
+        self.mlx_vae = None
 
     def _normalize_audio_code_hints(self, audio_code_hints, batch_size: int) -> List[Optional[str]]:
         if audio_code_hints is None:
@@ -141,6 +143,29 @@ class ConditioningBatchMixinTests(unittest.TestCase):
         self.assertIsNotNone(batch["non_cover_text_input_ids"])
         self.assertIsNotNone(batch["non_cover_text_attention_masks"])
         self.assertIsNotNone(batch["precomputed_lm_hints_25Hz"])
+
+    def test_prepare_batch_keeps_raw_audio_on_cpu_when_mlx_vae_is_active(self):
+        """Raw target/reference audio should stay off torch-device staging under MLX VAE."""
+        host = _Host()
+        host.device = "meta"
+        host.use_mlx_vae = True
+        host.mlx_vae = object()
+
+        batch = host._prepare_batch(
+            captions=["c1"],
+            lyrics=["l1"],
+            keys=["k1"],
+            target_wavs=torch.zeros(1, 2, 96000),
+            refer_audios=[[torch.zeros(2, 96000)]],
+            metas=["m1"],
+            vocal_languages=["en"],
+            instructions=["i1"],
+            audio_code_hints=[None],
+            audio_cover_strength=1.0,
+        )
+
+        self.assertEqual(batch["target_wavs"].device.type, "cpu")
+        self.assertEqual(batch["refer_audioss"][0][0].device.type, "cpu")
 
 
 if __name__ == "__main__":

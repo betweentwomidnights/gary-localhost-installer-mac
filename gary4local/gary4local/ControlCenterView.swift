@@ -488,6 +488,25 @@ struct ControlCenterView: View {
                 .foregroundStyle(.secondary)
             }
 
+            VStack(alignment: .leading, spacing: 6) {
+                Text("model family")
+                    .font(.subheadline)
+                Toggle(
+                    "use xl models",
+                    isOn: Binding(
+                        get: { viewModel.careyUseXlModels },
+                        set: { viewModel.setCareyUseXlModels($0) }
+                    )
+                )
+                Text(
+                    "switches carey between regular acestep-v15-base/sft/turbo and "
+                    + "xl-base/xl-sft/xl-turbo. xl can be tighter on memory and changing "
+                    + "this restarts carey if it is already running."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
             if !viewModel.careyBackendStatus.isEmpty {
                 Text(viewModel.careyBackendStatus)
                     .font(.caption)
@@ -1025,10 +1044,13 @@ private struct ModelDownloadSheet: View {
     private var careyPredownloadContent: some View {
         Text("pre-download carey lego dependencies for offline use in gary4juce.")
             .font(.subheadline)
-        Text("carey uses ace-step lego mode with `acestep_init_llm=false` and needs three component bundles.")
+        Text("carey uses ace-step lego mode with `acestep_init_llm=false` and needs the shared qwen/vae assets plus base, sft, and turbo checkpoints for the selected family.")
             .font(.caption)
             .foregroundStyle(.secondary)
-        Text("for runtime behavior, start carey once and keep it loaded while generating.")
+        Text("service startup is lazy. use this sheet to pre-download the selected regular or xl model family before generating.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        Text("downloading any one of base, sft, or turbo also pulls in the shared qwen + vae assets.")
             .font(.caption)
             .foregroundStyle(.secondary)
 
@@ -1039,7 +1061,7 @@ private struct ModelDownloadSheet: View {
         }
 
         HStack(spacing: 8) {
-            Button("download required files") {
+            Button("download all") {
                 viewModel.startCareyFocusedDownload()
             }
             .disabled(
@@ -1067,7 +1089,10 @@ private struct ModelDownloadSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         } else {
-            let groupedRows = careyGroupedRequiredModels(from: viewModel.careyRequiredModels)
+            let groupedRows = careyGroupedRequiredModels(
+                from: viewModel.careyRequiredModels,
+                useXlModels: viewModel.careyUseXlModels
+            )
             let downloadedFileCount = viewModel.careyRequiredModels.filter(\.downloaded).count
             let totalFileCount = viewModel.careyRequiredModels.count
             VStack(alignment: .leading, spacing: 6) {
@@ -1091,6 +1116,21 @@ private struct ModelDownloadSheet: View {
                         )
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                        if let downloadTarget = row.downloadTarget {
+                            Button(
+                                viewModel.isCareyDownloadTargetActive(downloadTarget)
+                                    ? "downloading..."
+                                    : (row.isComplete ? "downloaded" : "download")
+                            ) {
+                                viewModel.startCareyFocusedDownload(for: downloadTarget)
+                            }
+                            .disabled(
+                                row.isComplete
+                                || !viewModel.canRunCareyFocusedDownload
+                                || viewModel.isModelDownloadInProgress
+                                || viewModel.isCareyLifecycleActionInProgress
+                            )
+                        }
                     }
                     Text(row.relativePrefix)
                         .font(.caption2.monospaced())
@@ -1158,12 +1198,18 @@ private struct ModelDownloadSheet: View {
     }
 
     private func careyGroupedRequiredModels(
-        from rows: [CareyRequiredModelStatus]
+        from rows: [CareyRequiredModelStatus],
+        useXlModels: Bool
     ) -> [CareyRequiredGroupStatus] {
-        let groups: [(id: String, label: String, prefix: String)] = [
-            ("dit_base", "DiT Base", "checkpoints/acestep-v15-base/"),
-            ("qwen_encoder", "Qwen Text Encoder", "checkpoints/Qwen3-Embedding-0.6B/"),
-            ("vae", "VAE", "checkpoints/vae/"),
+        let baseConfig = useXlModels ? "acestep-v15-xl-base" : "acestep-v15-base"
+        let sftConfig = useXlModels ? "acestep-v15-xl-sft" : "acestep-v15-sft"
+        let turboConfig = useXlModels ? "acestep-v15-xl-turbo" : "acestep-v15-turbo"
+        let groups: [(id: String, label: String, prefix: String, downloadTarget: CareyDownloadTarget?)] = [
+            ("dit_base", "DiT Base (\(baseConfig))", "checkpoints/\(baseConfig)/", CareyDownloadTarget.base),
+            ("dit_sft", "DiT SFT (\(sftConfig))", "checkpoints/\(sftConfig)/", CareyDownloadTarget.sft),
+            ("dit_turbo", "DiT Turbo (\(turboConfig))", "checkpoints/\(turboConfig)/", CareyDownloadTarget.turbo),
+            ("qwen_encoder", "Qwen Text Encoder", "checkpoints/Qwen3-Embedding-0.6B/", nil),
+            ("vae", "VAE", "checkpoints/vae/", nil),
         ]
 
         return groups.compactMap { group in
@@ -1181,6 +1227,7 @@ private struct ModelDownloadSheet: View {
                 id: group.id,
                 label: group.label,
                 relativePrefix: group.prefix,
+                downloadTarget: group.downloadTarget,
                 downloadedFileCount: downloadedFileCount,
                 totalFileCount: matched.count,
                 downloadedBytes: downloadedBytes
@@ -1219,6 +1266,7 @@ private struct CareyRequiredGroupStatus: Identifiable {
     let id: String
     let label: String
     let relativePrefix: String
+    let downloadTarget: CareyDownloadTarget?
     let downloadedFileCount: Int
     let totalFileCount: Int
     let downloadedBytes: Int64

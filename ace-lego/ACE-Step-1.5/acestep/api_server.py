@@ -90,6 +90,9 @@ MODEL_REPO_MAPPING = {
     "acestep-v15-base": "ACE-Step/acestep-v15-base",
     "acestep-v15-sft": "ACE-Step/acestep-v15-sft",
     "acestep-v15-turbo-shift3": "ACE-Step/acestep-v15-turbo-shift3",
+    "acestep-v15-xl-base": "ACE-Step/acestep-v15-xl-base",
+    "acestep-v15-xl-sft": "ACE-Step/acestep-v15-xl-sft",
+    "acestep-v15-xl-turbo": "ACE-Step/acestep-v15-xl-turbo",
 }
 
 DEFAULT_REPO_ID = "ACE-Step/Ace-Step1.5"

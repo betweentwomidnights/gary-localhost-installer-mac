@@ -23,12 +23,13 @@ class ConditioningTargetMixin:
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, torch.Tensor]:
         """Encode target audio/codes to latents and pad batch tensors."""
         self._ensure_silence_latent_on_device()
+        keep_raw_audio_on_cpu = bool(getattr(self, "use_mlx_vae", False) and getattr(self, "mlx_vae", None) is not None)
 
         with torch.inference_mode():
             target_latents_list = []
             latent_lengths = []
             target_wavs_list = [target_wavs[i].clone() for i in range(batch_size)]
-            if target_wavs.device != self.device:
+            if not keep_raw_audio_on_cpu and target_wavs.device != self.device:
                 target_wavs = target_wavs.to(self.device)
 
             with self._load_model_context("vae"):
@@ -48,7 +49,10 @@ class ConditioningTargetMixin:
                             target_wavs_list[i] = torch.zeros(2, frames_from_codes)
                             continue
 
-                    current_wav = target_wavs_list[i].to(self.device).unsqueeze(0)
+                    current_wav = target_wavs_list[i]
+                    if not keep_raw_audio_on_cpu:
+                        current_wav = current_wav.to(self.device)
+                    current_wav = current_wav.unsqueeze(0)
                     if self.is_silence(current_wav):
                         expected_latent_length = current_wav.shape[-1] // 1920
                         target_latent = self.silence_latent[0, :expected_latent_length, :]

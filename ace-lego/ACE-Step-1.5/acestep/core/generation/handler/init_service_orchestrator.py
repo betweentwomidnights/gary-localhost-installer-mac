@@ -38,7 +38,6 @@ class InitServiceOrchestratorMixin:
                 )
 
             resolved_device = self._resolve_initialize_device(device)
-            self.device = resolved_device
             self.offload_to_cpu = offload_to_cpu
             self.offload_dit_to_cpu = offload_dit_to_cpu
 
@@ -47,8 +46,13 @@ class InitServiceOrchestratorMixin:
                 compile_model=compile_model,
                 quantization=quantization,
             )
+            torch_runtime_device = self._resolve_torch_runtime_device(
+                requested_device=resolved_device,
+                use_mlx_dit=use_mlx_dit,
+            )
+            self.device = torch_runtime_device
             self.compiled = normalized_compile
-            self.dtype = torch.bfloat16 if resolved_device in ["cuda", "xpu"] else torch.float32
+            self.dtype = torch.bfloat16 if torch_runtime_device in ["cuda", "xpu"] else torch.float32
             self.quantization = normalized_quantization
             self._validate_quantization_setup(
                 quantization=self.quantization,
@@ -79,19 +83,19 @@ class InitServiceOrchestratorMixin:
             model_path = os.path.join(checkpoint_dir, config_path)
             self._load_main_model_from_checkpoint(
                 model_checkpoint_path=model_path,
-                device=resolved_device,
+                device=torch_runtime_device,
                 use_flash_attention=use_flash_attention,
                 compile_model=normalized_compile,
                 quantization=self.quantization,
             )
             vae_path = self._load_vae_model(
                 checkpoint_dir=checkpoint_dir,
-                device=resolved_device,
+                device=torch_runtime_device,
                 compile_model=normalized_compile,
             )
             text_encoder_path = self._load_text_encoder_and_tokenizer(
                 checkpoint_dir=checkpoint_dir,
-                device=resolved_device,
+                device=torch_runtime_device,
             )
 
             mlx_dit_status, mlx_vae_status = self._initialize_mlx_backends(
@@ -101,7 +105,7 @@ class InitServiceOrchestratorMixin:
             )
 
             status_msg = self._build_initialize_status_message(
-                device=resolved_device,
+                device=torch_runtime_device,
                 model_path=model_path,
                 vae_path=vae_path,
                 text_encoder_path=text_encoder_path,
@@ -118,7 +122,7 @@ class InitServiceOrchestratorMixin:
             self.last_init_params = {
                 "project_root": project_root,
                 "config_path": config_path,
-                "device": resolved_device,
+                "device": torch_runtime_device,
                 "use_flash_attention": use_flash_attention,
                 "compile_model": normalized_compile,
                 "offload_to_cpu": offload_to_cpu,

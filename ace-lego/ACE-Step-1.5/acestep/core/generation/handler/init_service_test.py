@@ -422,6 +422,58 @@ class InitServiceMixinTests(unittest.TestCase):
         ensure_models.assert_called_once()
         sync_code.assert_called_once()
 
+    def test_resolve_torch_runtime_device_prefers_cpu_when_mlx_requested_on_mps(self):
+        """It keeps PyTorch components on CPU when MLX backends are enabled on Apple Silicon."""
+        host = _Host(project_root="K:/fake_root", device="mps")
+        with patch.dict(os.environ, {"ACESTEP_USE_MLX_DIT": "1", "ACESTEP_USE_MLX_VAE": "1"}, clear=False):
+            runtime_device = host._resolve_torch_runtime_device(
+                requested_device="mps",
+                use_mlx_dit=True,
+            )
+        self.assertEqual(runtime_device, "cpu")
+
+    def test_initialize_service_loads_pytorch_stack_on_cpu_when_mlx_is_enabled_for_mps(self):
+        """It routes model, VAE, and text encoder loads to CPU under MLX mode."""
+        host = _Host(project_root="K:/fake_root", device="mps")
+        captured_devices = {}
+
+        def _fake_load_main_model(**kwargs):
+            captured_devices["model"] = kwargs["device"]
+            host.config = types.SimpleNamespace(_attn_implementation="sdpa")
+            host.model = object()
+
+        def _fake_load_vae_model(**kwargs):
+            captured_devices["vae"] = kwargs["device"]
+            return "K:/fake_root/checkpoints/vae"
+
+        def _fake_load_text_encoder(**kwargs):
+            captured_devices["text"] = kwargs["device"]
+            return "K:/fake_root/checkpoints/Qwen3-Embedding-0.6B"
+
+        with patch.dict(os.environ, {"ACESTEP_USE_MLX_DIT": "1", "ACESTEP_USE_MLX_VAE": "1"}, clear=False):
+            with patch.object(host, "_resolve_initialize_device", return_value="mps"):
+                with patch.object(host, "_ensure_models_present", return_value=None):
+                    with patch.object(host, "_sync_model_code_if_needed"):
+                        with patch.object(host, "_load_main_model_from_checkpoint", side_effect=_fake_load_main_model):
+                            with patch.object(host, "_load_vae_model", side_effect=_fake_load_vae_model):
+                                with patch.object(host, "_load_text_encoder_and_tokenizer", side_effect=_fake_load_text_encoder):
+                                    with patch.object(
+                                        host,
+                                        "_initialize_mlx_backends",
+                                        return_value=("Active (native MLX)", "Active (native MLX)"),
+                                    ):
+                                        status, ok = host.initialize_service(
+                                            project_root="K:/fake_root",
+                                            config_path="acestep-v15-xl-turbo",
+                                            device="mps",
+                                        )
+
+        self.assertTrue(ok)
+        self.assertEqual(captured_devices, {"model": "cpu", "vae": "cpu", "text": "cpu"})
+        self.assertEqual(host.device, "cpu")
+        self.assertEqual(host.last_init_params["device"], "cpu")
+        self.assertIn("Model initialized successfully on cpu", status)
+
     def test_initialize_service_returns_error_payload_when_loader_raises(self):
         """It catches init errors and returns a formatted failure message."""
         host = _Host(project_root="K:/fake_root", device="cpu")
