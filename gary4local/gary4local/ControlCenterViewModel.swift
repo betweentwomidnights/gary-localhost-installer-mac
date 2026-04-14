@@ -137,6 +137,8 @@ final class ControlCenterViewModel: ObservableObject {
     private static let melodyFlowBackendDefaultsKey = "melodyFlowBackendEngine"
     private static let careyBackendDefaultsKey = "careyBackendEngine"
     private static let careyUseXlModelsDefaultsKey = "careyUseXlModels"
+    private static let careyUseSampledMlxVaeEncodeDefaultsKey = "careyUseSampledMlxVaeEncode"
+    private static let experimentalCareyMlxVaeEncodeToggleDefaultsKey = "experimentalCareyMlxVaeEncodeToggleEnabled"
 
     @Published var manager: ServiceManager?
     @Published var startupError: String?
@@ -172,6 +174,7 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var melodyFlowBackendEngine: MelodyFlowBackendEngine = .mps
     @Published var careyBackendEngine: CareyBackendEngine = .mlx
     @Published var careyUseXlModels: Bool = false
+    @Published var careyUseSampledMlxVaeEncode: Bool = true
     @Published var melodyFlowBackendStatus: String = ""
     @Published var careyBackendStatus: String = ""
     @Published var rebuildFailureReport: RebuildFailureReport?
@@ -200,6 +203,17 @@ final class ControlCenterViewModel: ObservableObject {
     private static let careyProgressPercentRegex = try! NSRegularExpression(
         pattern: #"^[A-Za-z_]+:\s+([0-9]{1,3})%"#
     )
+
+    static let experimentalCareyMlxVaeEncodeFeatureFlagKey = "experimentalCareyMlxVaeEncodeToggleEnabled"
+
+    private static func isExperimentalCareyMlxVaeEncodeToggleEnabled() -> Bool {
+        if UserDefaults.standard.object(forKey: experimentalCareyMlxVaeEncodeToggleDefaultsKey) != nil {
+            return UserDefaults.standard.bool(forKey: experimentalCareyMlxVaeEncodeToggleDefaultsKey)
+        }
+        let environmentValue = ProcessInfo.processInfo.environment["GARY_EXPERIMENTAL_CAREY_MLX_VAE_ENCODE_TOGGLE"]
+        guard let environmentValue else { return false }
+        return ["1", "true", "yes", "on"].contains(environmentValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }
 
     private static let careySharedRequiredModelFiles: [(label: String, relativePath: String)] = [
         ("Qwen Weights", "checkpoints/Qwen3-Embedding-0.6B/model.safetensors"),
@@ -387,6 +401,13 @@ final class ControlCenterViewModel: ObservableObject {
         ) ?? CareyBackendEngine.mlx.rawValue
         careyBackendEngine = CareyBackendEngine.from(rawValue: savedCareyBackend)
         careyUseXlModels = UserDefaults.standard.bool(forKey: Self.careyUseXlModelsDefaultsKey)
+        if UserDefaults.standard.object(forKey: Self.careyUseSampledMlxVaeEncodeDefaultsKey) != nil {
+            careyUseSampledMlxVaeEncode = UserDefaults.standard.bool(
+                forKey: Self.careyUseSampledMlxVaeEncodeDefaultsKey
+            )
+        } else {
+            careyUseSampledMlxVaeEncode = true
+        }
         observeApplicationTermination()
         refreshStableAudioTokenState()
         loadManifest()
@@ -427,6 +448,10 @@ final class ControlCenterViewModel: ObservableObject {
     var canManageStableAudioPredownloads: Bool {
         guard modelDownloadServiceID == "stable_audio" else { return false }
         return canManageModelDownloads && stableAudioTokenConfigured
+    }
+
+    var showsExperimentalCareyMlxVaeEncodeToggle: Bool {
+        Self.isExperimentalCareyMlxVaeEncodeToggleEnabled()
     }
 
     var canRunCareyFocusedDownload: Bool {
@@ -516,6 +541,7 @@ final class ControlCenterViewModel: ObservableObject {
             manager.setMelodyFlowBackendEngine(melodyFlowBackendEngine.rawValue, restartIfRunning: false)
             manager.setCareyBackendEngine(careyBackendEngine.rawValue, restartIfRunning: false)
             manager.setCareyUseXlModels(careyUseXlModels, restartIfRunning: false)
+            manager.setCareyUseSampledMlxVaeEncode(careyUseSampledMlxVaeEncode, restartIfRunning: false)
             self.manager = manager
             bindManager(manager)
             startupError = nil
@@ -736,6 +762,36 @@ final class ControlCenterViewModel: ObservableObject {
             careyBackendStatus = enabled
                 ? "carey xl models enabled for the next start."
                 : "regular carey models enabled for the next start."
+        }
+    }
+
+    func setCareyUseSampledMlxVaeEncode(_ enabled: Bool) {
+        guard careyUseSampledMlxVaeEncode != enabled else { return }
+        careyUseSampledMlxVaeEncode = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.careyUseSampledMlxVaeEncodeDefaultsKey)
+        manager?.setCareyUseSampledMlxVaeEncode(enabled, restartIfRunning: true)
+
+        let usesMlxBackend = careyBackendEngine == .mlx
+        if manager?.services.first(where: { $0.id == "carey" })?.isRunning == true {
+            if usesMlxBackend {
+                careyBackendStatus = enabled
+                    ? "carey MLX VAE sampled encode enabled. service restarting..."
+                    : "carey MLX VAE mean encode enabled. service restarting..."
+            } else {
+                careyBackendStatus = enabled
+                    ? "carey sampled MLX VAE encode saved. it will apply the next time MLX backend is used."
+                    : "carey mean MLX VAE encode saved. it will apply the next time MLX backend is used."
+            }
+        } else {
+            if usesMlxBackend {
+                careyBackendStatus = enabled
+                    ? "carey MLX VAE sampled encode enabled for the next start."
+                    : "carey MLX VAE mean encode enabled for the next start."
+            } else {
+                careyBackendStatus = enabled
+                    ? "carey sampled MLX VAE encode saved for the next MLX start."
+                    : "carey mean MLX VAE encode saved for the next MLX start."
+            }
         }
     }
 

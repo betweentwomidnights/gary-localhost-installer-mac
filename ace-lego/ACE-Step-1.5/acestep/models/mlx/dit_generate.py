@@ -31,6 +31,42 @@ SHIFT_TIMESTEPS = {
 }
 
 
+def _mlx_apg_forward(
+    pred_cond,
+    pred_uncond,
+    guidance_scale: float,
+    momentum_state: Optional[Dict[str, object]] = None,
+    norm_threshold: float = 2.5,
+):
+    """Approximate the PyTorch APG guidance path in MLX.
+
+    The torch implementation projects along dim 1 and keeps a small negative
+    momentum buffer. We mirror that behavior closely enough to recover the
+    quality characteristics of the native torch path without pulling in the
+    broader upstream sampler rewrite.
+    """
+    import mlx.core as mx
+
+    diff = pred_cond - pred_uncond
+    if momentum_state is not None:
+        running_average = momentum_state.get("running_average", 0)
+        momentum = float(momentum_state.get("momentum", -0.75))
+        running_average = diff + momentum * running_average
+        momentum_state["running_average"] = running_average
+        diff = running_average
+
+    if norm_threshold > 0.0:
+        diff_norm = mx.sqrt((diff * diff).sum(axis=1, keepdims=True))
+        scale_factor = mx.minimum(mx.ones_like(diff_norm), norm_threshold / (diff_norm + 1e-8))
+        diff = diff * scale_factor
+
+    pred_cond_norm = mx.sqrt((pred_cond * pred_cond).sum(axis=1, keepdims=True))
+    pred_cond_unit = pred_cond / (pred_cond_norm + 1e-8)
+    diff_parallel = (diff * pred_cond_unit).sum(axis=1, keepdims=True) * pred_cond_unit
+    diff_orthogonal = diff - diff_parallel
+    return pred_cond + (guidance_scale - 1.0) * diff_orthogonal
+
+
 def get_timestep_schedule(
     shift: float = 3.0,
     timesteps: Optional[list] = None,
@@ -103,8 +139,13 @@ def mlx_generate_diffusion(
     shift: float = 3.0,
     timesteps: Optional[list] = None,
     is_turbo: bool = True,
+    guidance_scale: float = 1.0,
+    null_condition_emb_np: Optional[np.ndarray] = None,
+    cfg_interval_start: float = 0.0,
+    cfg_interval_end: float = 1.0,
     audio_cover_strength: float = 1.0,
     cover_noise_strength: float = 0.0,
+    use_adg: bool = False,
     encoder_hidden_states_non_cover_np: Optional[np.ndarray] = None,
     context_latents_non_cover_np: Optional[np.ndarray] = None,
     compile_model: bool = False,
@@ -128,8 +169,14 @@ def mlx_generate_diffusion(
         shift: timestep shift factor.
         timesteps: optional custom timestep list.
         is_turbo: Whether the loaded DiT config is turbo.
+        guidance_scale: CFG guidance strength (>1 enables guidance).
+        null_condition_emb_np: [1, 1, D] unconditional embedding for CFG.
+        cfg_interval_start: CFG start timestep ratio.
+        cfg_interval_end: CFG end timestep ratio.
         audio_cover_strength: cover strength (0-1).
         cover_noise_strength: cover renoise strength (0-1, 1 = closest to source).
+        use_adg: When requested, MLX falls back to plain CFG because the
+            runtime-specific ADG path is not implemented here.
         encoder_hidden_states_non_cover_np: optional [B, enc_L, D] for non-cover.
         context_latents_non_cover_np: optional [B, T, C] for non-cover.
         compile_model: If True, compile the decoder step with ``mx.compile``
@@ -157,6 +204,27 @@ def mlx_generate_diffusion(
     bsz = src_latents_shape[0]
     T = src_latents_shape[1]
     C = src_latents_shape[2]
+
+    do_cfg = guidance_scale > 1.0 and null_condition_emb_np is not None
+    if guidance_scale > 1.0 and null_condition_emb_np is None:
+        logger.warning(
+            "[MLX-DiT] guidance_scale=%.3f requested but null_condition_emb is unavailable; sampling without CFG.",
+            float(guidance_scale),
+        )
+    if use_adg and do_cfg:
+        logger.warning(
+            "[MLX-DiT] use_adg=True requested on the native MLX path; falling back to basic CFG guidance.",
+        )
+
+    if do_cfg:
+        null_cond = mx.array(null_condition_emb_np)
+        enc_hs = mx.concatenate([enc_hs, mx.broadcast_to(null_cond, enc_hs.shape)], axis=0)
+        ctx = mx.concatenate([ctx, ctx], axis=0)
+        if enc_hs_nc is not None:
+            enc_hs_nc = mx.concatenate([enc_hs_nc, mx.broadcast_to(null_cond, enc_hs_nc.shape)], axis=0)
+        if ctx_nc is not None:
+            ctx_nc = mx.concatenate([ctx_nc, ctx_nc], axis=0)
+    momentum_state: Optional[Dict[str, object]] = {"momentum": -0.75} if do_cfg and not use_adg else None
 
     # ---- Noise preparation ----
     if seed is None:
@@ -252,35 +320,59 @@ def mlx_generate_diffusion(
                 "[MLX-DiT] mx.compile() failed (%s); using uncompiled path.", exc
             )
 
-    cache = MLXCrossAttentionCache() if _compiled_step is None else None
+    cache = MLXCrossAttentionCache() if (_compiled_step is None and not do_cfg) else None
     diff_start = time.time()
+    switched_to_non_cover = False
 
     for step_idx in tqdm(range(num_steps), desc="MLX DiT diffusion", disable=disable_tqdm):
         current_t = t_schedule_list[step_idx]
         t_curr = mx.full((bsz,), current_t)
 
         # Switch to non-cover conditions when appropriate
-        if step_idx >= cover_steps and enc_hs_nc is not None:
-            enc_hs = enc_hs_nc
-            ctx = ctx_nc
+        if step_idx >= cover_steps and not switched_to_non_cover:
+            switched_to_non_cover = True
+            if enc_hs_nc is not None:
+                enc_hs = enc_hs_nc
+                ctx = ctx_nc
             if cache is not None:
                 cache = MLXCrossAttentionCache()
 
+        model_xt = mx.concatenate([xt, xt], axis=0) if do_cfg else xt
+
         if _compiled_step is not None:
-            vt = _compiled_step(xt, t_curr, t_curr, enc_hs, ctx)
+            model_t = mx.full((model_xt.shape[0],), current_t)
+            vt = _compiled_step(model_xt, model_t, model_t, enc_hs, ctx)
         else:
             vt, cache = mlx_decoder(
-                hidden_states=xt,
-                timestep=t_curr,
-                timestep_r=t_curr,
+                hidden_states=model_xt,
+                timestep=mx.full((model_xt.shape[0],), current_t),
+                timestep_r=mx.full((model_xt.shape[0],), current_t),
                 encoder_hidden_states=enc_hs,
                 context_latents=ctx,
                 cache=cache,
-                use_cache=True,
+                use_cache=cache is not None,
             )
 
         # Evaluate to ensure computation is complete before next step
         mx.eval(vt)
+
+        if do_cfg:
+            pred_cond = vt[:bsz]
+            pred_uncond = vt[bsz:]
+            apply_cfg = cfg_interval_start <= float(current_t) <= cfg_interval_end
+            if apply_cfg:
+                if use_adg:
+                    vt = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+                else:
+                    vt = _mlx_apg_forward(
+                        pred_cond,
+                        pred_uncond,
+                        guidance_scale=guidance_scale,
+                        momentum_state=momentum_state,
+                    )
+            else:
+                vt = pred_cond
+            mx.eval(vt)
 
         # Final step: compute x0
         if step_idx == num_steps - 1:

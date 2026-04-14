@@ -1,7 +1,8 @@
 """Unit tests for service-generation execution helper mixin."""
 
+import contextlib
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -90,6 +91,83 @@ class ServiceGenerateExecuteMixinTests(unittest.TestCase):
         with patch("acestep.core.generation.handler.service_generate_execute.random.randint", return_value=42):
             seed_param = host._resolve_service_seed_param(None)
         self.assertEqual(seed_param, 42)
+
+    def test_execute_service_generate_diffusion_forwards_guidance_controls_to_mlx(self):
+        """MLX execution should receive CFG-related runtime controls unchanged."""
+        host = _Host()
+        host.use_mlx_dit = True
+        host.mlx_decoder = object()
+        host._load_model_context = lambda _name: contextlib.nullcontext()
+
+        cond = (
+            torch.ones(1, 2, 4, dtype=torch.float32),
+            torch.ones(1, 2, dtype=torch.bool),
+            torch.ones(1, 4, 4, dtype=torch.float32),
+        )
+        host.model = type(
+            "FakeModel",
+            (),
+            {
+                "prepare_condition": Mock(side_effect=[cond, cond]),
+            },
+        )()
+
+        captured = {}
+
+        def _fake_mlx_run_diffusion(**kwargs):
+            captured.update(kwargs)
+            return {
+                "target_latents": torch.zeros(1, 4, 4, dtype=torch.float32),
+                "time_costs": {"diffusion_time_cost": 0.5},
+            }
+
+        host._mlx_run_diffusion = _fake_mlx_run_diffusion
+
+        payload = {
+            "spans": [("repainting", 0, 4)],
+            "src_latents": torch.zeros(1, 4, 4, dtype=torch.float32),
+            "text_hidden_states": torch.zeros(1, 2, 4, dtype=torch.float32),
+            "text_attention_mask": torch.ones(1, 2, dtype=torch.bool),
+            "lyric_hidden_states": torch.zeros(1, 2, 4, dtype=torch.float32),
+            "lyric_attention_mask": torch.ones(1, 2, dtype=torch.bool),
+            "refer_audio_acoustic_hidden_states_packed": torch.zeros(1, 2, 4, dtype=torch.float32),
+            "refer_audio_order_mask": torch.zeros(1, dtype=torch.long),
+            "chunk_mask": torch.ones(1, 4, dtype=torch.bool),
+            "is_covers": torch.tensor([True]),
+            "precomputed_lm_hints_25Hz": None,
+            "non_cover_text_hidden_states": torch.zeros(1, 2, 4, dtype=torch.float32),
+            "non_cover_text_attention_masks": torch.ones(1, 2, dtype=torch.bool),
+        }
+        generate_kwargs = {
+            "infer_steps": 12,
+            "timesteps": torch.tensor([1.0, 0.6, 0.3], dtype=torch.float32),
+            "diffusion_guidance_sale": 8.5,
+            "cfg_interval_start": 0.2,
+            "cfg_interval_end": 0.85,
+            "use_adg": True,
+        }
+
+        outputs, encoder_hidden_states, encoder_attention_mask, context_latents = host._execute_service_generate_diffusion(
+            payload=payload,
+            generate_kwargs=generate_kwargs,
+            seed_param=999,
+            infer_method="ode",
+            shift=1.5,
+            audio_cover_strength=0.5,
+            cover_noise_strength=0.25,
+        )
+
+        self.assertEqual(captured["seed"], 999)
+        self.assertEqual(captured["infer_steps"], 12)
+        self.assertEqual(captured["guidance_scale"], 8.5)
+        self.assertEqual(captured["cfg_interval_start"], 0.2)
+        self.assertEqual(captured["cfg_interval_end"], 0.85)
+        self.assertTrue(captured["use_adg"])
+        self.assertEqual(captured["timesteps"].tolist(), [1.0, 0.6, 0.3])
+        self.assertEqual(float(outputs["time_costs"]["diffusion_time_cost"]), 0.5)
+        self.assertEqual(tuple(encoder_hidden_states.shape), (1, 2, 4))
+        self.assertEqual(tuple(encoder_attention_mask.shape), (1, 2))
+        self.assertEqual(tuple(context_latents.shape), (1, 4, 4))
 
 
 if __name__ == "__main__":

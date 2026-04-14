@@ -507,6 +507,28 @@ struct ControlCenterView: View {
                 .foregroundStyle(.secondary)
             }
 
+            if viewModel.showsExperimentalCareyMlxVaeEncodeToggle {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("experimental mlx encode")
+                        .font(.subheadline)
+                    Toggle(
+                        "use sampled MLX VAE encode",
+                        isOn: Binding(
+                            get: { viewModel.careyUseSampledMlxVaeEncode },
+                            set: { viewModel.setCareyUseSampledMlxVaeEncode($0) }
+                        )
+                    )
+                    .disabled(viewModel.careyBackendEngine != .mlx)
+                    Text(
+                        "experimental. on matches upstream MLX VAE encode_and_sample behavior for "
+                        + "carey audio conditioning. off keeps the current deterministic encode_mean path. "
+                        + "this only affects the MLX backend and changing it restarts carey if it is running."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+
             if !viewModel.careyBackendStatus.isEmpty {
                 Text(viewModel.careyBackendStatus)
                     .font(.caption)

@@ -65,6 +65,7 @@ final class ServiceManager: ObservableObject {
     private var melodyFlowBackendEngine = "mps"
     private var careyBackendEngine = "mlx"
     private var careyUseXlModels = false
+    private var careyUseSampledMlxVaeEncode = true
     private var processes: [String: Process] = [:]
     private var outputPipes: [String: Pipe] = [:]
     private var logHandles: [String: FileHandle] = [:]
@@ -117,6 +118,17 @@ final class ServiceManager: ObservableObject {
     func setCareyUseXlModels(_ enabled: Bool, restartIfRunning: Bool) {
         guard careyUseXlModels != enabled else { return }
         careyUseXlModels = enabled
+
+        guard restartIfRunning else { return }
+        guard let runtime = services.first(where: { $0.id == "carey" }) else { return }
+        if runtime.processState == .running || runtime.processState == .starting {
+            restart(serviceID: "carey")
+        }
+    }
+
+    func setCareyUseSampledMlxVaeEncode(_ enabled: Bool, restartIfRunning: Bool) {
+        guard careyUseSampledMlxVaeEncode != enabled else { return }
+        careyUseSampledMlxVaeEncode = enabled
 
         guard restartIfRunning else { return }
         guard let runtime = services.first(where: { $0.id == "carey" }) else { return }
@@ -1393,6 +1405,7 @@ final class ServiceManager: ObservableObject {
             env["ACESTEP_BASE_CONFIG_PATH"] = baseConfig
             env["ACESTEP_SFT_CONFIG_PATH"] = sftConfig
             env["ACESTEP_TURBO_CONFIG_PATH"] = turboConfig
+            env["ACESTEP_MLX_VAE_ENCODE_SAMPLE"] = careyUseSampledMlxVaeEncode ? "1" : "0"
         }
         return env
     }

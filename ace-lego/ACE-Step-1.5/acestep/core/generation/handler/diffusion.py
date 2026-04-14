@@ -27,8 +27,12 @@ class DiffusionMixin:
         infer_steps: int = 8,
         shift: float = 3.0,
         timesteps=None,
+        guidance_scale: float = 1.0,
+        cfg_interval_start: float = 0.0,
+        cfg_interval_end: float = 1.0,
         audio_cover_strength: float = 1.0,
         cover_noise_strength: float = 0.0,
+        use_adg: bool = False,
         encoder_hidden_states_non_cover=None,
         encoder_attention_mask_non_cover=None,
         context_latents_non_cover=None,
@@ -47,10 +51,15 @@ class DiffusionMixin:
             src_latents: Source latent tensor used for shape and initialization.
             seed: Random seed used by MLX diffusion.
             infer_method: Diffusion method, one of ``"ode"`` or ``"sde"``.
+            infer_steps: Number of diffusion steps to run.
             shift: Timestep shift value.
             timesteps: Optional iterable or tensor-like custom timesteps.
+            guidance_scale: CFG guidance strength.
+            cfg_interval_start: CFG schedule start ratio.
+            cfg_interval_end: CFG schedule end ratio.
             audio_cover_strength: Blend factor for cover conditioning.
             cover_noise_strength: Initial-noise blend factor for cover starts.
+            use_adg: Whether adaptive diffusion guidance was requested.
             encoder_hidden_states_non_cover: Optional non-cover conditioning tensor.
             encoder_attention_mask_non_cover: Unused; accepted for API compatibility.
             context_latents_non_cover: Optional non-cover context latent tensor.
@@ -110,6 +119,11 @@ class DiffusionMixin:
             context_latents_non_cover.detach().cpu().float().numpy()
             if context_latents_non_cover is not None else None
         )
+        null_condition_emb = getattr(getattr(self, "model", None), "null_condition_emb", None)
+        null_condition_emb_np = (
+            null_condition_emb.detach().cpu().float().numpy()
+            if null_condition_emb is not None else None
+        )
 
         # Convert timesteps tensor if present
         ts_list = None
@@ -128,6 +142,14 @@ class DiffusionMixin:
             is_turbo,
             bool(ts_list),
         )
+        if guidance_scale > 1.0:
+            logger.info(
+                "[MLX-DiT] CFG requested: guidance_scale={}, cfg_interval=[{}, {}], null_condition_emb={}",
+                guidance_scale,
+                cfg_interval_start,
+                cfg_interval_end,
+                null_condition_emb_np is not None,
+            )
 
         result = mlx_generate_diffusion(
             mlx_decoder=self.mlx_decoder,
@@ -141,8 +163,13 @@ class DiffusionMixin:
             shift=shift,
             timesteps=ts_list,
             is_turbo=is_turbo,
+            guidance_scale=guidance_scale,
+            null_condition_emb_np=null_condition_emb_np,
+            cfg_interval_start=cfg_interval_start,
+            cfg_interval_end=cfg_interval_end,
             audio_cover_strength=audio_cover_strength,
             cover_noise_strength=cover_noise_strength,
+            use_adg=use_adg,
             encoder_hidden_states_non_cover_np=enc_nc_np,
             context_latents_non_cover_np=ctx_nc_np,
             compile_model=getattr(self, "mlx_dit_compiled", False),

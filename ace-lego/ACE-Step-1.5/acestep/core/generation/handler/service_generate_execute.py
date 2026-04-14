@@ -205,8 +205,17 @@ class ServiceGenerateExecuteMixin:
                             infer_steps=requested_steps,
                             shift=shift,
                             timesteps=generate_kwargs.get("timesteps"),
+                            guidance_scale=float(
+                                generate_kwargs.get(
+                                    "diffusion_guidance_scale",
+                                    generate_kwargs.get("diffusion_guidance_sale", 1.0),
+                                )
+                            ),
+                            cfg_interval_start=float(generate_kwargs.get("cfg_interval_start", 0.0)),
+                            cfg_interval_end=float(generate_kwargs.get("cfg_interval_end", 1.0)),
                             audio_cover_strength=audio_cover_strength,
                             cover_noise_strength=cover_noise_strength,
+                            use_adg=bool(generate_kwargs.get("use_adg", False)),
                             encoder_hidden_states_non_cover=enc_hs_nc,
                             encoder_attention_mask_non_cover=enc_am_nc,
                             context_latents_non_cover=ctx_nc,

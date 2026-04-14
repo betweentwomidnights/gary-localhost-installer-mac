@@ -12,6 +12,11 @@ class _Host(DiffusionMixin):
         self.mlx_decoder = object()
         self.device = device
         self.dtype = dtype
+        self.model = type(
+            "FakeModel",
+            (),
+            {"null_condition_emb": torch.full((1, 1, 8), 0.25, dtype=torch.float32)},
+        )()
 
 
 class _IterableTimesteps:
@@ -40,10 +45,17 @@ class DiffusionMixinTests(unittest.TestCase):
             self.assertEqual(kwargs["src_latents_shape"], (2, 3, 5))
             self.assertEqual(kwargs["timesteps"], [1.0, 0.5])
             self.assertEqual(kwargs["infer_method"], "sde")
+            self.assertEqual(kwargs["infer_steps"], 11)
             self.assertEqual(kwargs["shift"], 2.0)
+            self.assertEqual(kwargs["guidance_scale"], 6.5)
+            self.assertEqual(kwargs["cfg_interval_start"], 0.1)
+            self.assertEqual(kwargs["cfg_interval_end"], 0.8)
             self.assertEqual(kwargs["audio_cover_strength"], 0.6)
+            self.assertFalse(kwargs["use_adg"])
             self.assertEqual(kwargs["encoder_hidden_states_np"].dtype, np.float32)
             self.assertEqual(kwargs["context_latents_np"].dtype, np.float32)
+            self.assertEqual(kwargs["null_condition_emb_np"].dtype, np.float32)
+            self.assertEqual(kwargs["null_condition_emb_np"].shape, (1, 1, 8))
             self.assertEqual(kwargs["encoder_hidden_states_non_cover_np"].dtype, np.float32)
             self.assertEqual(kwargs["context_latents_non_cover_np"].dtype, np.float32)
             return {"target_latents": fake_target, "time_costs": {"diffusion_time_cost": 1.2}}
@@ -56,9 +68,14 @@ class DiffusionMixinTests(unittest.TestCase):
                 src_latents=src_latents,
                 seed=123,
                 infer_method="sde",
+                infer_steps=11,
                 shift=2.0,
                 timesteps=timesteps,
+                guidance_scale=6.5,
+                cfg_interval_start=0.1,
+                cfg_interval_end=0.8,
                 audio_cover_strength=0.6,
+                use_adg=False,
                 encoder_hidden_states_non_cover=non_cover_hidden,
                 encoder_attention_mask_non_cover=non_cover_mask,
                 context_latents_non_cover=non_cover_context,
@@ -97,6 +114,28 @@ class DiffusionMixinTests(unittest.TestCase):
 
         self.assertEqual(tuple(result["target_latents"].shape), (1, 2, 3))
         self.assertEqual(result["target_latents"].dtype, torch.float32)
+
+    def test_mlx_run_diffusion_handles_missing_null_condition_embedding(self):
+        host = _Host(dtype=torch.float32)
+        host.model = object()
+        x = torch.randn(1, 2, 3, dtype=torch.float32)
+
+        def _fake_generate(**kwargs):
+            self.assertEqual(kwargs["guidance_scale"], 4.0)
+            self.assertIsNone(kwargs["null_condition_emb_np"])
+            self.assertTrue(kwargs["use_adg"])
+            return {"target_latents": np.zeros((1, 2, 3), dtype=np.float32), "time_costs": {}}
+
+        with patch("acestep.core.generation.handler.diffusion.mlx_generate_diffusion", side_effect=_fake_generate):
+            host._mlx_run_diffusion(
+                encoder_hidden_states=x,
+                encoder_attention_mask=torch.ones(1, 2, dtype=torch.int64),
+                context_latents=torch.randn(1, 4, 3),
+                src_latents=torch.zeros(1, 2, 3, dtype=torch.float32),
+                seed=7,
+                guidance_scale=4.0,
+                use_adg=True,
+            )
 
     def test_mlx_run_diffusion_rejects_invalid_infer_method(self):
         host = _Host()
