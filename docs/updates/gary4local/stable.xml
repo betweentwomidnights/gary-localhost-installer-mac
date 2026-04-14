@@ -1,11 +1,23 @@
-<?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0"
-     xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"
-     xmlns:dc="http://purl.org/dc/elements/1.1/">
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><!-- sparkle-sign-warning:
+IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
+--><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">
   <channel>
     <title>gary4local stable updates</title>
     <link>https://github.com/betweentwomidnights/gary-localhost-installer-mac</link>
     <description>Stable Sparkle appcast for gary4local.</description>
     <language>en</language>
+    <item>
+      <title>Version 0.1.5</title>
+      <pubDate>Tue, 14 Apr 2026 10:56:36 +0000</pubDate>
+      <sparkle:version>105</sparkle:version>
+      <sparkle:shortVersionString>0.1.5</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.6</sparkle:minimumSystemVersion>
+      <sparkle:releaseNotesLink>https://betweentwomidnights.github.io/gary-localhost-installer-mac/updates/gary4local/release-notes/v0.1.5.html</sparkle:releaseNotesLink>
+      <description><![CDATA[gary4local v0.1.5 stable update]]></description>
+      <enclosure url="https://github.com/betweentwomidnights/gary-localhost-installer-mac/releases/download/v0.1.5/gary4local-v0.1.5-mac-arm64.dmg" sparkle:edSignature="CfmwDTEBTN6RJUOZ3sykIcfu/Dc5+L/8I7I9o/z6/MSTG2yxP2HWMOjDjCIAkZEdKOgfquI00OJReLejUvLoAg==" sparkle:os="macos" length="8824805" type="application/x-apple-diskimage"></enclosure>
+    </item>
   </channel>
-</rss>
+</rss><!-- sparkle-signatures:
+edSignature: iHRDziVKn7/TEovHcACXuRxmEXuNvdX2f8BBK3S6c7XlODojEQ4tOKyPP1nwenfBSdiEAgb6I3inqQflJ7FDBg==
+length: 1576
+-->

@@ -34,6 +34,12 @@ info() { printf "\n==> %s\n" "$1"; }
 ok() { printf "ok: %s\n" "$1"; }
 fail() { printf "error: %s\n" "$1" >&2; exit 1; }
 
+append_xcodebuild_overrides() {
+  if ((${#XCODEBUILD_OVERRIDES[@]})); then
+    xcodebuild_args+=("${XCODEBUILD_OVERRIDES[@]}")
+  fi
+}
+
 usage() {
   cat <<'USAGE'
 Usage: scripts/build_gary4local_release_dmg.sh [options]
@@ -227,16 +233,19 @@ mkdir -p "$BUILD_ROOT"
 security find-identity -v -p codesigning | grep -Fq "$IDENTITY" || fail "Signing identity not found: $IDENTITY"
 
 info "Archiving ${SCHEME} for arm64"
-xcodebuild archive \
-  -project "$XCODEPROJ" \
-  -scheme "$SCHEME" \
-  -configuration "$CONFIGURATION" \
-  -archivePath "$ARCHIVE_PATH" \
-  -derivedDataPath "$DERIVED_DATA_PATH" \
-  ARCHS=arm64 \
-  ONLY_ACTIVE_ARCH=NO \
-  CODE_SIGNING_ALLOWED=NO \
-  "${XCODEBUILD_OVERRIDES[@]}"
+xcodebuild_args=(
+  archive
+  -project "$XCODEPROJ"
+  -scheme "$SCHEME"
+  -configuration "$CONFIGURATION"
+  -archivePath "$ARCHIVE_PATH"
+  -derivedDataPath "$DERIVED_DATA_PATH"
+  ARCHS=arm64
+  ONLY_ACTIVE_ARCH=NO
+  CODE_SIGNING_ALLOWED=NO
+)
+append_xcodebuild_overrides
+xcodebuild "${xcodebuild_args[@]}"
 
 [[ -f "$APP_BINARY" ]] || fail "Archive missing app binary: $APP_BINARY"
 lipo -info "$APP_BINARY" | grep -q "arm64" || fail "Archived app is not arm64"

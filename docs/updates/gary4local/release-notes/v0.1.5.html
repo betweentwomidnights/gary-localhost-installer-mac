@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>gary4local v0.1.5 release notes</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 24px;
+        line-height: 1.55;
+        color: #111;
+      }
+
+      h1 {
+        margin-bottom: 0.25rem;
+      }
+
+      p {
+        margin-top: 0;
+        color: #444;
+      }
+
+      ul {
+        padding-left: 1.2rem;
+      }
+
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.95em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>gary4local v0.1.5</h1>
+    <p>Apple Silicon localhost update with Carey XL support, foundation-1 MLX support, and Sparkle-based app updating.</p>
+
+    <h2>Highlights</h2>
+    <ul>
+      <li>Adds Carey regular and XL <code>base</code>, <code>sft</code>, and <code>turbo</code> model-family support in the macOS app.</li>
+      <li>Improves Carey localhost parity with the refreshed complete, cover, and extract workflow.</li>
+      <li>Adds foundation-1 on the MLX path, including text generation, prompt randomization, and audio2audio.</li>
+      <li>Implements the in-app auto-updater in <code>gary4local</code> using Sparkle 2.</li>
+      <li>Shows the app version directly in the control center UI for release sanity.</li>
+    </ul>
+
+    <h2>Recommended Companion</h2>
+    <ul>
+      <li><code>gary4juce v3.0.3-mac</code></li>
+      <li>Releases page: <a href="https://github.com/betweentwomidnights/gary4juce/releases">https://github.com/betweentwomidnights/gary4juce/releases</a></li>
+    </ul>
+
+    <h2>Notes</h2>
+    <ul>
+      <li>This build is distributed outside the Mac App Store as a notarized DMG.</li>
+      <li>Sparkle signatures are included for the in-app updater flow.</li>
+      <li>The Stable Audio Hugging Face token still lives in Keychain; a follow-up UX pass will defer that lookup on launch.</li>
+    </ul>
+  </body>
+</html>
