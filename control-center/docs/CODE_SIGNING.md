@@ -7,6 +7,11 @@ Use this flow for outside-App-Store macOS distribution.
 - Target: notarized DMG download.
 - Not target (yet): Mac App Store sandbox distribution.
 
+Updater design and maintainer release-flow docs:
+
+- `docs/updates/README.md`
+- `docs/releasing/SPARKLE_RELEASE.md`
+
 ## Certificates You Need
 
 For a notarized DMG, you only need:

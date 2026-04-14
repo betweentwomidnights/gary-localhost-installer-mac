@@ -76,6 +76,8 @@ struct ControlCenterView: View {
     @ViewBuilder
     private func serviceList(manager: ServiceManager) -> some View {
         VStack(alignment: .leading, spacing: 12) {
+            controlCenterHeader
+
             if showsFirstUseHelper(manager: manager) {
                 firstUseHelper(manager: manager)
             }
@@ -156,6 +158,23 @@ struct ControlCenterView: View {
             reconcileFirstUseHelperStateIfNeeded(manager: manager)
         }
         .padding(16)
+    }
+
+    private var controlCenterHeader: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("gary4local")
+                    .font(.title2.weight(.semibold))
+                Text(GaryAppReleaseInfo.releaseLabel)
+                    .font(.subheadline.monospaced())
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            Text("recommended companion: gary4juce \(GaryAppReleaseInfo.recommendedGary4JuceVersion)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     @ViewBuilder

@@ -6,8 +6,28 @@ It pairs with [gary4juce](https://github.com/betweentwomidnights/gary4juce) and 
 
 ## Current Note
 
+- Auto-updater is now implemented in `gary4local` using Sparkle 2.
 - `foundation-1` has now been successfully added to `gary4local`, including model download flow, prompt randomization support, text generation, and audio2audio on the macOS MLX path.
-- TODO: bring the Carey service to parity with Windows by adding `ace-step-v15-xl-*` model support behind a toggle in `gary4local`, matching the behavior in `gary-localhost-installer`.
+- Carey now includes the regular and XL `ace-step-v15-{base,sft,turbo}` model family toggle in `gary4local`, aligned with the Windows `gary-localhost-installer` flow.
+- TODO: investigate surfacing runtime generation failures, especially Carey stack traces, through the same popup/reporting UX currently used for build failures.
+
+## Planned Auto-Update Flow
+
+`gary4local` is distributed outside the Mac App Store, so update hosting and installation will remain developer-managed.
+
+The target production flow is:
+
+- GitHub Releases hosts the notarized `gary4local` DMG asset.
+- GitHub Pages hosts a stable Sparkle appcast URL that installed apps poll.
+- Releasing a new version means:
+  - build/sign/notarize the DMG
+  - upload it to GitHub Releases
+  - update the stable appcast on GitHub Pages
+
+Design and maintainer docs live here:
+
+- `docs/updates/README.md`
+- `docs/releasing/SPARKLE_RELEASE.md`
 
 ## Monorepo Layout
 

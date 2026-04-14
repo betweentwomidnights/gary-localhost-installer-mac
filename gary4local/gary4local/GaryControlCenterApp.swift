@@ -245,7 +245,7 @@ private struct GaryHelpView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("gary4local help")
                         .font(.title2.bold())
-                    Text("v1.0 guidance for backend selection, support, and model references.")
+                    Text("\(GaryAppReleaseInfo.releaseLabel) guidance for backend selection, support, and model references.")
                         .foregroundStyle(.secondary)
                 }
 
@@ -321,14 +321,20 @@ private struct GaryAboutView: View {
                         .font(.title2.bold())
                     Text("local backend control center")
                         .foregroundStyle(.secondary)
+                    Text(GaryAppReleaseInfo.detailedVersionLabel)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
                 }
             }
 
             Text("gary4local runs local backend services for gary4juce.")
                 .foregroundStyle(.secondary)
 
-            Text("this v1.0 flow is tested against gary4juce v2.2.")
-            Link("gary4juce releases", destination: URL(string: "https://github.com/betweentwomidnights/gary4juce")!)
+            Text("recommended companion: gary4juce \(GaryAppReleaseInfo.recommendedGary4JuceVersion).")
+            Link(
+                "gary4juce \(GaryAppReleaseInfo.recommendedGary4JuceVersion) release",
+                destination: GaryAppReleaseInfo.recommendedGary4JuceReleaseURL
+            )
 
             Divider()
 
@@ -434,6 +440,11 @@ struct GaryControlCenterApp: App {
     private let helpWindowID = "help-center"
     private let aboutWindowID = "about-window"
     private let menuBarAttentionTimer = Timer.publish(every: 0.75, on: .main, in: .common).autoconnect()
+    private let appUpdater: GaryAppUpdater
+
+    init() {
+        appUpdater = GaryAppUpdater()
+    }
 
     private var shouldAnimateMenuBarIconAttention: Bool {
         !firstUseHelperDismissed
@@ -529,6 +540,7 @@ struct GaryControlCenterApp: App {
                 controlCenterWindowID: controlCenterWindowID,
                 aboutWindowID: aboutWindowID
             )
+            GaryUpdateCommands(updaterController: appUpdater.updaterController)
             GaryPrunedDefaultMenusCommands()
             GaryHelpCommands(helpWindowID: helpWindowID)
         }

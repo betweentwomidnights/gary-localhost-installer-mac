@@ -19,6 +19,8 @@ ICON_PATH="${ICON_PATH:-${PROJECT_DIR}/icon.icns}"
 SKIP_NOTARIZE=0
 SKIP_LAYOUT=0
 OUTPUT_NAME=""
+MARKETING_VERSION_OVERRIDE=""
+CURRENT_PROJECT_VERSION_OVERRIDE=""
 
 ARCHIVE_PATH="${BUILD_ROOT}/${SCHEME}.xcarchive"
 DERIVED_DATA_PATH="${BUILD_ROOT}/DerivedData"
@@ -42,6 +44,8 @@ Options:
   --output-name <filename>    Output DMG filename inside build-artifacts/
   --build-root <path>         Temporary working directory
   --configuration <name>      Xcode configuration (default: Release)
+  --marketing-version <ver>   Override MARKETING_VERSION for this build
+  --build-number <num>        Override CURRENT_PROJECT_VERSION for this build
   --identity <name>           Code signing identity
   --keychain-profile <name>   notarytool keychain profile
   --vol-name <name>           DMG volume name (default: gary4local)
@@ -101,6 +105,11 @@ cleanup_mount() {
 }
 
 resolve_version() {
+  if [[ -n "$MARKETING_VERSION_OVERRIDE" ]]; then
+    printf '%s\n' "$MARKETING_VERSION_OVERRIDE"
+    return
+  fi
+
   local version
   version="$(
     xcodebuild \
@@ -117,6 +126,8 @@ resolve_version() {
 
   printf '%s\n' "$version"
 }
+
+XCODEBUILD_OVERRIDES=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -140,6 +151,16 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -gt 0 ]] || fail "Missing value for --configuration"
       CONFIGURATION="$1"
+      ;;
+    --marketing-version)
+      shift
+      [[ $# -gt 0 ]] || fail "Missing value for --marketing-version"
+      MARKETING_VERSION_OVERRIDE="$1"
+      ;;
+    --build-number)
+      shift
+      [[ $# -gt 0 ]] || fail "Missing value for --build-number"
+      CURRENT_PROJECT_VERSION_OVERRIDE="$1"
       ;;
     --identity)
       shift
@@ -174,6 +195,14 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+if [[ -n "$MARKETING_VERSION_OVERRIDE" ]]; then
+  XCODEBUILD_OVERRIDES+=("MARKETING_VERSION=${MARKETING_VERSION_OVERRIDE}")
+fi
+
+if [[ -n "$CURRENT_PROJECT_VERSION_OVERRIDE" ]]; then
+  XCODEBUILD_OVERRIDES+=("CURRENT_PROJECT_VERSION=${CURRENT_PROJECT_VERSION_OVERRIDE}")
+fi
+
 VERSION="$(resolve_version)"
 if [[ -z "$OUTPUT_NAME" ]]; then
   OUTPUT_NAME="${SCHEME}-v${VERSION}-mac-arm64.dmg"
@@ -206,7 +235,8 @@ xcodebuild archive \
   -derivedDataPath "$DERIVED_DATA_PATH" \
   ARCHS=arm64 \
   ONLY_ACTIVE_ARCH=NO \
-  CODE_SIGNING_ALLOWED=NO
+  CODE_SIGNING_ALLOWED=NO \
+  "${XCODEBUILD_OVERRIDES[@]}"
 
 [[ -f "$APP_BINARY" ]] || fail "Archive missing app binary: $APP_BINARY"
 lipo -info "$APP_BINARY" | grep -q "arm64" || fail "Archived app is not arm64"

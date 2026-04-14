@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0"
+     xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"
+     xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>gary4local stable updates</title>
+    <link>https://github.com/betweentwomidnights/gary-localhost-installer-mac</link>
+    <description>Stable Sparkle appcast for gary4local.</description>
+    <language>en</language>
+  </channel>
+</rss>
