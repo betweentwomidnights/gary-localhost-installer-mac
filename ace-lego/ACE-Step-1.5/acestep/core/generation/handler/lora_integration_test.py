@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import Mock
 
 from acestep.core.generation.handler.lora_manager import LoraManagerMixin
 
@@ -7,12 +8,16 @@ class FakeDecoder:
     def __init__(self, modules, adapter_names):
         self._modules = modules
         self._adapter_names = adapter_names
+        self.active_adapter = None
 
     def named_modules(self):
         return self._modules
 
     def get_adapter_names(self):
         return self._adapter_names
+
+    def set_adapter(self, adapter_name):
+        self.active_adapter = adapter_name
 
 
 class FakeModel:
@@ -39,7 +44,9 @@ class MinimalHandler(LoraManagerMixin):
         self._base_decoder = None
         self.lora_loaded = True
         self.use_lora = True
+        self.use_mlx_dit = True
         self.lora_scale = 1.0
+        self._sync_mlx_dit_from_model = Mock(return_value=(True, None))
 
 
 class LoraHandlerIntegrationTests(unittest.TestCase):
@@ -102,6 +109,16 @@ class LoraHandlerIntegrationTests(unittest.TestCase):
         message = handler.set_use_lora(False)
 
         self.assertEqual(message, "✅ LoRA disabled")
+
+    def test_set_active_lora_adapter_refreshes_mlx_decoder(self):
+        decoder = FakeDecoder(modules=[], adapter_names=["main"])
+        handler = MinimalHandler(decoder)
+        handler._rebuild_lora_registry()
+
+        message = handler.set_active_lora_adapter("main")
+
+        self.assertEqual(message, "✅ Active LoRA adapter: main")
+        handler._sync_mlx_dit_from_model.assert_called_once_with(reason="LoRA adapter activation (main)")
 
 
 if __name__ == "__main__":

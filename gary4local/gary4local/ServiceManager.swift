@@ -1405,6 +1405,7 @@ final class ServiceManager: ObservableObject {
             env["ACESTEP_BASE_CONFIG_PATH"] = baseConfig
             env["ACESTEP_SFT_CONFIG_PATH"] = sftConfig
             env["ACESTEP_TURBO_CONFIG_PATH"] = turboConfig
+            env["ACESTEP_REGULAR_CONFIG_PATH"] = sftConfig
             env["ACESTEP_MLX_VAE_ENCODE_SAMPLE"] = careyUseSampledMlxVaeEncode ? "1" : "0"
         }
         return env

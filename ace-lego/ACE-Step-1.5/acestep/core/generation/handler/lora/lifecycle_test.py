@@ -35,6 +35,56 @@ class _DummyDecoder:
         return self
 
 
+class _FakePeftModel:
+    """Tiny PEFT wrapper stub for unload-path tests."""
+
+    def __init__(self, base_decoder, *, unload_result=None, merge_result=None) -> None:
+        self.base_decoder = base_decoder
+        self._unload_result = unload_result
+        self._merge_result = merge_result
+        self.peft_config = {"main": object()}
+
+    def unload(self):
+        """Return the configured unload result."""
+        if self._unload_result is None:
+            raise AttributeError("unload not configured")
+        return self._unload_result
+
+    def merge_and_unload(self):
+        """Return the configured merge-and-unload result."""
+        if self._merge_result is None:
+            raise AttributeError("merge_and_unload not configured")
+        return self._merge_result
+
+    def get_base_model(self):
+        """Return the wrapped base decoder."""
+        return self.base_decoder
+
+    @classmethod
+    def from_pretrained(cls, decoder, _lora_path, adapter_name=None, is_trainable=False):
+        """Construct a fake PEFT wrapper around ``decoder``."""
+        _ = is_trainable
+        instance = cls(decoder, unload_result=decoder)
+        instance.peft_config = {adapter_name or "default": object()}
+        return instance
+
+    def load_adapter(self, _lora_path, adapter_name=None):
+        """Record another fake adapter on the wrapper."""
+        self.peft_config[adapter_name or "default"] = object()
+
+    def set_adapter(self, _adapter_name):
+        """Mimic PEFT ``set_adapter`` without side effects."""
+        return None
+
+    def to(self, *_args, **_kwargs):
+        """Match torch module ``to`` chaining."""
+        return self
+
+    def eval(self):
+        """Match torch module ``eval`` API."""
+        return self
+
+
 class _DummyHandler:
     """Handler stub exposing the attributes used by ``load_lora``."""
 
@@ -47,7 +97,10 @@ class _DummyHandler:
         self.lora_loaded = False
         self.use_lora = False
         self.lora_scale = 1.0
+        self.use_mlx_dit = False
+        self.mlx_decoder = None
         self._lora_active_adapter = None
+        self._sync_mlx_dit_from_model = Mock(return_value=(True, None))
         self._lora_service = SimpleNamespace(
             registry={},
             scale_state={},
@@ -214,6 +267,121 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("❌ Failed to unload LoRA", message)
         self.assertIn("restore failed", message)
         handler.model.decoder.load_state_dict.assert_not_called()
+
+    def test_add_lora_skips_state_dict_backup_for_first_peft_adapter(self):
+        """First PEFT-backed LoRA load should not clone the full decoder to CPU."""
+        handler = _DummyHandler()
+        state_dict = Mock()
+        handler.model.decoder.state_dict = state_dict
+
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "adapter_config.json").write_text("{}", encoding="utf-8")
+
+            fake_peft = SimpleNamespace(PeftModel=_FakePeftModel)
+            with patch.dict("sys.modules", {"peft": fake_peft}):
+                message = lifecycle.add_lora(handler, tmp, adapter_name="mayer")
+
+        self.assertEqual(message, "✅ LoRA 'mayer' loaded from " + tmp)
+        state_dict.assert_not_called()
+        self.assertIsNone(handler._base_decoder)
+        self.assertTrue(handler.lora_loaded)
+        self.assertTrue(handler.use_lora)
+
+    def test_add_lora_refreshes_mlx_decoder_when_enabled(self):
+        """PEFT-backed LoRA load should refresh the MLX decoder when MLX DiT is active."""
+        handler = _DummyHandler()
+        handler.use_mlx_dit = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "adapter_config.json").write_text("{}", encoding="utf-8")
+
+            fake_peft = SimpleNamespace(PeftModel=_FakePeftModel)
+            with patch.dict("sys.modules", {"peft": fake_peft}):
+                message = lifecycle.add_lora(handler, tmp, adapter_name="mayer")
+
+        self.assertEqual(message, "✅ LoRA 'mayer' loaded from " + tmp)
+        handler._sync_mlx_dit_from_model.assert_called_once_with(reason="LoRA load (mayer)")
+
+    def test_add_lora_reports_mlx_refresh_failure(self):
+        """LoRA load should surface MLX refresh failures so the wrapper can abort safely."""
+        handler = _DummyHandler()
+        handler.use_mlx_dit = True
+        handler._sync_mlx_dit_from_model = Mock(return_value=(False, "MLX DiT refresh failed after LoRA load"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "adapter_config.json").write_text("{}", encoding="utf-8")
+
+            fake_peft = SimpleNamespace(PeftModel=_FakePeftModel)
+            with patch.dict("sys.modules", {"peft": fake_peft}):
+                message = lifecycle.add_lora(handler, tmp, adapter_name="mayer")
+
+        self.assertEqual(message, "❌ MLX DiT refresh failed after LoRA load")
+        self.assertTrue(handler.lora_loaded)
+
+    def test_unload_lora_peft_without_backup_does_not_restore_state_dict(self):
+        """PEFT-backed unload should succeed without a CPU state_dict backup."""
+        handler = _DummyHandler()
+        handler.lora_loaded = True
+        base_decoder = _DummyDecoder()
+        base_decoder.load_state_dict = Mock(
+            return_value=SimpleNamespace(missing_keys=[], unexpected_keys=[])
+        )
+        handler.model.decoder = _FakePeftModel(base_decoder, unload_result=base_decoder)
+
+        fake_peft = SimpleNamespace(PeftModel=_FakePeftModel)
+        with patch.dict("sys.modules", {"peft": fake_peft}):
+            message = lifecycle.unload_lora(handler)
+
+        self.assertEqual(message, "✅ LoRA unloaded, using base model")
+        base_decoder.load_state_dict.assert_not_called()
+        self.assertIs(handler.model.decoder, base_decoder)
+        self.assertIsNone(handler._base_decoder)
+        handler._sync_mlx_dit_from_model.assert_called_once_with(reason="LoRA unload")
+
+    def test_unload_lora_prefers_peft_unload_helper(self):
+        """PEFT-backed unload should use ``unload()`` and skip manual state restore."""
+        handler = _DummyHandler()
+        handler.lora_loaded = True
+        handler._base_decoder = {"w": torch.ones(1)}
+        base_decoder = _DummyDecoder()
+        base_decoder.load_state_dict = Mock(
+            return_value=SimpleNamespace(missing_keys=[], unexpected_keys=[])
+        )
+        handler.model.decoder = _FakePeftModel(base_decoder, unload_result=base_decoder)
+
+        fake_peft = SimpleNamespace(PeftModel=_FakePeftModel)
+        with patch.dict("sys.modules", {"peft": fake_peft}):
+            message = lifecycle.unload_lora(handler)
+
+        self.assertEqual(message, "✅ LoRA unloaded, using base model")
+        base_decoder.load_state_dict.assert_not_called()
+        self.assertIs(handler.model.decoder, base_decoder)
+        self.assertIsNone(handler._base_decoder)
+
+    def test_unload_lora_falls_back_to_merge_and_unload(self):
+        """When ``unload()`` is unavailable, PEFT-backed unload should use ``merge_and_unload()``."""
+        handler = _DummyHandler()
+        handler.lora_loaded = True
+        handler._base_decoder = {"w": torch.ones(1)}
+        base_decoder = _DummyDecoder()
+        base_decoder.load_state_dict = Mock(
+            return_value=SimpleNamespace(missing_keys=[], unexpected_keys=[])
+        )
+
+        class _MergeOnlyPeftModel(_FakePeftModel):
+            def unload(self):
+                raise AttributeError("unload unavailable")
+
+        handler.model.decoder = _MergeOnlyPeftModel(base_decoder, merge_result=base_decoder)
+
+        fake_peft = SimpleNamespace(PeftModel=_MergeOnlyPeftModel)
+        with patch.dict("sys.modules", {"peft": fake_peft}):
+            message = lifecycle.unload_lora(handler)
+
+        self.assertEqual(message, "✅ LoRA unloaded, using base model")
+        base_decoder.load_state_dict.assert_not_called()
+        self.assertIs(handler.model.decoder, base_decoder)
+        self.assertIsNone(handler._base_decoder)
 
 
 if __name__ == "__main__":

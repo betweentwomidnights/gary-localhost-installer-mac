@@ -1,10 +1,76 @@
 """MLX DiT initialization helpers for Apple Silicon acceleration."""
 
+import copy
+from types import SimpleNamespace
+from typing import Optional, Tuple
 from loguru import logger
+from time import perf_counter
 
 
 class MlxDitInitMixin:
     """Initialize native MLX DiT decoder state used by generation runtime."""
+
+    def _mlx_conversion_model(self):
+        """Return a model-like object whose decoder exposes plain weights for MLX conversion."""
+        model = getattr(self, "model", None)
+        decoder = getattr(model, "decoder", None) if model is not None else None
+        if model is None or decoder is None:
+            raise RuntimeError("MLX DiT refresh failed: model decoder is not initialized.")
+
+        try:
+            from peft import PeftModel
+        except ImportError:
+            return model, None
+
+        if not isinstance(decoder, PeftModel):
+            return model, None
+
+        get_base_model = getattr(decoder, "get_base_model", None)
+        if not callable(get_base_model):
+            raise RuntimeError("MLX DiT refresh failed: PEFT decoder does not expose get_base_model().")
+
+        lora_enabled = bool(getattr(self, "lora_loaded", False) and getattr(self, "use_lora", False))
+        if not lora_enabled:
+            return SimpleNamespace(decoder=get_base_model()), None
+
+        active_adapter = getattr(self, "_lora_active_adapter", None)
+        merge_adapter = getattr(decoder, "merge_adapter", None)
+        unmerge_adapter = getattr(decoder, "unmerge_adapter", None)
+        if callable(merge_adapter) and callable(unmerge_adapter):
+            merge_kwargs = {"safe_merge": False}
+            if active_adapter:
+                merge_kwargs["adapter_names"] = [active_adapter]
+            try:
+                merge_adapter(**merge_kwargs)
+            except TypeError:
+                # Older PEFT builds may not accept keyword arguments on merge_adapter().
+                if active_adapter:
+                    merge_adapter([active_adapter])
+                else:
+                    merge_adapter()
+            return SimpleNamespace(decoder=get_base_model()), unmerge_adapter
+
+        merge_and_unload = getattr(decoder, "merge_and_unload", None)
+        if callable(merge_and_unload):
+            decoder_copy = copy.deepcopy(decoder)
+            merge_and_unload_copy = getattr(decoder_copy, "merge_and_unload", None)
+            if not callable(merge_and_unload_copy):
+                raise RuntimeError("MLX DiT refresh failed: copied PEFT decoder lacks merge_and_unload().")
+            merge_kwargs = {"safe_merge": False}
+            if active_adapter:
+                merge_kwargs["adapter_names"] = [active_adapter]
+            try:
+                merged_decoder = merge_and_unload_copy(**merge_kwargs)
+            except TypeError:
+                if active_adapter:
+                    merged_decoder = merge_and_unload_copy([active_adapter])
+                else:
+                    merged_decoder = merge_and_unload_copy()
+            return SimpleNamespace(decoder=merged_decoder), None
+
+        raise RuntimeError(
+            "MLX DiT refresh failed: active PEFT LoRA cannot be converted because merge helpers are unavailable."
+        )
 
     def _init_mlx_dit(self, compile_model: bool = False) -> bool:
         """Initialize the MLX DiT decoder when platform support is available.
@@ -41,3 +107,40 @@ class MlxDitInitMixin:
             self.use_mlx_dit = False
             self.mlx_dit_compiled = False
             return False
+
+    def _sync_mlx_dit_from_model(self, reason: str = "model update") -> Tuple[bool, Optional[str]]:
+        """Refresh the native MLX decoder weights from the current PyTorch model."""
+        if not getattr(self, "use_mlx_dit", False):
+            return True, None
+
+        if getattr(self, "model", None) is None or getattr(self, "config", None) is None:
+            return False, "MLX DiT refresh failed: model is not initialized."
+
+        try:
+            from acestep.models.mlx import mlx_available
+
+            if not mlx_available():
+                self.mlx_decoder = None
+                return False, "MLX DiT refresh failed: MLX is not available on this platform."
+
+            from acestep.models.mlx.dit_model import MLXDiTDecoder
+            from acestep.models.mlx.dit_convert import convert_and_load
+
+            if self.mlx_decoder is None:
+                self.mlx_decoder = MLXDiTDecoder.from_config(self.config)
+
+            started = perf_counter()
+            logger.info(f"[MLX-DiT] Refreshing native MLX decoder after {reason}...")
+            pytorch_model, cleanup = self._mlx_conversion_model()
+            try:
+                convert_and_load(pytorch_model, self.mlx_decoder)
+            finally:
+                if callable(cleanup):
+                    cleanup()
+            elapsed = perf_counter() - started
+            logger.info(f"[MLX-DiT] Refreshed native MLX decoder after {reason} in {elapsed:.1f}s.")
+            return True, None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[MLX-DiT] Failed to refresh MLX decoder after {reason}: {exc}")
+            self.mlx_decoder = None
+            return False, f"MLX DiT refresh failed after {reason}: {exc}"

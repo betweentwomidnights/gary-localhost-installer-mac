@@ -40,6 +40,12 @@ def set_use_lora(self, use_lora: bool) -> str:
         except Exception as e:
             logger.warning(f"Could not toggle adapter layers: {e}")
 
+    refresh_mlx = getattr(self, "_sync_mlx_dit_from_model", None)
+    if callable(refresh_mlx):
+        ok, message = refresh_mlx(reason=f"LoRA toggle ({'enabled' if use_lora else 'disabled'})")
+        if not ok:
+            return f"❌ {message}"
+
     status = "enabled" if use_lora else "disabled"
     return f"✅ LoRA {status}"
 
@@ -115,6 +121,11 @@ def set_lora_scale(self, adapter_name_or_scale: str | float, scale: float | None
         modified = self._apply_scale_to_adapter(effective_name, scale_value)
         report = getattr(self, "_lora_last_scale_report", {})
         skipped_total = sum(report.get("skipped_by_kind", {}).values())
+        refresh_mlx = getattr(self, "_sync_mlx_dit_from_model", None)
+        if callable(refresh_mlx):
+            ok, message = refresh_mlx(reason=f"LoRA scale ({effective_name}={scale_value:.2f})")
+            if not ok:
+                return f"❌ {message}"
 
         if modified > 0:
             logger.info(
@@ -153,6 +164,11 @@ def set_active_lora_adapter(self, adapter_name: str) -> str:
             self.model.decoder.set_adapter(adapter_name)
         except Exception:
             pass
+    refresh_mlx = getattr(self, "_sync_mlx_dit_from_model", None)
+    if callable(refresh_mlx):
+        ok, message = refresh_mlx(reason=f"LoRA adapter activation ({adapter_name})")
+        if not ok:
+            return f"❌ {message}"
     return f"✅ Active LoRA adapter: {adapter_name}"
 
 

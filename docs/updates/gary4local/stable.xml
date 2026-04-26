@@ -7,17 +7,17 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <description>Stable Sparkle appcast for gary4local.</description>
     <language>en</language>
     <item>
-      <title>Version 0.1.5</title>
-      <pubDate>Tue, 14 Apr 2026 10:56:36 +0000</pubDate>
-      <sparkle:version>105</sparkle:version>
-      <sparkle:shortVersionString>0.1.5</sparkle:shortVersionString>
+      <title>Version 0.1.6</title>
+      <pubDate>Sun, 26 Apr 2026 04:40:31 +0000</pubDate>
+      <sparkle:version>106</sparkle:version>
+      <sparkle:shortVersionString>0.1.6</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.6</sparkle:minimumSystemVersion>
-      <sparkle:releaseNotesLink>https://betweentwomidnights.github.io/gary-localhost-installer-mac/updates/gary4local/release-notes/v0.1.5.html</sparkle:releaseNotesLink>
-      <description><![CDATA[gary4local v0.1.5 stable update]]></description>
-      <enclosure url="https://github.com/betweentwomidnights/gary-localhost-installer-mac/releases/download/v0.1.5/gary4local-v0.1.5-mac-arm64.dmg" sparkle:edSignature="CfmwDTEBTN6RJUOZ3sykIcfu/Dc5+L/8I7I9o/z6/MSTG2yxP2HWMOjDjCIAkZEdKOgfquI00OJReLejUvLoAg==" sparkle:os="macos" length="8824805" type="application/x-apple-diskimage"></enclosure>
+      <sparkle:releaseNotesLink>https://betweentwomidnights.github.io/gary-localhost-installer-mac/updates/gary4local/release-notes/v0.1.6.html</sparkle:releaseNotesLink>
+      <description><![CDATA[gary4local v0.1.6 stable update]]></description>
+      <enclosure url="https://github.com/betweentwomidnights/gary-localhost-installer-mac/releases/download/v0.1.6/gary4local-v0.1.6-mac-arm64.dmg" sparkle:edSignature="FjLGmjANM588i+sTKhc7pitXqRHyzbdq657jQ/b1SifZ/3dwMlFi9PYzW3N9a/vzmlFPjoWJWHIFc/btsemDBA==" sparkle:os="macos" length="8921569" type="application/x-apple-diskimage"></enclosure>
     </item>
   </channel>
 </rss><!-- sparkle-signatures:
-edSignature: iHRDziVKn7/TEovHcACXuRxmEXuNvdX2f8BBK3S6c7XlODojEQ4tOKyPP1nwenfBSdiEAgb6I3inqQflJ7FDBg==
+edSignature: 52jYdxrXa20lXQbkoka6k96jPbC0IW2VI5Yb9piawdOx58O5lFU74osZXiNOICc7xYWqPBUzYZIm6WgJFlrHDA==
 length: 1576
 -->

@@ -68,6 +68,9 @@ struct ControlCenterView: View {
         .sheet(isPresented: $viewModel.isModelDownloadSheetPresented) {
             ModelDownloadSheet(viewModel: viewModel)
         }
+        .sheet(isPresented: $viewModel.isCareyLoraSheetPresented) {
+            CareyLoraManagerSheet(viewModel: viewModel)
+        }
         .sheet(item: $viewModel.rebuildFailureReport) { report in
             RebuildFailureSheet(viewModel: viewModel, report: report)
         }
@@ -129,6 +132,9 @@ struct ControlCenterView: View {
                     onRebuildEnv: { manager.rebuildEnvironment(serviceID: runtime.id) },
                     onDownloadModels: (runtime.id == "audiocraft_mlx" || runtime.id == "melodyflow" || runtime.id == "stable_audio" || runtime.id == "carey" || runtime.id == "foundation") ? {
                         viewModel.openModelDownloadSheet(for: runtime.id)
+                    } : nil,
+                    onManageCareyLoras: runtime.id == "carey" ? {
+                        viewModel.openCareyLoraSheet()
                     } : nil,
                     downloadModelsExtraDisabled: runtime.id == "stable_audio" && !viewModel.stableAudioTokenConfigured
                 )
@@ -791,6 +797,371 @@ private struct RequirementsEditorSheet: View {
         }
         .padding(16)
         .frame(minWidth: 820, minHeight: 560)
+    }
+}
+
+private struct CareyLoraManagerSheet: View {
+    private struct CareyCaptionPoolRow: Identifiable {
+        let name: String
+        let count: Int
+
+        var id: String { name }
+    }
+
+    @ObservedObject var viewModel: ControlCenterViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var formName: String = ""
+    @State private var checkpointPath: String = ""
+    @State private var captionsPath: String = ""
+    @State private var modelFamily: CareyLoraModelFamily = .standard
+
+    private var canSave: Bool {
+        !viewModel.isCareyLoraSaving
+            && !formName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !checkpointPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var canBuild: Bool {
+        viewModel.isCareyEnvironmentReady
+            && viewModel.isCareyServiceRunning
+            && !viewModel.isCareyLoraBuilding
+    }
+
+    private var sortedPools: [CareyCaptionPoolRow] {
+        (viewModel.careyLoraState?.pools ?? [:])
+            .map { CareyCaptionPoolRow(name: $0.key, count: $0.value) }
+            .sorted { lhs, rhs in
+                lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("carey lora manager")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("close")
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
+                .help("close")
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("add local loras, keep the registry in sync, and build caption pools for the gary4juce dice button.")
+                        .font(.subheadline)
+
+                    Text("if your `.txt` sidecars live somewhere other than the adapter folder, point the captions/source path at that directory.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Text("the model family tag controls which loras are exposed when carey is running in standard vs xl mode.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if !viewModel.isCareyEnvironmentReady {
+                        Text("build carey first. you can save lora entries now, but captions generation is unavailable until the carey env exists.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    } else if !viewModel.isCareyServiceRunning {
+                        Text("carey is not running. you can save lora entries now; start carey to build captions and hot-reload the registry.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+
+                    if viewModel.careyLoraRequiresMpsBackend {
+                        Text("carey is currently set to the mlx backend. adapter registration still works, but lora generation should use mps until ace-step supports lora application in the mlx diffusion path.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("new entry")
+                            .font(.headline)
+
+                        TextField("lora name", text: $formName)
+                            .textFieldStyle(.roundedBorder)
+
+                        Picker("model family", selection: $modelFamily) {
+                            ForEach(CareyLoraModelFamily.allCases) { family in
+                                Text(family.rawValue).tag(family)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("checkpoint folder")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            HStack(spacing: 8) {
+                                TextField("path to adapter folder", text: $checkpointPath)
+                                    .textFieldStyle(.roundedBorder)
+                                Button("pick folder") {
+                                    pickCheckpointFolder()
+                                }
+                            }
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("captions/source folder (optional)")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            HStack(spacing: 8) {
+                                TextField("path to caption sidecars", text: $captionsPath)
+                                    .textFieldStyle(.roundedBorder)
+                                Button("pick folder") {
+                                    pickCaptionsFolder()
+                                }
+                            }
+                        }
+
+                        HStack(spacing: 8) {
+                            Button(viewModel.isCareyLoraSaving ? "saving..." : "save lora") {
+                                Task {
+                                    await viewModel.saveCareyLora(
+                                        name: formName,
+                                        checkpointPath: checkpointPath,
+                                        captionsPath: captionsPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : captionsPath,
+                                        modelFamily: modelFamily
+                                    )
+                                    if viewModel.careyLoraErrorMessage.isEmpty {
+                                        resetForm()
+                                    }
+                                }
+                            }
+                            .disabled(!canSave)
+
+                            Button("refresh") {
+                                Task { await viewModel.refreshCareyLoraState() }
+                            }
+                            .disabled(viewModel.isCareyLoraLoading || viewModel.isCareyLoraSaving || viewModel.isCareyLoraBuilding)
+
+                            Button(viewModel.isCareyLoraBuilding ? "building..." : "build captions") {
+                                Task { await viewModel.buildCareyLoraCaptions() }
+                            }
+                            .disabled(!canBuild)
+
+                            Button("open examples repo") {
+                                guard let url = URL(string: "https://github.com/betweentwomidnights/gary-lora-examples") else { return }
+                                NSWorkspace.shared.open(url)
+                            }
+
+                            Spacer()
+                        }
+                    }
+
+                    if !viewModel.careyLoraStatusMessage.isEmpty {
+                        Text(viewModel.careyLoraStatusMessage)
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+
+                    if !viewModel.careyLoraErrorMessage.isEmpty {
+                        Text(viewModel.careyLoraErrorMessage)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    if !viewModel.careyLoraBuildOutput.isEmpty {
+                        ScrollView {
+                            Text(viewModel.careyLoraBuildOutput)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(10)
+                        }
+                        .frame(minHeight: 90, maxHeight: 180)
+                        .background(Color(NSColor.textBackgroundColor))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.gray.opacity(0.2))
+                        )
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("registered loras")
+                            .font(.headline)
+
+                        if viewModel.isCareyLoraLoading && viewModel.careyLoraState == nil {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else if let state = viewModel.careyLoraState, !state.entries.isEmpty {
+                            List {
+                                ForEach(state.entries) { entry in
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        HStack(alignment: .firstTextBaseline) {
+                                            Text(entry.name)
+                                                .font(.headline)
+                                            Spacer()
+                                            Button("remove", role: .destructive) {
+                                                Task { await viewModel.removeCareyLora(named: entry.name) }
+                                            }
+                                            .controlSize(.small)
+                                            .disabled(viewModel.isCareyLoraSaving || viewModel.isCareyLoraBuilding)
+                                        }
+
+                                        Text("\(entry.modelFamily) / backends: \(entry.backends.joined(separator: ", ")) / scale \(entry.scale.formatted())")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+
+                                        Text("checkpoint: \(entry.path)")
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(.secondary)
+                                            .textSelection(.enabled)
+
+                                        if let captionsPath = entry.captionsPath, !captionsPath.isEmpty {
+                                            Text("captions source: \(captionsPath)")
+                                                .font(.caption.monospaced())
+                                                .foregroundStyle(.secondary)
+                                                .textSelection(.enabled)
+                                        } else if entry.resolvedCaptionsPath != nil {
+                                            Text("captions source: using checkpoint folder sidecars")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        } else {
+                                            Text("captions source: not set")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+
+                                        if entry.registered {
+                                            Text("\(entry.captionCount) caption sidecars detected")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        } else {
+                                            Text("checkpoint folder missing or invalid")
+                                                .font(.caption)
+                                                .foregroundStyle(.red)
+                                        }
+
+                                        if entry.captionCount == 0 {
+                                            Text("no sidecar txts found. the dice button will fall back to the default caption pool.")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .padding(.vertical, 4)
+                                }
+                            }
+                            .listStyle(.inset)
+                            .frame(minHeight: 180, idealHeight: 220)
+                        } else {
+                            Text("no loras added yet.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if !sortedPools.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("captions pools")
+                                .font(.headline)
+
+                            List(sortedPools) { pool in
+                                HStack {
+                                    Text(pool.name)
+                                    Spacer()
+                                    Text("\(pool.count)")
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .listStyle(.inset)
+                            .frame(minHeight: 100, idealHeight: 130, maxHeight: 180)
+                        }
+                    }
+
+                    if let state = viewModel.careyLoraState {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("catalog: \(state.catalogPath)")
+                            Text("registry: \(state.registryPath)")
+                            Text("captions: \(state.captionsPath)")
+                        }
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 820, idealWidth: 900, minHeight: 520, idealHeight: 620)
+        .onAppear {
+            resetFormIfNeeded()
+            if viewModel.careyLoraState == nil {
+                Task { await viewModel.refreshCareyLoraState() }
+            }
+        }
+    }
+
+    private func resetFormIfNeeded() {
+        guard formName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              checkpointPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              captionsPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        resetForm()
+    }
+
+    private func resetForm() {
+        formName = ""
+        checkpointPath = ""
+        captionsPath = ""
+        modelFamily = viewModel.careyUseXlModels ? .xl : .standard
+    }
+
+    private func pickCheckpointFolder() {
+        guard let path = Self.pickDirectory() else { return }
+        checkpointPath = path
+        if formName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            formName = suggestedName(from: path)
+        }
+        if path.lowercased().contains("xl") {
+            modelFamily = .xl
+        }
+    }
+
+    private func pickCaptionsFolder() {
+        guard let path = Self.pickDirectory() else { return }
+        captionsPath = path
+        if formName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            formName = suggestedName(from: path)
+        }
+    }
+
+    private func suggestedName(from path: String) -> String {
+        let base = URL(fileURLWithPath: path).lastPathComponent.lowercased()
+        let cleaned = base.replacingOccurrences(
+            of: #"[^a-z0-9_-]+"#,
+            with: "-",
+            options: .regularExpression
+        )
+        let trimmed = cleaned.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return String(trimmed.prefix(64))
+    }
+
+    private static func pickDirectory() -> String? {
+        let panel = NSOpenPanel()
+        panel.prompt = "choose"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        return panel.runModal() == .OK ? panel.url?.path : nil
     }
 }
 
@@ -1788,6 +2159,7 @@ private struct ServiceRow: View {
     let onRestart: () -> Void
     let onRebuildEnv: () -> Void
     let onDownloadModels: (() -> Void)?
+    let onManageCareyLoras: (() -> Void)?
     let downloadModelsExtraDisabled: Bool
 
     private var downloadModelsDisabled: Bool {
@@ -1810,6 +2182,12 @@ private struct ServiceRow: View {
                             }
                             .controlSize(.small)
                             .disabled(downloadModelsDisabled)
+                        }
+                        if let onManageCareyLoras {
+                            Button("add loras") {
+                                onManageCareyLoras()
+                            }
+                            .controlSize(.small)
                         }
                     }
                     Text("id: \(runtime.id)")

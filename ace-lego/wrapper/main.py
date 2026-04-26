@@ -29,7 +29,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
+import random
 import re
 import subprocess
 import tempfile
@@ -43,10 +45,12 @@ from uuid import uuid4
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger("carey.wrapper")
 
 # ---------------------------------------------------------------------------
 # Config
@@ -62,6 +66,14 @@ else:
     _default_lifecycle = os.getenv("ACESTEP_MANAGE_LIFECYCLE", "true")
 
 MANAGE_MODEL_LIFECYCLE = _default_lifecycle.lower() == "true"
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
 
 def _env_first(*names: str, default: str = "") -> str:
     for name in names:
@@ -90,6 +102,23 @@ ACESTEP_TURBO_CONFIG = _env_first(
     "ACESTEP_TURBO_CONFIG",
     default="acestep-v15-turbo",
 )
+ACESTEP_REGULAR_CONFIG = _env_first(
+    "ACESTEP_REGULAR_CONFIG_PATH",
+    "ACESTEP_REGULAR_CONFIG",
+    default=ACESTEP_SFT_CONFIG,
+)
+
+LORA_REGISTRY_PATH = Path(
+    (os.getenv("CAREY_LORA_REGISTRY") or "").strip()
+    or (Path(__file__).parent / "lora_registry.json")
+)
+CAPTIONS_PATH = Path(
+    (os.getenv("CAREY_CAPTIONS") or "").strip()
+    or (Path(__file__).parent / "captions.json")
+)
+LORA_LOAD_TIMEOUT = float(os.getenv("CAREY_LORA_LOAD_TIMEOUT", "600"))
+LORA_SCALE_TIMEOUT = float(os.getenv("CAREY_LORA_SCALE_TIMEOUT", "300"))
+LORA_UNLOAD_TIMEOUT = float(os.getenv("CAREY_LORA_UNLOAD_TIMEOUT", "300"))
 
 # Track whether the backend starts with a model already loaded.
 # With ACESTEP_NO_INIT=true, the backend starts empty and the wrapper must
@@ -105,12 +134,13 @@ EFFECTIVE_MAX_CONCURRENT = 1 if MANAGE_MODEL_LIFECYCLE else MAX_CONCURRENT
 # Generation constants
 INFERENCE_STEPS = 50
 POLL_INTERVAL = 1.5
-GENERATION_TIMEOUT = int(os.getenv("CAREY_GENERATION_TIMEOUT", "600"))
+GENERATION_TIMEOUT = int(os.getenv("CAREY_GENERATION_TIMEOUT", "1800"))
 JOB_TTL = 3600
 
 # Cover mode uses turbo model with locked inference params
 COVER_INFERENCE_STEPS = 8
 COVER_GUIDANCE_SCALE = 1.0
+LEGO_REGULAR_TRACKS = {"vocals", "backing_vocals"}
 
 # Default captions per track type (lego mode only)
 TRACK_CAPTIONS = {
@@ -129,6 +159,105 @@ TRACK_CAPTIONS = {
 }
 
 ALLOWED_TRACKS = set(TRACK_CAPTIONS.keys())
+LORA_REGISTRY: dict[str, dict[str, object]] = {}
+_caption_pools: dict[str, list[str]] = {}
+
+
+def _model_family_for_config(config_path: str) -> str:
+    normalized = (config_path or "").strip().lower()
+    return "xl" if "-xl-" in normalized or normalized.startswith("acestep-v15-xl-") else "standard"
+
+
+def _primary_runtime_family() -> str:
+    return _model_family_for_config(ACESTEP_BASE_CONFIG)
+
+
+def _default_captions_path() -> Path:
+    return Path(__file__).resolve().parent / "default_captions.json"
+
+
+def _sanitize_backend_list(values: object) -> list[str]:
+    allowed = {"base", "turbo", "regular"}
+    if not isinstance(values, list):
+        return ["base", "turbo"]
+    cleaned = []
+    for value in values:
+        text = str(value).strip().lower()
+        if text in allowed and text not in cleaned:
+            cleaned.append(text)
+    return cleaned or ["base", "turbo"]
+
+
+def _load_lora_registry() -> None:
+    LORA_REGISTRY.clear()
+    if not LORA_REGISTRY_PATH.is_file():
+        print(f"[carey] No LoRA registry at {LORA_REGISTRY_PATH}", flush=True)
+        return
+
+    try:
+        data = json.loads(LORA_REGISTRY_PATH.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("registry must be a JSON object")
+
+        for name, cfg in data.items():
+            if not isinstance(cfg, dict):
+                continue
+
+            path = str(cfg.get("path") or "").strip()
+            if not path:
+                continue
+
+            LORA_REGISTRY[str(name)] = {
+                "path": path,
+                "scale": float(cfg.get("scale", 1.0)),
+                "backends": _sanitize_backend_list(cfg.get("backends")),
+                "model_family": "xl" if str(cfg.get("model_family", "standard")).strip().lower() == "xl" else "standard",
+            }
+
+        print(f"[carey] Loaded {len(LORA_REGISTRY)} LoRAs from registry", flush=True)
+    except Exception as exc:
+        print(f"[carey] LoRA registry load failed: {exc}", flush=True)
+
+
+def _load_captions() -> None:
+    _caption_pools.clear()
+    loaded_primary = False
+
+    if CAPTIONS_PATH.is_file():
+        try:
+            data = json.loads(CAPTIONS_PATH.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("captions must be a JSON object")
+
+            for pool_name, entries in data.items():
+                if not isinstance(entries, list):
+                    continue
+                cleaned = [str(entry).strip() for entry in entries if str(entry).strip()]
+                if cleaned:
+                    _caption_pools[str(pool_name)] = cleaned
+            loaded_primary = True
+        except Exception as exc:
+            print(f"[carey] captions.json load failed: {exc}", flush=True)
+    else:
+        print(f"[carey] No captions.json at {CAPTIONS_PATH}", flush=True)
+
+    if not _caption_pools.get("default"):
+        default_path = _default_captions_path()
+        if default_path.is_file():
+            try:
+                default_data = json.loads(default_path.read_text(encoding="utf-8"))
+                default_entries = default_data.get("default")
+                if isinstance(default_entries, list):
+                    cleaned = [str(entry).strip() for entry in default_entries if str(entry).strip()]
+                    if cleaned:
+                        _caption_pools["default"] = cleaned
+                        print(f"[carey] Loaded default fallback captions from {default_path}", flush=True)
+            except Exception as exc:
+                print(f"[carey] default captions load failed: {exc}", flush=True)
+
+    summary = ", ".join(f"{name}({len(entries)})" for name, entries in _caption_pools.items())
+    if loaded_primary or _caption_pools:
+        print(f"[carey] Loaded captions: {summary or 'none'}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +325,8 @@ class LegoRequest(BaseModel):
     time_signature: str = Field("4", description="Time signature numerator")
     batch_size: int = Field(1, description="Number of candidates")
     audio_format: str = Field("wav", description="Output format: wav, mp3, flac")
+    lora: str = Field("", description="Optional LoRA adapter name. Empty = no adapter.")
+    lora_scale: float = Field(-1.0, description="Override LoRA scale 0.0-1.0. -1 = use registry default.")
 
 
 class CompleteRequest(BaseModel):
@@ -220,6 +351,8 @@ class CompleteRequest(BaseModel):
             "'turbo', 'base', and 'sft'. Turbo is fixed to 8 steps / cfg 1.0."
         ),
     )
+    lora: str = Field("", description="Optional LoRA adapter name. Empty = no adapter.")
+    lora_scale: float = Field(-1.0, description="Override LoRA scale 0.0-1.0. -1 = use registry default.")
 
 
 class CoverRequest(BaseModel):
@@ -238,6 +371,8 @@ class CoverRequest(BaseModel):
     time_signature: str = Field("4", description="Time signature numerator")
     batch_size: int = Field(1, description="Number of candidates")
     audio_format: str = Field("wav", description="Output format: wav, mp3, flac")
+    lora: str = Field("", description="Optional LoRA adapter name. Empty = no adapter.")
+    lora_scale: float = Field(-1.0, description="Override LoRA scale 0.0-1.0. -1 = use registry default.")
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +393,8 @@ app.add_middleware(
 async def _init():
     global _generation_semaphore
     _generation_semaphore = asyncio.Semaphore(EFFECTIVE_MAX_CONCURRENT)
+    _load_lora_registry()
+    _load_captions()
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +485,16 @@ def _complete_model_variant(model_name: str) -> str:
         return "turbo"
     if "sft" in normalized:
         return "sft"
+    return "base"
+
+
+def _backend_key_for(task_type: str, requested_model: str = "", track_name: str = "") -> str:
+    if task_type == "lego" and track_name in LEGO_REGULAR_TRACKS:
+        return "regular"
+    if task_type == "cover":
+        return "turbo"
+    if task_type == "complete" and _complete_model_variant(requested_model) == "turbo":
+        return "turbo"
     return "base"
 
 
@@ -444,6 +591,40 @@ async def _unload_model(client: httpx.AsyncClient) -> None:
         raise RuntimeError(f"ACE-Step /v1/unload failed: {resp.text}")
 
 
+async def _load_lora(client: httpx.AsyncClient, lora_path: str, scale: float = 1.0) -> None:
+    resp = await client.post(
+        f"{ACESTEP_URL}/v1/lora/load",
+        json={"lora_path": lora_path},
+        timeout=LORA_LOAD_TIMEOUT,
+    )
+    load_ok = False
+    if resp.status_code == 200:
+        load_ok = True
+    elif "already in use" in resp.text.lower():
+        load_ok = True
+    else:
+        raise RuntimeError(f"/v1/lora/load failed: {resp.text}")
+
+    if load_ok and scale != 1.0:
+        scale_resp = await client.post(
+            f"{ACESTEP_URL}/v1/lora/scale",
+            json={"scale": scale},
+            timeout=LORA_SCALE_TIMEOUT,
+        )
+        if scale_resp.status_code != 200:
+            raise RuntimeError(f"/v1/lora/scale failed: {scale_resp.text}")
+
+
+async def _unload_lora(client: httpx.AsyncClient) -> None:
+    try:
+        await client.post(
+            f"{ACESTEP_URL}/v1/lora/unload",
+            timeout=LORA_UNLOAD_TIMEOUT,
+        )
+    except Exception as exc:
+        logger.warning("LoRA unload cleanup failed: %s", exc)
+
+
 def _required_config_for_task(task_type: str, requested_model: str = "") -> str:
     """Return the model config required for a given task type."""
     if task_type == "cover":
@@ -455,6 +636,16 @@ def _required_config_for_task(task_type: str, requested_model: str = "") -> str:
         if variant == "sft":
             return ACESTEP_SFT_CONFIG
     return ACESTEP_BASE_CONFIG
+
+
+def _required_model_for_task(task_type: str, requested_model: str = "", track_name: str = "") -> str:
+    if task_type == "lego" and track_name in LEGO_REGULAR_TRACKS:
+        return ACESTEP_REGULAR_CONFIG
+    return _required_config_for_task(task_type, requested_model)
+
+
+def _required_model_family_for_task(task_type: str, requested_model: str = "", track_name: str = "") -> str:
+    return _model_family_for_config(_required_model_for_task(task_type, requested_model, track_name))
 
 
 def _effective_guidance_scale(task_type: str, requested: float, requested_model: str = "") -> float:
@@ -480,7 +671,11 @@ async def _ensure_required_model(client: httpx.AsyncClient, job: Job, req) -> No
     if not MANAGE_MODEL_LIFECYCLE:
         return
 
-    required = _required_config_for_task(job.task_type, getattr(req, "model", ""))
+    required = _required_model_for_task(
+        job.task_type,
+        getattr(req, "model", ""),
+        getattr(req, "track_name", ""),
+    )
     if _current_model == required:
         return
 
@@ -562,6 +757,36 @@ async def _run_generation(job: Job, req):
     raw_audio_path = None
     compressed_path = None
     session_id = f"acestep-{int(time.time() * 1000)}"
+    requested_model = getattr(req, "model", "")
+    track_name = getattr(req, "track_name", "")
+    lora_name = (getattr(req, "lora", "") or "").strip()
+    backend_key = _backend_key_for(job.task_type, requested_model, track_name)
+    required_family = _required_model_family_for_task(job.task_type, requested_model, track_name)
+    lora_config = None
+
+    if lora_name:
+        lora_config = LORA_REGISTRY.get(lora_name)
+        if not lora_config:
+            job.status = JobStatus.FAILED
+            job.error = f"Unknown LoRA '{lora_name}'"
+            job.progress_text = f"failed: unknown LoRA '{lora_name}'"
+            return
+
+        lora_family = str(lora_config.get("model_family", "standard")).strip().lower() or "standard"
+        if lora_family != required_family:
+            job.status = JobStatus.FAILED
+            job.error = (
+                f"LoRA '{lora_name}' targets the {lora_family} model family "
+                f"but this request needs {required_family}"
+            )
+            job.progress_text = f"failed: LoRA '{lora_name}' targets {lora_family}, not {required_family}"
+            return
+
+        if backend_key not in list(lora_config.get("backends", ["base", "turbo"])):
+            job.status = JobStatus.FAILED
+            job.error = f"LoRA '{lora_name}' is not supported on the {backend_key} backend"
+            job.progress_text = f"failed: LoRA '{lora_name}' is not supported on {backend_key}"
+            return
 
     async with _generation_semaphore:
         try:
@@ -609,6 +834,15 @@ async def _run_generation(job: Job, req):
                 try:
                     if MANAGE_MODEL_LIFECYCLE:
                         await _ensure_required_model(client, job, req)
+                    await _unload_lora(client)
+
+                    if lora_config:
+                        req_scale = getattr(req, "lora_scale", -1.0)
+                        scale = req_scale if 0.0 <= req_scale <= 1.0 else float(lora_config.get("scale", 1.0))
+                        job.status = JobStatus.LOADING
+                        job.progress = max(job.progress, 8)
+                        job.progress_text = f"loading LoRA {lora_name}..."
+                        await _load_lora(client, str(lora_config["path"]), scale)
 
                     # --- Submit to ace-step ---
                     job.status = JobStatus.SUBMITTING
@@ -808,6 +1042,8 @@ async def _run_generation(job: Job, req):
                     job.progress_text = "complete"
 
                 finally:
+                    if lora_config:
+                        await _unload_lora(client)
                     # On localhost with lifecycle management, keep the model
                     # loaded between jobs — _ensure_required_model handles
                     # switching when the next task needs a different variant.
@@ -817,9 +1053,17 @@ async def _run_generation(job: Job, req):
                         await _release_gpu_token(client, session_id)
 
         except Exception as e:
+            logger.exception(
+                "Carey generation failed for task_id=%s type=%s lora=%s ace_task_id=%s",
+                job.task_id,
+                job.task_type,
+                lora_name or "<none>",
+                job.ace_task_id or "<none>",
+            )
+            error_text = str(e).strip() or type(e).__name__
             job.status = JobStatus.FAILED
-            job.error = str(e)
-            job.progress_text = f"failed: {e}"
+            job.error = error_text
+            job.progress_text = f"failed: {error_text}"
 
         finally:
             for p in [raw_audio_path, compressed_path]:
@@ -895,6 +1139,55 @@ def _build_status_response(job: Job) -> JSONResponse:
     })
 
 
+def _validate_lora_request(task_type: str, req) -> None:
+    lora_name = (getattr(req, "lora", "") or "").strip()
+    if not lora_name:
+        return
+
+    lora_config = LORA_REGISTRY.get(lora_name)
+    if not lora_config:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_code": "invalid_lora",
+                "error": f"Unknown LoRA '{lora_name}'. Available: {sorted(LORA_REGISTRY.keys())}",
+            },
+        )
+
+    backend_key = _backend_key_for(
+        task_type,
+        getattr(req, "model", ""),
+        getattr(req, "track_name", ""),
+    )
+    required_family = _required_model_family_for_task(
+        task_type,
+        getattr(req, "model", ""),
+        getattr(req, "track_name", ""),
+    )
+    lora_family = str(lora_config.get("model_family", "standard")).strip().lower() or "standard"
+    if lora_family != required_family:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_code": "invalid_lora",
+                "error": (
+                    f"LoRA '{lora_name}' targets the {lora_family} model family, "
+                    f"but this request needs {required_family}"
+                ),
+            },
+        )
+
+    backends = list(lora_config.get("backends", ["base", "turbo"]))
+    if backend_key not in backends:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_code": "invalid_lora",
+                "error": f"LoRA '{lora_name}' is not supported on the {backend_key} backend",
+            },
+        )
+
+
 # ---------------------------------------------------------------------------
 # Lego endpoints
 # ---------------------------------------------------------------------------
@@ -904,6 +1197,7 @@ async def lego_submit(req: LegoRequest):
     """Submit a lego stem generation. Returns task_id immediately."""
     if req.track_name not in ALLOWED_TRACKS:
         raise HTTPException(400, f"track_name must be one of {sorted(ALLOWED_TRACKS)}")
+    _validate_lora_request("lego", req)
 
     _cleanup_old_jobs()
     task_id = str(uuid4())
@@ -946,6 +1240,7 @@ async def complete_submit(req: CompleteRequest):
         raise HTTPException(400, "audio_duration must be at least 5 seconds")
     if req.audio_duration > 300:
         raise HTTPException(400, "audio_duration must be at most 300 seconds (5 min)")
+    _validate_lora_request("complete", req)
 
     _cleanup_old_jobs()
     task_id = str(uuid4())
@@ -988,6 +1283,7 @@ async def cover_submit(req: CoverRequest):
         raise HTTPException(400, "cover_noise_strength must be 0.0-1.0")
     if req.audio_cover_strength < 0 or req.audio_cover_strength > 1:
         raise HTTPException(400, "audio_cover_strength must be 0.0-1.0")
+    _validate_lora_request("cover", req)
 
     _cleanup_old_jobs()
     task_id = str(uuid4())
@@ -1016,6 +1312,52 @@ async def cover_status(task_id: str):
             "success": False, "status": "failed", "error": "Unknown task_id",
         }, status_code=404)
     return _build_status_response(job)
+
+
+# ---------------------------------------------------------------------------
+# LoRA + captions admin
+# ---------------------------------------------------------------------------
+
+@app.get("/loras")
+async def list_loras():
+    active_family = _primary_runtime_family()
+    payload = {
+        name: {
+            "scale": float(cfg.get("scale", 1.0)),
+            "backends": list(cfg.get("backends", ["base", "turbo"])),
+        }
+        for name, cfg in sorted(LORA_REGISTRY.items())
+        if str(cfg.get("model_family", "standard")).strip().lower() == active_family
+    }
+    return JSONResponse(payload)
+
+
+@app.get("/captions")
+async def get_caption(lora: str | None = Query(default=None)):
+    pool_name = (lora or "default").strip() or "default"
+    pool = _caption_pools.get(pool_name)
+    if not pool:
+        raise HTTPException(status_code=404, detail=f"No captions for '{pool_name}'")
+    return JSONResponse({
+        "caption": random.choice(pool),
+        "pool": pool_name,
+        "pool_size": len(pool),
+    })
+
+
+@app.get("/captions/pools")
+async def get_caption_pools():
+    return JSONResponse({name: len(entries) for name, entries in sorted(_caption_pools.items())})
+
+
+@app.post("/admin/reload")
+async def admin_reload():
+    _load_lora_registry()
+    _load_captions()
+    return JSONResponse({
+        "loras": len(LORA_REGISTRY),
+        "pools": {name: len(entries) for name, entries in sorted(_caption_pools.items())},
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -1089,6 +1431,10 @@ async def health():
         "base_model": ACESTEP_BASE_CONFIG,
         "sft_model": ACESTEP_SFT_CONFIG,
         "turbo_model": ACESTEP_TURBO_CONFIG,
+        "regular_model": ACESTEP_REGULAR_CONFIG,
+        "active_model_family": _primary_runtime_family(),
+        "loras": len(LORA_REGISTRY),
+        "caption_pools": {name: len(entries) for name, entries in sorted(_caption_pools.items())},
         "active_jobs": active_jobs,
         "max_concurrent": EFFECTIVE_MAX_CONCURRENT,
         "configured_max_concurrent": MAX_CONCURRENT,

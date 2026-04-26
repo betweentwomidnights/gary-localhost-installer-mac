@@ -131,6 +131,92 @@ enum CareyDownloadTarget: String, CaseIterable, Identifiable {
     }
 }
 
+enum CareyLoraModelFamily: String, CaseIterable, Identifiable, Codable {
+    case standard
+    case xl
+
+    var id: String { rawValue }
+}
+
+struct CareyLoraCatalogEntry: Codable {
+    var path: String
+    var captionsPath: String?
+    var scale: Double
+    var backends: [String]
+    var modelFamily: String
+
+    init(
+        path: String,
+        captionsPath: String?,
+        scale: Double = 1.0,
+        backends: [String] = ["base", "turbo"],
+        modelFamily: String = "standard"
+    ) {
+        self.path = path
+        self.captionsPath = captionsPath
+        self.scale = scale
+        self.backends = backends
+        self.modelFamily = modelFamily
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case captionsPath
+        case scale
+        case backends
+        case modelFamily
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        path = try container.decode(String.self, forKey: .path)
+        captionsPath = try container.decodeIfPresent(String.self, forKey: .captionsPath)
+        scale = try container.decodeIfPresent(Double.self, forKey: .scale) ?? 1.0
+        backends = try container.decodeIfPresent([String].self, forKey: .backends) ?? ["base", "turbo"]
+        modelFamily = try container.decodeIfPresent(String.self, forKey: .modelFamily) ?? "standard"
+    }
+}
+
+struct CareyLoraEntry: Identifiable {
+    let name: String
+    let path: String
+    let captionsPath: String?
+    let resolvedCaptionsPath: String?
+    let captionCount: Int
+    let scale: Double
+    let backends: [String]
+    let modelFamily: String
+    let checkpointExists: Bool
+    let registered: Bool
+
+    var id: String { name }
+}
+
+struct CareyLoraState {
+    let entries: [CareyLoraEntry]
+    let pools: [String: Int]
+    let catalogPath: String
+    let registryPath: String
+    let captionsPath: String
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
+}
+
+private extension Optional where Wrapped == String {
+    var nilIfEmpty: String? {
+        switch self {
+        case .some(let value):
+            return value.isEmpty ? nil : value
+        case .none:
+            return nil
+        }
+    }
+}
+
 @MainActor
 final class ControlCenterViewModel: ObservableObject {
     private static let stableAudioBackendDefaultsKey = "stableAudioBackendEngine"
@@ -175,6 +261,14 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var careyBackendEngine: CareyBackendEngine = .mlx
     @Published var careyUseXlModels: Bool = false
     @Published var careyUseSampledMlxVaeEncode: Bool = true
+    @Published var isCareyLoraSheetPresented: Bool = false
+    @Published var careyLoraState: CareyLoraState?
+    @Published var isCareyLoraLoading: Bool = false
+    @Published var isCareyLoraSaving: Bool = false
+    @Published var isCareyLoraBuilding: Bool = false
+    @Published var careyLoraStatusMessage: String = ""
+    @Published var careyLoraErrorMessage: String = ""
+    @Published var careyLoraBuildOutput: String = ""
     @Published var melodyFlowBackendStatus: String = ""
     @Published var careyBackendStatus: String = ""
     @Published var rebuildFailureReport: RebuildFailureReport?
@@ -459,6 +553,18 @@ final class ControlCenterViewModel: ObservableObject {
             return false
         }
         return resolveCareyDownloadScriptURL(for: runtime) != nil
+    }
+
+    var isCareyServiceRunning: Bool {
+        manager?.services.first(where: { $0.id == "carey" })?.processState == .running
+    }
+
+    var isCareyEnvironmentReady: Bool {
+        careyPythonExecutableURL() != nil
+    }
+
+    var careyLoraRequiresMpsBackend: Bool {
+        careyBackendEngine == .mlx
     }
 
     private func activeCareyConfigNames() -> (base: String, sft: String, turbo: String) {
@@ -793,6 +899,175 @@ final class ControlCenterViewModel: ObservableObject {
                     : "carey mean MLX VAE encode saved for the next MLX start."
             }
         }
+    }
+
+    func openCareyLoraSheet() {
+        isCareyLoraSheetPresented = true
+        Task { await refreshCareyLoraState() }
+    }
+
+    func refreshCareyLoraState() async {
+        isCareyLoraLoading = true
+        careyLoraErrorMessage = ""
+        do {
+            careyLoraState = try buildCareyLoraState()
+        } catch {
+            careyLoraErrorMessage = error.localizedDescription
+        }
+        isCareyLoraLoading = false
+    }
+
+    func saveCareyLora(
+        name: String,
+        checkpointPath: String,
+        captionsPath: String?,
+        modelFamily: CareyLoraModelFamily
+    ) async {
+        isCareyLoraSaving = true
+        careyLoraErrorMessage = ""
+        careyLoraStatusMessage = ""
+        careyLoraBuildOutput = ""
+
+        do {
+            let normalizedName = try sanitizeCareyLoraName(name)
+            let checkpointDirectory = expandedFileURL(from: checkpointPath)
+            guard Self.looksLikeCareyLoraCheckpointDirectory(checkpointDirectory) else {
+                throw NSError(
+                    domain: "ControlCenterViewModel",
+                    code: 2001,
+                    userInfo: [NSLocalizedDescriptionKey: "\(checkpointDirectory.path) does not look like a LoRA checkpoint folder."]
+                )
+            }
+
+            let trimmedCaptionsPath = captionsPath?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty
+            let captionsDirectory = trimmedCaptionsPath.map(expandedFileURL(from:))
+            if let captionsDirectory, !FileManager.default.fileExists(atPath: captionsDirectory.path) {
+                throw NSError(
+                    domain: "ControlCenterViewModel",
+                    code: 2002,
+                    userInfo: [NSLocalizedDescriptionKey: "\(captionsDirectory.path) is not a valid captions/source folder."]
+                )
+            }
+
+            let catalogURL = careyLoraCatalogURL()
+            var catalog = try readCareyLoraCatalog(at: catalogURL)
+            let existing = catalog[normalizedName]
+            let (scale, backends, _) = try loadCareyLoraMetadata(
+                checkpointDirectory: checkpointDirectory,
+                captionsDirectory: captionsDirectory,
+                existing: existing
+            )
+
+            catalog[normalizedName] = CareyLoraCatalogEntry(
+                path: checkpointDirectory.path,
+                captionsPath: captionsDirectory?.path,
+                scale: scale,
+                backends: backends,
+                modelFamily: modelFamily.rawValue
+            )
+            try saveCareyLoraCatalog(catalog, to: catalogURL)
+
+            careyLoraState = try buildCareyLoraState()
+            let reloaded = await tryReloadCareyAdminIfRunning()
+            careyLoraStatusMessage = reloaded
+                ? "saved \(normalizedName) and reloaded carey."
+                : "saved \(normalizedName)."
+        } catch {
+            careyLoraErrorMessage = error.localizedDescription
+        }
+
+        isCareyLoraSaving = false
+    }
+
+    func removeCareyLora(named name: String) async {
+        careyLoraErrorMessage = ""
+        careyLoraStatusMessage = ""
+        careyLoraBuildOutput = ""
+
+        do {
+            let normalizedName = try sanitizeCareyLoraName(name)
+            let catalogURL = careyLoraCatalogURL()
+            var catalog = try readCareyLoraCatalog(at: catalogURL)
+            catalog.removeValue(forKey: normalizedName)
+            try saveCareyLoraCatalog(catalog, to: catalogURL)
+            careyLoraState = try buildCareyLoraState()
+            let reloaded = await tryReloadCareyAdminIfRunning()
+            careyLoraStatusMessage = reloaded
+                ? "removed \(normalizedName) and reloaded carey."
+                : "removed \(normalizedName)."
+        } catch {
+            careyLoraErrorMessage = error.localizedDescription
+        }
+    }
+
+    func buildCareyLoraCaptions() async {
+        isCareyLoraBuilding = true
+        careyLoraErrorMessage = ""
+        careyLoraStatusMessage = ""
+        careyLoraBuildOutput = ""
+
+        do {
+            let initialState = try buildCareyLoraState()
+            guard let pythonURL = careyPythonExecutableURL() else {
+                throw NSError(
+                    domain: "ControlCenterViewModel",
+                    code: 2003,
+                    userInfo: [NSLocalizedDescriptionKey: "Carey must be built before captions can be generated."]
+                )
+            }
+            let scriptURL = careyWrapperDirectoryURL().appendingPathComponent("build_captions.py")
+            guard FileManager.default.fileExists(atPath: scriptURL.path) else {
+                throw NSError(
+                    domain: "ControlCenterViewModel",
+                    code: 2004,
+                    userInfo: [NSLocalizedDescriptionKey: "Missing \(scriptURL.path)."]
+                )
+            }
+
+            let captionsURL = careyCaptionsURL()
+            try FileManager.default.createDirectory(
+                at: captionsURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+
+            var arguments = [scriptURL.path]
+            for entry in initialState.entries where entry.registered && entry.captionCount > 0 {
+                guard let resolvedCaptionsPath = entry.resolvedCaptionsPath else { continue }
+                arguments.append("--lora")
+                arguments.append("\(entry.name):\(resolvedCaptionsPath)")
+            }
+            arguments.append("-o")
+            arguments.append(captionsURL.path)
+
+            let result = Self.runLocalProcess(
+                executableURL: pythonURL,
+                arguments: arguments,
+                currentDirectory: careyWrapperDirectoryURL()
+            )
+
+            careyLoraBuildOutput = result.output
+            if result.exitCode != 0 {
+                throw NSError(
+                    domain: "ControlCenterViewModel",
+                    code: Int(result.exitCode),
+                    userInfo: [NSLocalizedDescriptionKey: result.output.nilIfEmpty ?? "build_captions.py failed."]
+                )
+            }
+
+            try ensureDefaultCareyCaptions()
+            careyLoraState = try buildCareyLoraState()
+            let reloaded = await tryReloadCareyAdminIfRunning()
+            careyLoraStatusMessage = reloaded
+                ? "captions.json updated and reloaded carey."
+                : "captions.json updated."
+        } catch {
+            careyLoraErrorMessage = error.localizedDescription
+        }
+
+        isCareyLoraBuilding = false
     }
 
     func updateLogViewerPinnedToBottom(_ pinnedToBottom: Bool) {
@@ -1606,15 +1881,16 @@ final class ControlCenterViewModel: ObservableObject {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             do {
                 try StableAudioAuthKeychain.saveToken(token)
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.stableAudioTokenInput = ""
                     self.applyStableAudioTokenState(configured: true)
                     self.stableAudioTokenStatus = "token saved in keychain."
                 }
             } catch {
-                DispatchQueue.main.async {
-                    self?.stableAudioTokenStatus = error.localizedDescription
+                let message = error.localizedDescription
+                DispatchQueue.main.async { [weak self] in
+                    self?.stableAudioTokenStatus = message
                 }
             }
         }
@@ -1625,15 +1901,16 @@ final class ControlCenterViewModel: ObservableObject {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             do {
                 try StableAudioAuthKeychain.deleteToken()
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.stableAudioTokenInput = ""
                     self.applyStableAudioTokenState(configured: false)
                     self.stableAudioTokenStatus = "saved token removed."
                 }
             } catch {
-                DispatchQueue.main.async {
-                    self?.stableAudioTokenStatus = error.localizedDescription
+                let message = error.localizedDescription
+                DispatchQueue.main.async { [weak self] in
+                    self?.stableAudioTokenStatus = message
                 }
             }
         }
@@ -1642,7 +1919,7 @@ final class ControlCenterViewModel: ObservableObject {
     func refreshStableAudioTokenState() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let configured = StableAudioAuthKeychain.readToken()?.isEmpty == false
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 self?.applyStableAudioTokenState(configured: configured)
             }
         }
@@ -2277,6 +2554,395 @@ final class ControlCenterViewModel: ObservableObject {
             return (process.terminationStatus, message)
         } catch {
             return (1, "failed to launch carey focused download: \(error.localizedDescription)")
+        }
+    }
+
+    private func currentCareyRuntime() -> ServiceRuntime? {
+        manager?.services.first(where: { $0.id == "carey" })
+    }
+
+    private func sanitizeCareyLoraName(_ raw: String) throws -> String {
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else {
+            throw NSError(
+                domain: "ControlCenterViewModel",
+                code: 2101,
+                userInfo: [NSLocalizedDescriptionKey: "LoRA name is required."]
+            )
+        }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789_-")
+        guard normalized.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
+            throw NSError(
+                domain: "ControlCenterViewModel",
+                code: 2102,
+                userInfo: [NSLocalizedDescriptionKey: "LoRA name must use lowercase letters, numbers, '-' or '_'."]
+            )
+        }
+        return normalized
+    }
+
+    private func expandedFileURL(from rawPath: String) -> URL {
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let expanded = NSString(string: trimmed).expandingTildeInPath
+        if expanded.hasPrefix("/") {
+            return URL(fileURLWithPath: expanded).standardizedFileURL
+        }
+        return URL(fileURLWithPath: expanded, relativeTo: careyWrapperDirectoryURL()).standardizedFileURL
+    }
+
+    private func defaultCareyStorageDirectory() -> URL {
+        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent("Library/Application Support/GaryLocalhost/carey", isDirectory: true)
+    }
+
+    private func careyWrapperDirectoryURL() -> URL {
+        currentCareyRuntime()?.service.workingDirectory.standardizedFileURL
+            ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+                .appendingPathComponent("ace-lego/wrapper", isDirectory: true)
+                .standardizedFileURL
+    }
+
+    private func careyLoraRegistryURL() -> URL {
+        if let configured = currentCareyRuntime()?.service.environment["CAREY_LORA_REGISTRY"]?.nilIfEmpty {
+            return expandedFileURL(from: configured)
+        }
+        return defaultCareyStorageDirectory().appendingPathComponent("lora_registry.json")
+    }
+
+    private func careyCaptionsURL() -> URL {
+        if let configured = currentCareyRuntime()?.service.environment["CAREY_CAPTIONS"]?.nilIfEmpty {
+            return expandedFileURL(from: configured)
+        }
+        return defaultCareyStorageDirectory().appendingPathComponent("captions.json")
+    }
+
+    private func careyLoraCatalogURL() -> URL {
+        careyLoraRegistryURL().deletingLastPathComponent().appendingPathComponent("lora_catalog.json")
+    }
+
+    private func careyDefaultCaptionsURL() -> URL {
+        careyWrapperDirectoryURL().appendingPathComponent("default_captions.json")
+    }
+
+    private func careyPythonExecutableURL() -> URL? {
+        if let configured = currentCareyRuntime()?.service.environment["CAREY_PYTHON"]?.nilIfEmpty {
+            let url = expandedFileURL(from: configured)
+            if FileManager.default.fileExists(atPath: url.path) {
+                return url
+            }
+        }
+        if let venvDirectory = currentCareyRuntime()?.service.bootstrap?.venvDirectory {
+            let url = venvDirectory.appendingPathComponent("bin/python")
+            if FileManager.default.fileExists(atPath: url.path) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private static func normalizeCareyLoraBackends(_ values: [String]) -> [String] {
+        var cleaned: [String] = []
+        for value in values {
+            let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if ["base", "turbo", "regular"].contains(normalized), !cleaned.contains(normalized) {
+                cleaned.append(normalized)
+            }
+        }
+        return cleaned.isEmpty ? ["base", "turbo"] : cleaned
+    }
+
+    private static func normalizeCareyLoraModelFamily(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "xl" ? "xl" : "standard"
+    }
+
+    private static func inferCareyLoraModelFamily(from checkpointDirectory: URL) -> String {
+        checkpointDirectory.lastPathComponent.lowercased().contains("xl") ? "xl" : "standard"
+    }
+
+    private static func looksLikeCareyLoraCheckpointDirectory(_ directory: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return false
+        }
+
+        let requiredNames = [
+            "adapter_config.json",
+            "adapter_model.safetensors",
+            "pytorch_lora_weights.safetensors",
+        ]
+        if requiredNames.contains(where: { FileManager.default.fileExists(atPath: directory.appendingPathComponent($0).path) }) {
+            return true
+        }
+
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ) else {
+            return false
+        }
+
+        return contents.contains { $0.pathExtension.lowercased() == "safetensors" }
+    }
+
+    private static func countCareyCaptionSidecars(in directory: URL) -> Int {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return 0
+        }
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey]
+        ) else {
+            return 0
+        }
+        return contents.filter { url in
+            guard url.pathExtension.lowercased() == "txt" else { return false }
+            let name = url.lastPathComponent
+            return !name.contains(".v4bak") && !name.hasSuffix(".v4bak")
+        }.count
+    }
+
+    private func readCareyLoraCatalog(at url: URL) throws -> [String: CareyLoraCatalogEntry] {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return [:]
+        }
+
+        let data = try Data(contentsOf: url)
+        let decoded = try JSONDecoder().decode([String: CareyLoraCatalogEntry].self, from: data)
+        var normalized: [String: CareyLoraCatalogEntry] = [:]
+        for (name, var entry) in decoded {
+            let trimmedPath = entry.path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedPath.isEmpty else { continue }
+            entry.path = trimmedPath
+            entry.captionsPath = entry.captionsPath?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            entry.scale = entry.scale.isFinite ? entry.scale : 1.0
+            entry.backends = Self.normalizeCareyLoraBackends(entry.backends)
+            entry.modelFamily = Self.normalizeCareyLoraModelFamily(entry.modelFamily)
+            normalized[name] = entry
+        }
+        return normalized
+    }
+
+    private func saveCareyLoraCatalog(_ catalog: [String: CareyLoraCatalogEntry], to url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(catalog)
+        try data.write(to: url, options: .atomic)
+    }
+
+    private func resolveCareyCaptionsSource(for entry: CareyLoraCatalogEntry) -> URL? {
+        if let captionsPath = entry.captionsPath?.nilIfEmpty {
+            let url = expandedFileURL(from: captionsPath)
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                return url
+            }
+        }
+
+        let checkpointDirectory = expandedFileURL(from: entry.path)
+        return Self.countCareyCaptionSidecars(in: checkpointDirectory) > 0 ? checkpointDirectory : nil
+    }
+
+    private func loadCareyLoraMetadata(
+        checkpointDirectory: URL,
+        captionsDirectory: URL?,
+        existing: CareyLoraCatalogEntry?
+    ) throws -> (Double, [String], String) {
+        var candidates = [checkpointDirectory.appendingPathComponent("metadata.json")]
+        if let captionsDirectory {
+            let candidate = captionsDirectory.appendingPathComponent("metadata.json")
+            if !candidates.contains(candidate) {
+                candidates.append(candidate)
+            }
+        }
+
+        for candidate in candidates where FileManager.default.fileExists(atPath: candidate.path) {
+            let data = try Data(contentsOf: candidate)
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                continue
+            }
+            let scale = (json["scale"] as? Double) ?? 1.0
+            let backends = Self.normalizeCareyLoraBackends(json["backends"] as? [String] ?? [])
+            let modelFamily = Self.normalizeCareyLoraModelFamily(
+                (json["model_family"] as? String)
+                ?? (json["family"] as? String)
+                ?? Self.inferCareyLoraModelFamily(from: checkpointDirectory)
+            )
+            return (scale, backends, modelFamily)
+        }
+
+        if let existing {
+            return (
+                existing.scale,
+                Self.normalizeCareyLoraBackends(existing.backends),
+                Self.normalizeCareyLoraModelFamily(existing.modelFamily)
+            )
+        }
+
+        return (
+            1.0,
+            ["base", "turbo"],
+            Self.inferCareyLoraModelFamily(from: checkpointDirectory)
+        )
+    }
+
+    private func buildCareyLoraEntries(from catalog: [String: CareyLoraCatalogEntry]) -> [CareyLoraEntry] {
+        catalog.keys.sorted().compactMap { name in
+            guard let entry = catalog[name] else { return nil }
+            let checkpointURL = expandedFileURL(from: entry.path)
+            let checkpointExists = Self.looksLikeCareyLoraCheckpointDirectory(checkpointURL)
+            let resolvedCaptionsURL = resolveCareyCaptionsSource(for: entry)
+            let captionCount = resolvedCaptionsURL.map { Self.countCareyCaptionSidecars(in: $0) } ?? 0
+
+            return CareyLoraEntry(
+                name: name,
+                path: checkpointURL.path,
+                captionsPath: entry.captionsPath,
+                resolvedCaptionsPath: resolvedCaptionsURL?.path,
+                captionCount: captionCount,
+                scale: entry.scale,
+                backends: Self.normalizeCareyLoraBackends(entry.backends),
+                modelFamily: Self.normalizeCareyLoraModelFamily(entry.modelFamily),
+                checkpointExists: checkpointExists,
+                registered: checkpointExists
+            )
+        }
+    }
+
+    private func writeCareyLoraRegistry(entries: [CareyLoraEntry], to url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+
+        var payload: [String: [String: Any]] = [:]
+        for entry in entries where entry.registered {
+            payload[entry.name] = [
+                "path": entry.path,
+                "scale": entry.scale,
+                "backends": entry.backends,
+                "model_family": entry.modelFamily,
+            ]
+        }
+
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: url, options: .atomic)
+    }
+
+    private func readCareyCaptionPools(from url: URL) -> [String: Int] {
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+
+        var pools: [String: Int] = [:]
+        for (name, value) in json {
+            pools[name] = (value as? [Any])?.count ?? 0
+        }
+        return pools
+    }
+
+    private func readBundledDefaultCareyCaptionPool() -> [String] {
+        let url = careyDefaultCaptionsURL()
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = json["default"] as? [String] else {
+            return []
+        }
+        return items.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
+    private func ensureDefaultCareyCaptions() throws {
+        let defaultPool = readBundledDefaultCareyCaptionPool()
+        guard !defaultPool.isEmpty else { return }
+
+        let captionsURL = careyCaptionsURL()
+        try FileManager.default.createDirectory(
+            at: captionsURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+
+        var payload: [String: Any] = [:]
+        if let existingData = try? Data(contentsOf: captionsURL),
+           let existingJSON = try? JSONSerialization.jsonObject(with: existingData) as? [String: Any] {
+            payload = existingJSON
+        }
+        payload["default"] = defaultPool
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: captionsURL, options: .atomic)
+    }
+
+    private func buildCareyLoraState() throws -> CareyLoraState {
+        try ensureDefaultCareyCaptions()
+        let catalogURL = careyLoraCatalogURL()
+        let registryURL = careyLoraRegistryURL()
+        let captionsURL = careyCaptionsURL()
+        let catalog = try readCareyLoraCatalog(at: catalogURL)
+        let entries = buildCareyLoraEntries(from: catalog)
+        try writeCareyLoraRegistry(entries: entries, to: registryURL)
+        return CareyLoraState(
+            entries: entries,
+            pools: readCareyCaptionPools(from: captionsURL),
+            catalogPath: catalogURL.path,
+            registryPath: registryURL.path,
+            captionsPath: captionsURL.path
+        )
+    }
+
+    private func tryReloadCareyAdminIfRunning() async -> Bool {
+        guard let baseURL = modelDownloadAPIBaseURL(for: "carey") else {
+            return false
+        }
+
+        var request = URLRequest(url: baseURL.appendingPathComponent("admin/reload"))
+        request.httpMethod = "POST"
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return false
+            }
+            return (200...299).contains(http.statusCode)
+        } catch {
+            return false
+        }
+    }
+
+    private static func runLocalProcess(
+        executableURL: URL,
+        arguments: [String],
+        currentDirectory: URL? = nil,
+        environment: [String: String] = [:]
+    ) -> (exitCode: Int32, output: String) {
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = arguments
+        process.currentDirectoryURL = currentDirectory
+
+        var inheritedEnvironment = ProcessInfo.processInfo.environment
+        for (key, value) in environment {
+            inheritedEnvironment[key] = value
+        }
+        process.environment = inheritedEnvironment
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let output = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            return (process.terminationStatus, output)
+        } catch {
+            return (1, "failed to launch \(executableURL.lastPathComponent): \(error.localizedDescription)")
         }
     }
 

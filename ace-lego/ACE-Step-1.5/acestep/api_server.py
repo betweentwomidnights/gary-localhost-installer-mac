@@ -1215,11 +1215,29 @@ class StderrLogger:
         self.buffer = buffer
 
     def write(self, message):
-        self.original_stderr.write(message) # Print to terminal
-        self.buffer.write(message)          # Send to API buffer
+        self.buffer.write(message)
+        if self.original_stderr is None:
+            return
+        try:
+            self.original_stderr.write(message)
+        except (BrokenPipeError, OSError, ValueError):
+            self.original_stderr = None
 
     def flush(self):
-        self.original_stderr.flush()
+        if self.original_stderr is None:
+            return
+        try:
+            self.original_stderr.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            self.original_stderr = None
+
+    def isatty(self):
+        if self.original_stderr is None:
+            return False
+        try:
+            return bool(self.original_stderr.isatty())
+        except (OSError, ValueError, AttributeError):
+            return False
 
 sys.stderr = StderrLogger(sys.stderr, log_buffer)
 
