@@ -3,6 +3,10 @@
 import torch
 from loguru import logger
 
+COVER_EDGE_PAD_LATENT_FRAMES = 5
+COVER_EDGE_PAD_SAMPLES = COVER_EDGE_PAD_LATENT_FRAMES * 1920
+COVER_EDGE_PAD_SECONDS = COVER_EDGE_PAD_SAMPLES / 48000.0
+
 
 class PaddingMixin:
     """Mixin containing repaint/lego padding helpers.
@@ -32,9 +36,14 @@ class PaddingMixin:
             for i in range(actual_batch_size):
                 if processed_src_audio is not None:
                     if is_cover_task:
-                        # Cover task: Use src_audio directly without padding
-                        batch_target_wavs = processed_src_audio
-                        padding_info_batch.append({"left_padding_duration": 0.0, "right_padding_duration": 0.0})
+                        # Move user audio away from DiT sequence position 0;
+                        # decode trims this leading silence back off.
+                        batch_target_wavs = torch.nn.functional.pad(
+                            processed_src_audio, (COVER_EDGE_PAD_SAMPLES, 0), "constant", 0
+                        )
+                        padding_info_batch.append(
+                            {"left_padding_duration": COVER_EDGE_PAD_SECONDS, "right_padding_duration": 0.0}
+                        )
                     elif is_repaint_task or is_lego_task:
                         # Repaint/lego task: May need padding for outpainting
                         src_audio_duration = processed_src_audio.shape[-1] / 48000.0
@@ -158,18 +167,11 @@ class PaddingMixin:
                         # If src audio is provided, use its duration as default end
                         src_audio_duration = processed_src_audio.shape[-1] / 48000.0
                         if repainting_end is None or repainting_end < 0:
-                            if is_lego_task:
-                                # For lego with full-audio mask, leave repainting_end as None so
-                                # conditioning_masks takes the full-mask branch, which preserves
-                                # src_latents as the full source audio context. Converting -1
-                                # to the audio duration routes through the repainting branch
-                                # which silences the entire src_latents tensor, giving the DiT
-                                # zero harmonic/rhythmic context from the source.
-                                repainting_end_batch = None
-                            else:
-                                # Use src audio duration (before padding), then adjust for padding
-                                adjusted_end = src_audio_duration + padding_info_batch[0]["left_padding_duration"]
-                                repainting_end_batch = [adjusted_end] * actual_batch_size
+                            # Use src audio duration (before padding), then adjust for padding.
+                            # Lego follows the same repaint path and keeps its source-latent
+                            # span intact inside conditioning_masks via task_type == "lego".
+                            adjusted_end = src_audio_duration + padding_info_batch[0]["left_padding_duration"]
+                            repainting_end_batch = [adjusted_end] * actual_batch_size
                         else:
                             # Adjust repainting_end to be relative to padded audio
                             adjusted_end = repainting_end + padding_info_batch[0]["left_padding_duration"]

@@ -19,11 +19,13 @@ class GenerateMusicExecuteMixin:
         actual_seed_list: Optional[List[int]],
         audio_cover_strength: float,
         cover_noise_strength: float,
+        repaint_injection_ratio: float,
         use_adg: bool,
         cfg_interval_start: float,
         cfg_interval_end: float,
         shift: float,
         infer_method: str,
+        task_type: str,
     ) -> Dict[str, Any]:
         """Invoke ``service_generate`` while maintaining background progress estimation."""
         infer_steps_for_progress = len(timesteps) if timesteps else inference_steps
@@ -56,6 +58,7 @@ class GenerateMusicExecuteMixin:
                 instructions=service_inputs["instructions_batch"],
                 audio_cover_strength=audio_cover_strength,
                 cover_noise_strength=cover_noise_strength,
+                repaint_injection_ratio=repaint_injection_ratio,
                 use_adg=use_adg,
                 cfg_interval_start=cfg_interval_start,
                 cfg_interval_end=cfg_interval_end,
@@ -64,6 +67,7 @@ class GenerateMusicExecuteMixin:
                 audio_code_hints=service_inputs["audio_code_hints_batch"],
                 return_intermediate=service_inputs["should_return_intermediate"],
                 timesteps=timesteps,
+                task_type=task_type,
             )
         finally:
             if stop_event is not None:

@@ -567,11 +567,11 @@ final class ControlCenterViewModel: ObservableObject {
         careyBackendEngine == .mlx
     }
 
-    private func activeCareyConfigNames() -> (base: String, sft: String, turbo: String) {
+    private func activeCareyConfigNames() -> (base: String, sft: String, turbo: String, lego: String) {
         if careyUseXlModels {
-            return ("acestep-v15-xl-base", "acestep-v15-xl-sft", "acestep-v15-xl-turbo")
+            return ("acestep-v15-xl-base", "acestep-v15-xl-sft", "acestep-v15-xl-turbo", "acestep-v15-base")
         }
-        return ("acestep-v15-base", "acestep-v15-sft", "acestep-v15-turbo")
+        return ("acestep-v15-base", "acestep-v15-sft", "acestep-v15-turbo", "acestep-v15-base")
     }
 
     private func activeCareyRequiredModelFiles() -> [(label: String, relativePath: String)] {
@@ -591,6 +591,9 @@ final class ControlCenterViewModel: ObservableObject {
         var files: [(label: String, relativePath: String)] = []
         if targetSet.contains(.base) {
             files += Self.careyDiTRequiredFiles(labelPrefix: "DiT Base", configName: configs.base)
+            if configs.lego != configs.base {
+                files += Self.careyDiTRequiredFiles(labelPrefix: "DiT Lego Base", configName: configs.lego)
+            }
         }
         if targetSet.contains(.sft) {
             files += Self.careyDiTRequiredFiles(labelPrefix: "DiT SFT", configName: configs.sft)
@@ -1600,6 +1603,8 @@ final class ControlCenterViewModel: ObservableObject {
             scriptEnvironment["ACESTEP_BASE_CONFIG_PATH"] = configs.base
             scriptEnvironment["ACESTEP_SFT_CONFIG_PATH"] = configs.sft
             scriptEnvironment["ACESTEP_TURBO_CONFIG_PATH"] = configs.turbo
+            scriptEnvironment["ACESTEP_LEGO_CONFIG_PATH"] = configs.lego
+            scriptEnvironment["ACESTEP_REGULAR_CONFIG_PATH"] = configs.lego
             scriptEnvironment["CAREY_DOWNLOAD_TARGETS"] = normalizedTargets.map(\.rawValue).joined(separator: ",")
             let result = await Task.detached(priority: .userInitiated) {
                 Self.runCareyDownloadScript(

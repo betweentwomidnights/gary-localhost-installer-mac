@@ -13,6 +13,7 @@ LEGACY_CHECKPOINTS_DIR="${ACE_ROOT}/checkpoints"
 ACESTEP_BASE_CONFIG_PATH="${ACESTEP_BASE_CONFIG_PATH:-acestep-v15-base}"
 ACESTEP_SFT_CONFIG_PATH="${ACESTEP_SFT_CONFIG_PATH:-acestep-v15-sft}"
 ACESTEP_TURBO_CONFIG_PATH="${ACESTEP_TURBO_CONFIG_PATH:-acestep-v15-turbo}"
+ACESTEP_LEGO_CONFIG_PATH="${ACESTEP_LEGO_CONFIG_PATH:-acestep-v15-base}"
 CAREY_DOWNLOAD_TARGETS="${CAREY_DOWNLOAD_TARGETS:-all}"
 HF_DOWNLOADER_PYTHON_VERSION="${G4L_HF_DOWNLOADER_PYTHON_VERSION:-3.11}"
 HF_DOWNLOADER_VENV_DIR="${G4L_HF_DOWNLOADER_VENV_DIR:-${HOME}/Library/Application Support/GaryLocalhost/venvs/hf-downloader}"
@@ -517,10 +518,14 @@ echo "Configured Carey models:"
 echo "  base:  ${ACESTEP_BASE_CONFIG_PATH}"
 echo "  sft:   ${ACESTEP_SFT_CONFIG_PATH}"
 echo "  turbo: ${ACESTEP_TURBO_CONFIG_PATH}"
+echo "  lego:  ${ACESTEP_LEGO_CONFIG_PATH}"
 echo
 
 if (( DOWNLOAD_BASE == 1 )); then
   download_dit_model_files "DiT Base" "${ACESTEP_BASE_CONFIG_PATH}"
+  if [[ "${ACESTEP_LEGO_CONFIG_PATH}" != "${ACESTEP_BASE_CONFIG_PATH}" ]]; then
+    download_dit_model_files "DiT Lego Base" "${ACESTEP_LEGO_CONFIG_PATH}"
+  fi
 fi
 
 if (( DOWNLOAD_SFT == 1 )); then
@@ -552,6 +557,9 @@ echo "Quick check:"
 quick_check_paths=()
 if (( DOWNLOAD_BASE == 1 )); then
   quick_check_paths+=("${CHECKPOINTS_DIR}/${ACESTEP_BASE_CONFIG_PATH}/config.json")
+  if [[ "${ACESTEP_LEGO_CONFIG_PATH}" != "${ACESTEP_BASE_CONFIG_PATH}" ]]; then
+    quick_check_paths+=("${CHECKPOINTS_DIR}/${ACESTEP_LEGO_CONFIG_PATH}/config.json")
+  fi
 fi
 if (( DOWNLOAD_SFT == 1 )); then
   quick_check_paths+=("${CHECKPOINTS_DIR}/${ACESTEP_SFT_CONFIG_PATH}/config.json")

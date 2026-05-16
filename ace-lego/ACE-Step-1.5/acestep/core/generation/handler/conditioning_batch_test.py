@@ -58,7 +58,9 @@ class _Host(ConditioningBatchMixin):
         repainting_start: Optional[List[float]],
         repainting_end: Optional[List[float]],
         silence_latent_tiled: torch.Tensor,
+        task_type: str = "",
     ) -> Tuple[torch.Tensor, List[Tuple[str, int, int]], torch.Tensor, torch.Tensor]:
+        _ = task_type
         chunk_masks = torch.ones(batch_size, max_latent_length, dtype=torch.bool)
         spans: List[Tuple[str, int, int]] = [("full", 0, max_latent_length)] * batch_size
         is_covers = torch.zeros(batch_size, dtype=torch.bool)

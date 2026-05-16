@@ -67,14 +67,27 @@ class ServiceGenerateExecuteMixin:
         guidance_scale: float,
         audio_cover_strength: float,
         cover_noise_strength: float,
+        repaint_injection_ratio: float,
         infer_method: str,
         use_adg: bool,
         cfg_interval_start: float,
         cfg_interval_end: float,
         shift: float,
         timesteps: Optional[List[float]],
+        task_type: str,
     ) -> Dict[str, Any]:
         """Build kwargs passed to model generation backends."""
+        if task_type in ("cover", "cover-nofsq"):
+            is_cover_task = True
+        else:
+            is_covers = payload.get("is_covers")
+            if isinstance(is_covers, torch.Tensor):
+                # Legacy direct service_generate callers may imply cover mode by
+                # supplying audio-code hints without going through generate_music.
+                is_cover_task = bool(is_covers.any().item())
+            else:
+                is_cover_task = any(is_covers or [])
+
         kwargs = {
             "text_hidden_states": payload["text_hidden_states"],
             "text_attention_mask": payload["text_attention_mask"],
@@ -92,6 +105,15 @@ class ServiceGenerateExecuteMixin:
             "precomputed_lm_hints_25Hz": payload["precomputed_lm_hints_25Hz"],
             "audio_cover_strength": audio_cover_strength,
             "cover_noise_strength": cover_noise_strength,
+            # Only cover requests get the source-latent remix anchor. This is
+            # the critical gate that keeps lego/complete from regressing into
+            # source-audio reconstruction instead of stem generation.
+            "clean_src_latents": (
+                payload.get("target_latents")
+                if (is_cover_task and repaint_injection_ratio > 0.0)
+                else None
+            ),
+            "repaint_injection_ratio": repaint_injection_ratio if is_cover_task else 0.0,
             "infer_method": infer_method,
             "infer_steps": infer_steps,
             "diffusion_guidance_sale": guidance_scale,

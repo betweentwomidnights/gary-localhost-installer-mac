@@ -525,8 +525,8 @@ struct ControlCenterView: View {
                 )
                 Text(
                     "switches carey between regular acestep-v15-base/sft/turbo and "
-                    + "xl-base/xl-sft/xl-turbo. xl can be tighter on memory and changing "
-                    + "this restarts carey if it is already running."
+                    + "xl-base/xl-sft/xl-turbo. lego still stays on unadapted acestep-v15-base. "
+                    + "xl can be tighter on memory and changing this restarts carey if it is already running."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -1456,7 +1456,7 @@ private struct ModelDownloadSheet: View {
     private var careyPredownloadContent: some View {
         Text("pre-download carey lego dependencies for offline use in gary4juce.")
             .font(.subheadline)
-        Text("carey uses ace-step lego mode with `acestep_init_llm=false` and needs the shared qwen/vae assets plus base, sft, and turbo checkpoints for the selected family.")
+        Text("carey uses ace-step lego mode with `acestep_init_llm=false`. cover and complete use the selected regular or xl family, but lego always stays on unadapted acestep-v15-base.")
             .font(.caption)
             .foregroundStyle(.secondary)
         Text("service startup is lazy. use this sheet to pre-download the selected regular or xl model family before generating.")
@@ -1616,8 +1616,14 @@ private struct ModelDownloadSheet: View {
         let baseConfig = useXlModels ? "acestep-v15-xl-base" : "acestep-v15-base"
         let sftConfig = useXlModels ? "acestep-v15-xl-sft" : "acestep-v15-sft"
         let turboConfig = useXlModels ? "acestep-v15-xl-turbo" : "acestep-v15-turbo"
-        let groups: [(id: String, label: String, prefix: String, downloadTarget: CareyDownloadTarget?)] = [
+        let legoConfig = "acestep-v15-base"
+        var groups: [(id: String, label: String, prefix: String, downloadTarget: CareyDownloadTarget?)] = [
             ("dit_base", "DiT Base (\(baseConfig))", "checkpoints/\(baseConfig)/", CareyDownloadTarget.base),
+        ]
+        if useXlModels {
+            groups.append(("dit_lego_base", "DiT Lego Base (\(legoConfig))", "checkpoints/\(legoConfig)/", CareyDownloadTarget.base))
+        }
+        groups += [
             ("dit_sft", "DiT SFT (\(sftConfig))", "checkpoints/\(sftConfig)/", CareyDownloadTarget.sft),
             ("dit_turbo", "DiT Turbo (\(turboConfig))", "checkpoints/\(turboConfig)/", CareyDownloadTarget.turbo),
             ("qwen_encoder", "Qwen Text Encoder", "checkpoints/Qwen3-Embedding-0.6B/", nil),

@@ -102,10 +102,15 @@ ACESTEP_TURBO_CONFIG = _env_first(
     "ACESTEP_TURBO_CONFIG",
     default="acestep-v15-turbo",
 )
+ACESTEP_LEGO_CONFIG = _env_first(
+    "ACESTEP_LEGO_CONFIG_PATH",
+    "ACESTEP_LEGO_CONFIG",
+    default="acestep-v15-base",
+)
 ACESTEP_REGULAR_CONFIG = _env_first(
     "ACESTEP_REGULAR_CONFIG_PATH",
     "ACESTEP_REGULAR_CONFIG",
-    default=ACESTEP_SFT_CONFIG,
+    default=ACESTEP_LEGO_CONFIG,
 )
 
 LORA_REGISTRY_PATH = Path(
@@ -140,25 +145,85 @@ JOB_TTL = 3600
 # Cover mode uses turbo model with locked inference params
 COVER_INFERENCE_STEPS = 8
 COVER_GUIDANCE_SCALE = 1.0
-LEGO_REGULAR_TRACKS = {"vocals", "backing_vocals"}
 
 # Default captions per track type (lego mode only)
-TRACK_CAPTIONS = {
-    "vocals":         "soulful indie vocalist, warm, wordless melody, expressive, intimate",
-    "backing_vocals": "background vocals, close harmony, wordless, warm, following the lead vocal",
-    "drums":          "live acoustic drum kit, tight kick and snare, brushed hi-hats, warm",
-    "bass":           "electric bass, warm fingerstyle, rhythmic, supportive",
-    "guitar":         "acoustic guitar, fingerpicked, warm, rhythmic",
-    "piano":          "piano, expressive, warm, melodic",
-    "strings":        "string ensemble, lush, warm, cinematic",
-    "synth":          "analog synth pad, warm, atmospheric",
-    "keyboard":       "electric piano, warm, smooth",
-    "percussion":     "percussion, shaker, tambourine, tight groove",
-    "brass":          "brass section, warm, expressive",
-    "woodwinds":      "woodwind ensemble, warm, airy, melodic",
+TRACK_CAPTION_POOLS = {
+    "vocals": [
+        "soulful rnb vocal",
+        "airy indie vocal hook",
+        "dream pop vocal oohs",
+        "gospel vocal adlibs",
+    ],
+    "backing_vocals": [
+        "gospel backing harmonies",
+        "dream pop vocal pads",
+        "doo wop backing vocals",
+        "rnb harmony stack",
+    ],
+    "drums": [
+        "lo-fi hiphop drums",
+        "funk breakbeat drums",
+        "indie rock drum groove",
+        "disco four-on-floor drums",
+    ],
+    "bass": [
+        "synthwave bass line",
+        "funk slap bass",
+        "dub reggae bass",
+        "motown bass groove",
+    ],
+    "guitar": [
+        "funk rhythm guitar",
+        "surf rock guitar riff",
+        "shoegaze guitar wash",
+        "folk acoustic guitar",
+    ],
+    "piano": [
+        "jazzy piano chords",
+        "gospel piano vamp",
+        "neo-soul rhodes chords",
+        "classical piano arpeggios",
+    ],
+    "strings": [
+        "cinematic string swell",
+        "disco string stabs",
+        "baroque violin line",
+        "romantic cello melody",
+    ],
+    "synth": [
+        "retro synthwave lead",
+        "ambient synth pad",
+        "acid synth line",
+        "electro arpeggio synth",
+    ],
+    "keyboard": [
+        "smooth rhodes chords",
+        "funk organ comping",
+        "warm wurlitzer riff",
+        "jazzy keyboard chords",
+    ],
+    "percussion": [
+        "afrobeat shaker groove",
+        "latin conga loop",
+        "disco tambourine hits",
+        "bossa percussion accents",
+    ],
+    "brass": [
+        "jazzy trumpet solo",
+        "funky horn stabs",
+        "soul brass section",
+        "muted trumpet melody",
+    ],
+    "woodwinds": [
+        "bossa flute melody",
+        "swing clarinet line",
+        "jazzy saxophone solo",
+        "folk woodwind harmony",
+    ],
 }
+TRACK_CAPTIONS = {track: captions[0] for track, captions in TRACK_CAPTION_POOLS.items()}
 
-ALLOWED_TRACKS = set(TRACK_CAPTIONS.keys())
+ALLOWED_TRACKS = set(TRACK_CAPTION_POOLS.keys())
 LORA_REGISTRY: dict[str, dict[str, object]] = {}
 _caption_pools: dict[str, list[str]] = {}
 
@@ -172,12 +237,17 @@ def _primary_runtime_family() -> str:
     return _model_family_for_config(ACESTEP_BASE_CONFIG)
 
 
+def _default_lego_caption(track_name: str) -> str:
+    captions = TRACK_CAPTION_POOLS.get(track_name, [])
+    return random.choice(captions) if captions else ""
+
+
 def _default_captions_path() -> Path:
     return Path(__file__).resolve().parent / "default_captions.json"
 
 
 def _sanitize_backend_list(values: object) -> list[str]:
-    allowed = {"base", "turbo", "regular"}
+    allowed = {"base", "turbo"}
     if not isinstance(values, list):
         return ["base", "turbo"]
     cleaned = []
@@ -368,6 +438,10 @@ class CoverRequest(BaseModel):
     guidance_scale: float = Field(1.0, description="Cover mode is locked to CFG 1.0 for turbo generation")
     inference_steps: int = Field(8, description="Cover mode is locked to 8 diffusion steps for turbo generation")
     use_src_as_ref: bool = Field(False, description="Pass source as ref_audio for subtler transformation")
+    no_fsq: bool = Field(
+        False,
+        description="Backwards-compatible no-op. Cover requests always route as cover-nofsq.",
+    )
     time_signature: str = Field("4", description="Time signature numerator")
     batch_size: int = Field(1, description="Number of candidates")
     audio_format: str = Field("wav", description="Output format: wav, mp3, flac")
@@ -489,7 +563,7 @@ def _complete_model_variant(model_name: str) -> str:
 
 
 def _backend_key_for(task_type: str, requested_model: str = "", track_name: str = "") -> str:
-    if task_type == "lego" and track_name in LEGO_REGULAR_TRACKS:
+    if task_type == "lego":
         return "regular"
     if task_type == "cover":
         return "turbo"
@@ -639,8 +713,8 @@ def _required_config_for_task(task_type: str, requested_model: str = "") -> str:
 
 
 def _required_model_for_task(task_type: str, requested_model: str = "", track_name: str = "") -> str:
-    if task_type == "lego" and track_name in LEGO_REGULAR_TRACKS:
-        return ACESTEP_REGULAR_CONFIG
+    if task_type == "lego":
+        return ACESTEP_LEGO_CONFIG
     return _required_config_for_task(task_type, requested_model)
 
 
@@ -700,7 +774,7 @@ def _build_form_data(job: Job, req, send_path: str) -> dict:
     Works for lego, complete, and cover task types.
     """
     if job.task_type == "lego":
-        effective_caption = req.caption.strip() or TRACK_CAPTIONS.get(req.track_name, "")
+        effective_caption = req.caption.strip() or _default_lego_caption(req.track_name)
         audio_duration = str(job.duration)
     elif job.task_type == "cover":
         effective_caption = req.caption.strip()
@@ -712,9 +786,12 @@ def _build_form_data(job: Job, req, send_path: str) -> dict:
     requested_model = getattr(req, "model", "")
     effective_guidance = _effective_guidance_scale(job.task_type, req.guidance_scale, requested_model)
     effective_steps = _effective_inference_steps(job.task_type, req.inference_steps, requested_model)
+    backend_task_type = "repaint" if job.task_type == "complete" else job.task_type
+    if job.task_type == "cover":
+        backend_task_type = "cover-nofsq"
 
     data = {
-        "task_type":        "repaint" if job.task_type == "complete" else job.task_type,
+        "task_type":        backend_task_type,
         "caption":          effective_caption,
         "lyrics":           req.lyrics,
         "language":         req.language,
@@ -759,7 +836,7 @@ async def _run_generation(job: Job, req):
     session_id = f"acestep-{int(time.time() * 1000)}"
     requested_model = getattr(req, "model", "")
     track_name = getattr(req, "track_name", "")
-    lora_name = (getattr(req, "lora", "") or "").strip()
+    lora_name = "" if job.task_type == "lego" else (getattr(req, "lora", "") or "").strip()
     backend_key = _backend_key_for(job.task_type, requested_model, track_name)
     required_family = _required_model_family_for_task(job.task_type, requested_model, track_name)
     lora_config = None
@@ -1140,6 +1217,9 @@ def _build_status_response(job: Job) -> JSONResponse:
 
 
 def _validate_lora_request(task_type: str, req) -> None:
+    if task_type == "lego":
+        return
+
     lora_name = (getattr(req, "lora", "") or "").strip()
     if not lora_name:
         return
@@ -1431,6 +1511,7 @@ async def health():
         "base_model": ACESTEP_BASE_CONFIG,
         "sft_model": ACESTEP_SFT_CONFIG,
         "turbo_model": ACESTEP_TURBO_CONFIG,
+        "lego_model": ACESTEP_LEGO_CONFIG,
         "regular_model": ACESTEP_REGULAR_CONFIG,
         "active_model_family": _primary_runtime_family(),
         "loras": len(LORA_REGISTRY),

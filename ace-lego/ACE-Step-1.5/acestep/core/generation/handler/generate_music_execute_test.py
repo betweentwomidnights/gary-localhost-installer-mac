@@ -75,11 +75,13 @@ class GenerateMusicExecuteMixinTests(unittest.TestCase):
             actual_seed_list=[1],
             audio_cover_strength=1.0,
             cover_noise_strength=0.0,
+            repaint_injection_ratio=0.5,
             use_adg=False,
             cfg_interval_start=0.0,
             cfg_interval_end=1.0,
             shift=1.0,
             infer_method="ode",
+            task_type="cover",
         )
         self.assertTrue(host.started)
         self.assertTrue(host.stopped)
