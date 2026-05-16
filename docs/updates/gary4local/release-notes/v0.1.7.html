@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>gary4local v0.1.7 release notes</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 24px;
+        line-height: 1.55;
+        color: #111;
+      }
+
+      h1 {
+        margin-bottom: 0.25rem;
+      }
+
+      p {
+        margin-top: 0;
+        color: #444;
+      }
+
+      ul {
+        padding-left: 1.2rem;
+      }
+
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.95em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>gary4local v0.1.7</h1>
+    <p>Apple Silicon localhost update that brings the mac Carey stack into parity with the latest Windows-side ACE-Step behavior and refreshes the packaged updater build for Sparkle delivery.</p>
+
+    <h2>Highlights</h2>
+    <ul>
+      <li>Updates Carey cover generation to use the newer <code>cover-nofsq</code> path instead of the older standard cover mode.</li>
+      <li>Switches Carey lego mode over to the upstream ACE-Step implementation and removes the older custom marker-based workaround.</li>
+      <li>Keeps lego mode pinned to <code>acestep-v15-base</code> even when the Carey XL toggle is enabled, matching the intended upstream behavior.</li>
+      <li>Fixes the macOS Carey predownload and required-files UI so offline installs still fetch the regular lego base checkpoint when the main Carey family is set to XL.</li>
+      <li>Adds focused wrapper and ACE-Step regression coverage around the new Carey routing, task handling, and repaint behavior.</li>
+    </ul>
+
+    <h2>Recommended Companion</h2>
+    <ul>
+      <li><code>gary4juce v3.0.3-mac</code></li>
+      <li>Release page: <a href="https://github.com/betweentwomidnights/gary4juce/releases">https://github.com/betweentwomidnights/gary4juce/releases</a></li>
+    </ul>
+
+    <h2>Notes</h2>
+    <ul>
+      <li>This build is distributed outside the Mac App Store as a notarized DMG.</li>
+      <li>Sparkle signatures are included for the in-app updater flow.</li>
+      <li>Carey lego mode now intentionally ignores the XL model toggle and always uses the regular base checkpoint.</li>
+    </ul>
+  </body>
+</html>
