@@ -1,9 +1,9 @@
 import Foundation
 
 enum GaryAppReleaseInfo {
-    static let recommendedGary4JuceVersion = "v3.0.3-mac"
+    static let recommendedGary4JuceVersion = "v3.0.7-mac"
     static let recommendedGary4JuceReleaseURL = URL(
-        string: "https://github.com/betweentwomidnights/gary4juce/releases"
+        string: "https://github.com/betweentwomidnights/gary4juce/releases/tag/v3.0.7-mac"
     )!
 
     static var shortVersion: String {

@@ -71,9 +71,10 @@ If future Sparkle testing shows a `.zip` or `.tar.xz` archive is operationally c
 Before cutting a release:
 
 1. Confirm the marketing version and build number are correct in Xcode.
-2. Confirm the app launches locally from a clean build.
-3. Confirm the release DMG script still signs, notarizes, staples, and validates successfully.
-4. Confirm you have local access to:
+2. Confirm `About gary4local` shows the intended recommended `gary4juce` companion version and release link by updating `gary4local/gary4local/AppReleaseInfo.swift` if needed.
+3. Confirm the app launches locally from a clean build.
+4. Confirm the release DMG script still signs, notarizes, staples, and validates successfully.
+5. Confirm you have local access to:
    - the Developer ID identity
    - the notarytool keychain profile
    - the Sparkle private signing key
