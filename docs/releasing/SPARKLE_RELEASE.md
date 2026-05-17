@@ -71,7 +71,7 @@ If future Sparkle testing shows a `.zip` or `.tar.xz` archive is operationally c
 Before cutting a release:
 
 1. Confirm the marketing version and build number are correct in Xcode.
-2. Confirm `About gary4local` shows the intended recommended `gary4juce` companion version and release link by updating `gary4local/gary4local/AppReleaseInfo.swift` if needed.
+2. Confirm `About gary4local` shows the intended recommended `gary4juce` companion version and the exact matching GitHub release tag URL by updating `gary4local/gary4local/AppReleaseInfo.swift` if needed.
 3. Confirm the app launches locally from a clean build.
 4. Confirm the release DMG script still signs, notarizes, staples, and validates successfully.
 5. Confirm you have local access to:
@@ -110,6 +110,12 @@ Upload:
 
 The GitHub Release asset URL becomes the appcast download URL.
 
+Important:
+
+- when using `gh release create`, do not pass shell-escaped `\n` sequences in `--notes`
+- prefer a real multiline notes file with `--notes-file` so the published release body does not end up with literal `\n\n`
+- after publishing, spot-check the rendered GitHub release body once in the browser or via `gh release view`
+
 ### 3. Prepare release notes
 
 Add a versioned notes file under:
@@ -118,9 +124,13 @@ Add a versioned notes file under:
 
 Recommended filename pattern:
 
-- `v<version>.md`
+- `v<version>.html`
 
 Keep it concise and user-facing.
+
+Companion-version rule:
+
+- if the release notes mention the recommended `gary4juce` build, always link to the exact release tag URL, not the generic releases index
 
 ### 4. Sign the update archive for Sparkle
 
