@@ -7,17 +7,17 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <description>Stable Sparkle appcast for gary4local.</description>
     <language>en</language>
     <item>
-      <title>Version 0.1.7</title>
-      <pubDate>Sat, 16 May 2026 04:04:36 +0000</pubDate>
-      <sparkle:version>107</sparkle:version>
-      <sparkle:shortVersionString>0.1.7</sparkle:shortVersionString>
+      <title>Version 0.1.8</title>
+      <pubDate>Sun, 17 May 2026 09:37:26 +0000</pubDate>
+      <sparkle:version>108</sparkle:version>
+      <sparkle:shortVersionString>0.1.8</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.6</sparkle:minimumSystemVersion>
-      <sparkle:releaseNotesLink>https://betweentwomidnights.github.io/gary-localhost-installer-mac/updates/gary4local/release-notes/v0.1.7.html</sparkle:releaseNotesLink>
-      <description><![CDATA[gary4local v0.1.7 stable update]]></description>
-      <enclosure url="https://github.com/betweentwomidnights/gary-localhost-installer-mac/releases/download/v0.1.7/gary4local-v0.1.7-mac-arm64.dmg" sparkle:edSignature="dq+jFK7VgNF1f9+r9ps9PLBRKEmCH5wDXZlsMvlEG5j9QBsNt03/J4SdOVY4vaJOHvgEOHI57uzkm3dJmO8ZDQ==" sparkle:os="macos" length="8900928" type="application/x-apple-diskimage"></enclosure>
+      <sparkle:releaseNotesLink>https://betweentwomidnights.github.io/gary-localhost-installer-mac/updates/gary4local/release-notes/v0.1.8.html</sparkle:releaseNotesLink>
+      <description><![CDATA[gary4local v0.1.8 stable update]]></description>
+      <enclosure url="https://github.com/betweentwomidnights/gary-localhost-installer-mac/releases/download/v0.1.8/gary4local-v0.1.8-mac-arm64.dmg" sparkle:edSignature="NKKRzJWWEDpgIIOj4HZURW3pV+WRHxFbCrBrbkWDdgNlEKa0b6neUwMGa+NnB2sO0NQwCC32Y0TTGbSsYAwiAw==" sparkle:os="macos" length="8901400" type="application/x-apple-diskimage"></enclosure>
     </item>
   </channel>
 </rss><!-- sparkle-signatures:
-edSignature: hUzuYNH8CQp0Q69qxJ1v7gRMxH9OSfi7KgaXh1ML9vsD2uEcyVBwq9nyeb8Nazz94Uz6jfuGsPwhfYwYtTZrCg==
+edSignature: 356rqHdhPqrHCIQmI7t1IZ5/yAxqfG9GL4SRSbXj9hZlU1Ia2kJKu7qLvgD67RLyKrCNAejyBW9wfW1lk9MuBw==
 length: 1576
 -->
