@@ -90,6 +90,7 @@ enum StableAudioAuthKeychain {
 }
 
 enum StableAudioAuthLinks {
-    static let modelPage = URL(string: "https://huggingface.co/stabilityai/stable-audio-open-small")!
+    static let stableAudioModelPage = URL(string: "https://huggingface.co/stabilityai/stable-audio-open-small")!
+    static let sa3ModelPage = URL(string: "https://huggingface.co/stabilityai/stable-audio-3-medium")!
     static let tokenPage = URL(string: "https://huggingface.co/settings/tokens")!
 }

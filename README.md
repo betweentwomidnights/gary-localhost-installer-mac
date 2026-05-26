@@ -10,6 +10,7 @@ It pairs with [gary4juce](https://github.com/betweentwomidnights/gary4juce) and 
 - `foundation-1` has now been successfully added to `gary4local`, including model download flow, prompt randomization support, text generation, and audio2audio on the macOS MLX path.
 - Carey now includes the regular and XL `ace-step-v15-{base,sft,turbo}` model family toggle in `gary4local`, aligned with the Windows `gary-localhost-installer` flow.
 - TODO: investigate surfacing runtime generation failures, especially Carey stack traces, through the same popup/reporting UX currently used for build failures.
+- TODO: defer Stable Audio Hugging Face token lookup until the jerry service is actually used, or replace the current launch-time Keychain read with a less intrusive storage/auth flow.
 
 ## Planned Auto-Update Flow
 
@@ -28,6 +29,7 @@ Design and maintainer docs live here:
 
 - `docs/updates/README.md`
 - `docs/releasing/SPARKLE_RELEASE.md`
+- `docs/sa3/README.md`
 
 ## Monorepo Layout
 

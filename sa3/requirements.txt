@@ -1,0 +1,25 @@
+# Stable Audio 3 localhost backend requirements.
+#
+# The Windows reference service installs torch separately as part of its custom
+# build pipeline. Gary4local's Mac bootstrap only does `pip install -r`, so the
+# core upstream runtime dependencies must stay listed here.
+
+# API
+flask
+flask-cors
+requests
+
+# Upstream stable-audio-3 runtime deps
+einops>=0.8.2
+einops-exts>=0.0.4
+numpy>=2.2.6
+packaging>=26.0
+safetensors>=0.7.0
+torch==2.7.1
+torchaudio==2.7.1
+tqdm>=4.67.3
+huggingface-hub>=1.7.1
+transformers>=5.8.0
+soundfile>=0.13.1
+sentencepiece>=0.2.0
+mlx; sys_platform == 'darwin' and platform_machine == 'arm64'

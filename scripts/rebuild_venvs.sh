@@ -16,6 +16,7 @@ Rebuilds local Python virtualenvs for:
   - audiocraft-mlx
   - carey (ace-lego/ACE-Step-1.5)
   - melodyflow
+  - sa3
   - stable-audio-tools
   - foundation
 
@@ -67,6 +68,7 @@ SERVICES=(
   "audiocraft-mlx|audiocraft/requirements.txt"
   "ace-lego/ACE-Step-1.5|requirements.txt"
   "melodyflow|requirements.txt"
+  "sa3|requirements.txt"
   "stable-audio-tools|requirements.txt"
   "foundation|requirements.txt"
 )

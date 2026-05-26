@@ -46,6 +46,7 @@ mkdir -p "${RUNTIME_DST}" "${MANIFEST_DST}"
 copy_tree "${REPO_ROOT}/audiocraft-mlx" "${RUNTIME_DST}/audiocraft-mlx"
 copy_tree "${REPO_ROOT}/ace-lego" "${RUNTIME_DST}/ace-lego"
 copy_tree "${REPO_ROOT}/melodyflow" "${RUNTIME_DST}/melodyflow"
+copy_tree "${REPO_ROOT}/sa3" "${RUNTIME_DST}/sa3"
 copy_tree "${REPO_ROOT}/stable-audio-tools" "${RUNTIME_DST}/stable-audio-tools"
 copy_tree "${REPO_ROOT}/foundation" "${RUNTIME_DST}/foundation"
 

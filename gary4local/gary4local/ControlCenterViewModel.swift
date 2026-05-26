@@ -77,6 +77,67 @@ enum CareyBackendEngine: String, CaseIterable, Identifiable {
     }
 }
 
+struct SA3RuntimeSettings: Codable, Equatable {
+    var peakNormalizeDb: String
+    var limiterCeilingDb: String
+    var latentRescale: String
+    var latentShift: String
+    var latentTargetStd: String
+    var continuationTailPad: String
+    var useFP32DiT: Bool
+
+    static let fallbackDefaults = SA3RuntimeSettings(
+        peakNormalizeDb: "2.0",
+        limiterCeilingDb: "-0.3",
+        latentRescale: "1.0",
+        latentShift: "0.0",
+        latentTargetStd: "",
+        continuationTailPad: "6",
+        useFP32DiT: true
+    )
+
+    init(
+        peakNormalizeDb: String,
+        limiterCeilingDb: String,
+        latentRescale: String,
+        latentShift: String,
+        latentTargetStd: String,
+        continuationTailPad: String,
+        useFP32DiT: Bool
+    ) {
+        self.peakNormalizeDb = peakNormalizeDb
+        self.limiterCeilingDb = limiterCeilingDb
+        self.latentRescale = latentRescale
+        self.latentShift = latentShift
+        self.latentTargetStd = latentTargetStd
+        self.continuationTailPad = continuationTailPad
+        self.useFP32DiT = useFP32DiT
+    }
+
+    init(environment: [String: String]) {
+        let defaults = Self.fallbackDefaults
+        peakNormalizeDb = environment["SA3_PEAK_NORMALIZE_DB"] ?? defaults.peakNormalizeDb
+        limiterCeilingDb = environment["SA3_LIMITER_CEILING_DB"] ?? defaults.limiterCeilingDb
+        latentRescale = environment["SA3_LATENT_RESCALE"] ?? defaults.latentRescale
+        latentShift = environment["SA3_LATENT_SHIFT"] ?? defaults.latentShift
+        latentTargetStd = environment["SA3_LATENT_TARGET_STD"] ?? defaults.latentTargetStd
+        continuationTailPad = environment["SA3_CONTINUE_TAIL_PAD"] ?? defaults.continuationTailPad
+        useFP32DiT = (environment["SA3_MLX_DIT_DTYPE"] ?? "float32").lowercased() == "float32"
+    }
+
+    var normalized: SA3RuntimeSettings {
+        SA3RuntimeSettings(
+            peakNormalizeDb: peakNormalizeDb.trimmingCharacters(in: .whitespacesAndNewlines),
+            limiterCeilingDb: limiterCeilingDb.trimmingCharacters(in: .whitespacesAndNewlines),
+            latentRescale: latentRescale.trimmingCharacters(in: .whitespacesAndNewlines),
+            latentShift: latentShift.trimmingCharacters(in: .whitespacesAndNewlines),
+            latentTargetStd: latentTargetStd.trimmingCharacters(in: .whitespacesAndNewlines),
+            continuationTailPad: continuationTailPad.trimmingCharacters(in: .whitespacesAndNewlines),
+            useFP32DiT: useFP32DiT
+        )
+    }
+}
+
 struct DownloadableModel: Identifiable {
     let id: String
     let size: String
@@ -200,6 +261,66 @@ struct CareyLoraState {
     let captionsPath: String
 }
 
+struct SA3InventoryModelStatus: Identifiable {
+    let id: String
+    let label: String
+    let downloaded: Bool
+    let missing: [String]
+}
+
+struct SA3LoraCatalogEntry: Codable {
+    var path: String
+    var promptsPath: String?
+    var strength: Double
+
+    init(
+        path: String,
+        promptsPath: String?,
+        strength: Double = 1.0
+    ) {
+        self.path = path
+        self.promptsPath = promptsPath
+        self.strength = strength
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case promptsPath
+        case strength
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        path = try container.decode(String.self, forKey: .path)
+        promptsPath = try container.decodeIfPresent(String.self, forKey: .promptsPath)
+        strength = try container.decodeIfPresent(Double.self, forKey: .strength) ?? 1.0
+    }
+}
+
+struct SA3LoraEntry: Identifiable {
+    let name: String
+    let path: String
+    let promptsPath: String?
+    let resolvedPromptsPath: String?
+    let promptFilePath: String
+    let promptFileExists: Bool
+    let promptCount: Int
+    let captionCount: Int
+    let strength: Double
+    let checkpointExists: Bool
+    let registered: Bool
+
+    var id: String { name }
+}
+
+struct SA3LoraState {
+    let entries: [SA3LoraEntry]
+    let pools: [String: Int]
+    let catalogPath: String
+    let registryPath: String
+    let promptsDir: String
+}
+
 private extension String {
     var nilIfEmpty: String? {
         isEmpty ? nil : self
@@ -225,6 +346,7 @@ final class ControlCenterViewModel: ObservableObject {
     private static let careyUseXlModelsDefaultsKey = "careyUseXlModels"
     private static let careyUseSampledMlxVaeEncodeDefaultsKey = "careyUseSampledMlxVaeEncode"
     private static let experimentalCareyMlxVaeEncodeToggleDefaultsKey = "experimentalCareyMlxVaeEncodeToggleEnabled"
+    private static let sa3RuntimeSettingsDefaultsKey = "sa3RuntimeSettings"
 
     @Published var manager: ServiceManager?
     @Published var startupError: String?
@@ -251,6 +373,9 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var isStableAudioModelSwitchInProgress: Bool = false
     @Published var stableAudioPredownloadProgress: Double = 0
     @Published var stableAudioPredownloadTargetLabel: String = ""
+    @Published var sa3InventoryModels: [SA3InventoryModelStatus] = []
+    @Published var sa3PredownloadProgress: Double = 0
+    @Published var sa3PredownloadTargetLabel: String = ""
     @Published var careyRequiredModels: [CareyRequiredModelStatus] = []
     @Published var isCareyDownloadInProgress: Bool = false
     @Published var isCareyLifecycleActionInProgress: Bool = false
@@ -261,6 +386,13 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var careyBackendEngine: CareyBackendEngine = .mlx
     @Published var careyUseXlModels: Bool = false
     @Published var careyUseSampledMlxVaeEncode: Bool = true
+    @Published var sa3PeakNormalizeDb: String = SA3RuntimeSettings.fallbackDefaults.peakNormalizeDb
+    @Published var sa3LimiterCeilingDb: String = SA3RuntimeSettings.fallbackDefaults.limiterCeilingDb
+    @Published var sa3LatentRescale: String = SA3RuntimeSettings.fallbackDefaults.latentRescale
+    @Published var sa3LatentShift: String = SA3RuntimeSettings.fallbackDefaults.latentShift
+    @Published var sa3LatentTargetStd: String = SA3RuntimeSettings.fallbackDefaults.latentTargetStd
+    @Published var sa3ContinuationTailPad: String = SA3RuntimeSettings.fallbackDefaults.continuationTailPad
+    @Published var sa3UseFP32DiT: Bool = SA3RuntimeSettings.fallbackDefaults.useFP32DiT
     @Published var isCareyLoraSheetPresented: Bool = false
     @Published var careyLoraState: CareyLoraState?
     @Published var isCareyLoraLoading: Bool = false
@@ -269,8 +401,17 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var careyLoraStatusMessage: String = ""
     @Published var careyLoraErrorMessage: String = ""
     @Published var careyLoraBuildOutput: String = ""
+    @Published var isSA3LoraSheetPresented: Bool = false
+    @Published var sa3LoraState: SA3LoraState?
+    @Published var isSA3LoraLoading: Bool = false
+    @Published var isSA3LoraSaving: Bool = false
+    @Published var isSA3LoraBuilding: Bool = false
+    @Published var sa3LoraStatusMessage: String = ""
+    @Published var sa3LoraErrorMessage: String = ""
+    @Published var sa3LoraBuildOutput: String = ""
     @Published var melodyFlowBackendStatus: String = ""
     @Published var careyBackendStatus: String = ""
+    @Published var sa3RuntimeSettingsStatus: String = ""
     @Published var rebuildFailureReport: RebuildFailureReport?
     @Published var rebuildDiagnosticsStatusMessage: String = ""
     @Published var isRequirementsEditorPresented: Bool = false
@@ -293,6 +434,7 @@ final class ControlCenterViewModel: ObservableObject {
     private var careyDownloadTask: Task<Void, Never>?
     private var careyProgressByLabel: [String: Int] = [:]
     private var careyActiveDownloadTargets: [CareyDownloadTarget] = []
+    private var sa3DefaultRuntimeSettings = SA3RuntimeSettings.fallbackDefaults
 
     private static let careyProgressPercentRegex = try! NSRegularExpression(
         pattern: #"^[A-Za-z_]+:\s+([0-9]{1,3})%"#
@@ -483,6 +625,32 @@ final class ControlCenterViewModel: ObservableObject {
         let error: String?
     }
 
+    private struct SA3PredownloadInventoryResponse: Decodable {
+        let success: Bool
+        let knownModels: [SA3KnownModelRow]
+        let error: String?
+
+        enum CodingKeys: String, CodingKey {
+            case success
+            case knownModels = "known_models"
+            case error
+        }
+    }
+
+    private struct SA3KnownModelRow: Decodable {
+        let repoID: String
+        let label: String
+        let downloaded: Bool
+        let missing: [String]
+
+        enum CodingKeys: String, CodingKey {
+            case repoID = "repo_id"
+            case label
+            case downloaded
+            case missing
+        }
+    }
+
     init() {
         let savedBackend = UserDefaults.standard.string(forKey: Self.stableAudioBackendDefaultsKey) ?? StableAudioBackendEngine.mps.rawValue
         stableAudioBackendEngine = StableAudioBackendEngine.from(rawValue: savedBackend)
@@ -501,6 +669,9 @@ final class ControlCenterViewModel: ObservableObject {
             )
         } else {
             careyUseSampledMlxVaeEncode = true
+        }
+        if let storedSA3Settings = storedSA3RuntimeSettings() {
+            applySA3RuntimeSettingsToDraft(storedSA3Settings)
         }
         observeApplicationTermination()
         refreshStableAudioTokenState()
@@ -544,6 +715,11 @@ final class ControlCenterViewModel: ObservableObject {
         return canManageModelDownloads && stableAudioTokenConfigured
     }
 
+    var canManageSA3Predownloads: Bool {
+        guard modelDownloadServiceID == "sa3" else { return false }
+        return canManageModelDownloads && stableAudioTokenConfigured
+    }
+
     var showsExperimentalCareyMlxVaeEncodeToggle: Bool {
         Self.isExperimentalCareyMlxVaeEncodeToggleEnabled()
     }
@@ -561,6 +737,14 @@ final class ControlCenterViewModel: ObservableObject {
 
     var isCareyEnvironmentReady: Bool {
         careyPythonExecutableURL() != nil
+    }
+
+    var isSA3ServiceRunning: Bool {
+        manager?.services.first(where: { $0.id == "sa3" })?.processState == .running
+    }
+
+    var isSA3EnvironmentReady: Bool {
+        sa3PythonExecutableURL() != nil
     }
 
     var careyLoraRequiresMpsBackend: Bool {
@@ -645,12 +829,14 @@ final class ControlCenterViewModel: ObservableObject {
 
         do {
             let manifest = try ManifestLoader.load(from: defaultURL)
+            applySA3ManifestDefaults(from: manifest)
             let manager = ServiceManager(manifest: manifest)
             manager.setStableAudioBackendEngine(stableAudioBackendEngine.rawValue, restartIfRunning: false)
             manager.setMelodyFlowBackendEngine(melodyFlowBackendEngine.rawValue, restartIfRunning: false)
             manager.setCareyBackendEngine(careyBackendEngine.rawValue, restartIfRunning: false)
             manager.setCareyUseXlModels(careyUseXlModels, restartIfRunning: false)
             manager.setCareyUseSampledMlxVaeEncode(careyUseSampledMlxVaeEncode, restartIfRunning: false)
+            manager.setSA3RuntimeSettings(currentSA3RuntimeSettings().normalized, restartIfRunning: false)
             self.manager = manager
             bindManager(manager)
             startupError = nil
@@ -904,6 +1090,240 @@ final class ControlCenterViewModel: ObservableObject {
         }
     }
 
+    func saveSA3RuntimeSettings() {
+        let settings = currentSA3RuntimeSettings().normalized
+        guard settings != storedSA3RuntimeSettings() else {
+            sa3RuntimeSettingsStatus = "no sa3 advanced setting changes to save."
+            return
+        }
+
+        storeSA3RuntimeSettings(settings)
+        manager?.setSA3RuntimeSettings(settings, restartIfRunning: true)
+
+        if manager?.services.first(where: { $0.id == "sa3" })?.isRunning == true {
+            sa3RuntimeSettingsStatus = "sa3 advanced settings saved. service restarting..."
+        } else {
+            sa3RuntimeSettingsStatus = "sa3 advanced settings saved for the next start."
+        }
+    }
+
+    func resetSA3RuntimeSettingsToDefaults() {
+        applySA3RuntimeSettingsToDraft(sa3DefaultRuntimeSettings)
+        sa3RuntimeSettingsStatus = "sa3 advanced settings reset to manifest defaults. save to apply."
+    }
+
+    private func currentSA3RuntimeSettings() -> SA3RuntimeSettings {
+        SA3RuntimeSettings(
+            peakNormalizeDb: sa3PeakNormalizeDb,
+            limiterCeilingDb: sa3LimiterCeilingDb,
+            latentRescale: sa3LatentRescale,
+            latentShift: sa3LatentShift,
+            latentTargetStd: sa3LatentTargetStd,
+            continuationTailPad: sa3ContinuationTailPad,
+            useFP32DiT: sa3UseFP32DiT
+        )
+    }
+
+    private func applySA3RuntimeSettingsToDraft(_ settings: SA3RuntimeSettings) {
+        sa3PeakNormalizeDb = settings.peakNormalizeDb
+        sa3LimiterCeilingDb = settings.limiterCeilingDb
+        sa3LatentRescale = settings.latentRescale
+        sa3LatentShift = settings.latentShift
+        sa3LatentTargetStd = settings.latentTargetStd
+        sa3ContinuationTailPad = settings.continuationTailPad
+        sa3UseFP32DiT = settings.useFP32DiT
+    }
+
+    private func applySA3ManifestDefaults(from manifest: ResolvedManifest) {
+        let manifestSettings = manifest.services
+            .first(where: { $0.id == "sa3" })
+            .map { SA3RuntimeSettings(environment: $0.environment) }
+            ?? .fallbackDefaults
+        sa3DefaultRuntimeSettings = manifestSettings
+        applySA3RuntimeSettingsToDraft(storedSA3RuntimeSettings() ?? manifestSettings)
+    }
+
+    private func storedSA3RuntimeSettings() -> SA3RuntimeSettings? {
+        guard let data = UserDefaults.standard.data(forKey: Self.sa3RuntimeSettingsDefaultsKey) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(SA3RuntimeSettings.self, from: data)
+    }
+
+    private func storeSA3RuntimeSettings(_ settings: SA3RuntimeSettings) {
+        guard let data = try? JSONEncoder().encode(settings) else { return }
+        UserDefaults.standard.set(data, forKey: Self.sa3RuntimeSettingsDefaultsKey)
+    }
+
+    func openSA3LoraSheet() {
+        isSA3LoraSheetPresented = true
+        Task { await refreshSA3LoraState() }
+    }
+
+    func refreshSA3LoraState() async {
+        isSA3LoraLoading = true
+        sa3LoraErrorMessage = ""
+        do {
+            sa3LoraState = try buildSA3LoraState()
+        } catch {
+            sa3LoraErrorMessage = error.localizedDescription
+        }
+        isSA3LoraLoading = false
+    }
+
+    func saveSA3Lora(
+        name: String,
+        checkpointPath: String,
+        promptsPath: String?
+    ) async {
+        isSA3LoraSaving = true
+        sa3LoraErrorMessage = ""
+        sa3LoraStatusMessage = ""
+        sa3LoraBuildOutput = ""
+
+        do {
+            let normalizedName = try sanitizeSA3LoraName(name)
+            let checkpointFile = expandedFileURL(
+                from: checkpointPath,
+                relativeTo: sa3WorkingDirectoryURL()
+            )
+            guard Self.looksLikeSA3LoraCheckpoint(checkpointFile) else {
+                throw NSError(
+                    domain: "ControlCenterViewModel",
+                    code: 2201,
+                    userInfo: [NSLocalizedDescriptionKey: "\(checkpointFile.path) does not look like an SA3 LoRA checkpoint file."]
+                )
+            }
+
+            let trimmedPromptsPath = promptsPath?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty
+            let promptsDirectory = trimmedPromptsPath.map {
+                expandedFileURL(from: $0, relativeTo: sa3WorkingDirectoryURL())
+            }
+            if let promptsDirectory, !FileManager.default.fileExists(atPath: promptsDirectory.path) {
+                throw NSError(
+                    domain: "ControlCenterViewModel",
+                    code: 2202,
+                    userInfo: [NSLocalizedDescriptionKey: "\(promptsDirectory.path) is not a valid prompts/source folder."]
+                )
+            }
+
+            let catalogURL = sa3LoraCatalogURL()
+            var catalog = try readSA3LoraCatalog(at: catalogURL)
+            let existingStrength = catalog[normalizedName]?.strength ?? 1.0
+            catalog[normalizedName] = SA3LoraCatalogEntry(
+                path: checkpointFile.path,
+                promptsPath: promptsDirectory?.path,
+                strength: existingStrength
+            )
+            try saveSA3LoraCatalog(catalog, to: catalogURL)
+
+            sa3LoraState = try buildSA3LoraState()
+            let restarted = restartSA3IfRunning()
+            sa3LoraStatusMessage = restarted
+                ? "saved \(normalizedName) and restarted sa3."
+                : "saved \(normalizedName)."
+        } catch {
+            sa3LoraErrorMessage = error.localizedDescription
+        }
+
+        isSA3LoraSaving = false
+    }
+
+    func removeSA3Lora(named name: String) async {
+        sa3LoraErrorMessage = ""
+        sa3LoraStatusMessage = ""
+        sa3LoraBuildOutput = ""
+
+        do {
+            let normalizedName = try sanitizeSA3LoraName(name)
+            let catalogURL = sa3LoraCatalogURL()
+            var catalog = try readSA3LoraCatalog(at: catalogURL)
+            catalog.removeValue(forKey: normalizedName)
+            try saveSA3LoraCatalog(catalog, to: catalogURL)
+            sa3LoraState = try buildSA3LoraState()
+            let restarted = restartSA3IfRunning()
+            sa3LoraStatusMessage = restarted
+                ? "removed \(normalizedName) and restarted sa3."
+                : "removed \(normalizedName)."
+        } catch {
+            sa3LoraErrorMessage = error.localizedDescription
+        }
+    }
+
+    func buildSA3LoraPrompts() async {
+        isSA3LoraBuilding = true
+        sa3LoraErrorMessage = ""
+        sa3LoraStatusMessage = ""
+        sa3LoraBuildOutput = ""
+
+        do {
+            let initialState = try buildSA3LoraState()
+            guard let pythonURL = sa3PythonExecutableURL() else {
+                throw NSError(
+                    domain: "ControlCenterViewModel",
+                    code: 2203,
+                    userInfo: [NSLocalizedDescriptionKey: "SA3 must be built before prompts can be generated."]
+                )
+            }
+
+            let scriptURL = sa3WorkingDirectoryURL().appendingPathComponent("build_lora_prompts.py")
+            guard FileManager.default.fileExists(atPath: scriptURL.path) else {
+                throw NSError(
+                    domain: "ControlCenterViewModel",
+                    code: 2204,
+                    userInfo: [NSLocalizedDescriptionKey: "Missing \(scriptURL.path)"]
+                )
+            }
+
+            let promptsDirectory = sa3PromptsDirectoryURL()
+            try FileManager.default.createDirectory(
+                at: promptsDirectory,
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+
+            var outputs: [String] = []
+            for entry in initialState.entries where entry.registered && entry.captionCount > 0 {
+                guard let sourcePath = entry.resolvedPromptsPath else { continue }
+                let result = Self.runLocalProcess(
+                    executableURL: pythonURL,
+                    arguments: [
+                        scriptURL.path,
+                        "--name", entry.name,
+                        "--captions-dir", sourcePath,
+                        "--out-dir", promptsDirectory.path,
+                        "--force",
+                    ],
+                    currentDirectory: sa3WorkingDirectoryURL()
+                )
+                let combinedOutput = result.output.isEmpty ? "\(entry.name): no output" : result.output
+                guard result.exitCode == 0 else {
+                    throw NSError(
+                        domain: "ControlCenterViewModel",
+                        code: 2205,
+                        userInfo: [NSLocalizedDescriptionKey: combinedOutput]
+                    )
+                }
+                outputs.append(combinedOutput)
+            }
+
+            if outputs.isEmpty {
+                outputs.append("No registered SA3 LoRAs with txt sidecars were found.")
+            }
+
+            try ensureDefaultSA3Prompts()
+            sa3LoraState = try buildSA3LoraState()
+            sa3LoraBuildOutput = outputs.joined(separator: "\n")
+            sa3LoraStatusMessage = "prompt JSONs updated"
+        } catch {
+            sa3LoraErrorMessage = error.localizedDescription
+        }
+
+        isSA3LoraBuilding = false
+    }
+
     func openCareyLoraSheet() {
         isCareyLoraSheetPresented = true
         Task { await refreshCareyLoraState() }
@@ -1091,6 +1511,8 @@ final class ControlCenterViewModel: ObservableObject {
         isModelDownloadSheetPresented = true
         if serviceID == "stable_audio" {
             prepareStableAudioPredownloadState()
+        } else if serviceID == "sa3" {
+            prepareSA3PredownloadState()
         } else if serviceID == "carey" {
             prepareCareyPredownloadState()
         } else {
@@ -1103,6 +1525,11 @@ final class ControlCenterViewModel: ObservableObject {
             modelDownloadStatusMessage = "stable audio uses repo/checkpoint pre-download controls below."
             isModelCatalogLoading = false
             downloadableModels = []
+            return
+        }
+
+        if modelDownloadServiceID == "sa3" {
+            prepareSA3PredownloadState()
             return
         }
 
@@ -1426,6 +1853,135 @@ final class ControlCenterViewModel: ObservableObject {
             modelDownloadStatusMessage = "choose a stable model or fetch finetune checkpoints to pre-download."
         } else {
             modelDownloadStatusMessage = "save your hugging face token in jerry setup first."
+        }
+    }
+
+    func startSA3PredownloadRequiredModels() {
+        let serviceID = modelDownloadServiceID
+        guard serviceID == "sa3" else { return }
+        guard stableAudioTokenConfigured else {
+            modelDownloadStatusMessage = "save your hugging face token first."
+            return
+        }
+        guard let baseURL = modelDownloadAPIBaseURL(for: serviceID) else {
+            modelDownloadStatusMessage = "start \(modelDownloadServiceDisplayName) to pre-download models."
+            return
+        }
+        guard !isModelDownloadInProgress else {
+            modelDownloadStatusMessage = "a model download is already running."
+            return
+        }
+
+        modelDownloadPollTask?.cancel()
+        modelDownloadPollTask = nil
+        activeModelDownloadSessionID = nil
+        activeModelDownloadPath = "required sa3 models"
+        sa3PredownloadTargetLabel = "required sa3 models"
+        sa3PredownloadProgress = 0
+        isModelDownloadInProgress = true
+        modelDownloadStatusMessage = "starting required sa3 models..."
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                var request = URLRequest(url: baseURL.appendingPathComponent("models/predownload"))
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONSerialization.data(withJSONObject: [
+                    "target_type": "required"
+                ])
+
+                let (data, response) = try await URLSession.shared.data(for: request)
+                try self.ensureHTTP200(response: response, body: data)
+                let startResponse = try JSONDecoder().decode(RemotePredownloadStartResponse.self, from: data)
+                guard startResponse.success else {
+                    throw NSError(
+                        domain: "ControlCenterViewModel",
+                        code: 10,
+                        userInfo: [NSLocalizedDescriptionKey: "unable to start sa3 predownload."]
+                    )
+                }
+
+                self.activeModelDownloadSessionID = startResponse.sessionID
+                self.modelDownloadStatusMessage = startResponse.message ?? "downloading required sa3 models..."
+                self.startModelDownloadPolling(
+                    sessionID: startResponse.sessionID,
+                    modelPath: "required sa3 models",
+                    serviceID: serviceID,
+                    baseURL: baseURL,
+                    statusPathPrefix: "models/predownload_status"
+                )
+            } catch {
+                self.isModelDownloadInProgress = false
+                self.activeModelDownloadPath = nil
+                self.activeModelDownloadSessionID = nil
+                self.sa3PredownloadProgress = 0
+                self.modelDownloadStatusMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func prepareSA3PredownloadState() {
+        downloadableModels = []
+        isModelCatalogLoading = false
+        if !isModelDownloadInProgress {
+            sa3PredownloadProgress = 0
+            sa3PredownloadTargetLabel = ""
+        }
+        refreshSA3PredownloadInventory()
+        if isModelDownloadInProgress, !sa3PredownloadTargetLabel.isEmpty {
+            modelDownloadStatusMessage = "downloading \(sa3PredownloadTargetLabel)..."
+            return
+        }
+        if stableAudioTokenConfigured {
+            modelDownloadStatusMessage = (
+                "download the required sa3 model files for offline use, or let the first /load fetch them on demand."
+            )
+        } else {
+            modelDownloadStatusMessage = "save your hugging face token in the sa3 or jerry setup panel first."
+        }
+    }
+
+    func refreshSA3PredownloadInventory() {
+        let serviceID = modelDownloadServiceID
+        guard serviceID == "sa3" else { return }
+        guard let baseURL = modelDownloadAPIBaseURL(for: serviceID) else {
+            sa3InventoryModels = []
+            return
+        }
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                var request = URLRequest(url: baseURL.appendingPathComponent("models/predownload_inventory"))
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONSerialization.data(withJSONObject: [:])
+
+                let (data, response) = try await URLSession.shared.data(for: request)
+                try self.ensureHTTP200(response: response, body: data)
+                let payload = try JSONDecoder().decode(SA3PredownloadInventoryResponse.self, from: data)
+                guard payload.success else {
+                    throw NSError(
+                        domain: "ControlCenterViewModel",
+                        code: 11,
+                        userInfo: [NSLocalizedDescriptionKey: payload.error ?? "failed to load sa3 inventory."]
+                    )
+                }
+
+                self.sa3InventoryModels = payload.knownModels.map { row in
+                    SA3InventoryModelStatus(
+                        id: row.repoID,
+                        label: row.label,
+                        downloaded: row.downloaded,
+                        missing: row.missing
+                    )
+                }
+            } catch {
+                if self.sa3InventoryModels.isEmpty {
+                    self.modelDownloadStatusMessage = error.localizedDescription
+                }
+            }
         }
     }
 
@@ -1890,7 +2446,13 @@ final class ControlCenterViewModel: ObservableObject {
                     guard let self else { return }
                     self.stableAudioTokenInput = ""
                     self.applyStableAudioTokenState(configured: true)
-                    self.stableAudioTokenStatus = "token saved in keychain."
+                    let restartedServices = self.manager?.restartServicesUsingSharedHuggingFaceToken() ?? []
+                    if restartedServices.isEmpty {
+                        self.stableAudioTokenStatus = "token saved in keychain."
+                    } else {
+                        let label = restartedServices.joined(separator: ", ")
+                        self.stableAudioTokenStatus = "token saved in keychain. restarting \(label)..."
+                    }
                 }
             } catch {
                 let message = error.localizedDescription
@@ -2274,6 +2836,8 @@ final class ControlCenterViewModel: ObservableObject {
                     )
                     if serviceID == "stable_audio" {
                         self.stableAudioPredownloadProgress = progress
+                    } else if serviceID == "sa3" {
+                        self.sa3PredownloadProgress = progress
                     }
                     self.modelDownloadStatusMessage = statusMessage
 
@@ -2283,8 +2847,11 @@ final class ControlCenterViewModel: ObservableObject {
                         self.activeModelDownloadSessionID = nil
                         self.modelDownloadPollTask = nil
                         if self.modelDownloadServiceID == serviceID,
-                           serviceID != "stable_audio" {
+                           serviceID != "stable_audio",
+                           serviceID != "sa3" {
                             self.refreshModelCatalogAndStatuses()
+                        } else if serviceID == "sa3" {
+                            self.refreshSA3PredownloadInventory()
                         } else if serviceID == "stable_audio" {
                             self.refreshStableAudioPredownloadInventory(
                                 checkpointsHint: self.stableAudioPredownloadCheckpoints
@@ -2313,6 +2880,8 @@ final class ControlCenterViewModel: ObservableObject {
                     )
                     if serviceID == "stable_audio" {
                         self.stableAudioPredownloadProgress = 0
+                    } else if serviceID == "sa3" {
+                        self.sa3PredownloadProgress = 0
                     }
                     self.modelDownloadStatusMessage = error.localizedDescription
                     self.modelDownloadPollTask = nil
@@ -2566,6 +3135,18 @@ final class ControlCenterViewModel: ObservableObject {
         manager?.services.first(where: { $0.id == "carey" })
     }
 
+    private func currentSA3Runtime() -> ServiceRuntime? {
+        manager?.services.first(where: { $0.id == "sa3" })
+    }
+
+    private func restartSA3IfRunning() -> Bool {
+        guard let runtime = currentSA3Runtime(), runtime.isRunning else {
+            return false
+        }
+        manager?.restart(serviceID: runtime.id)
+        return true
+    }
+
     private func sanitizeCareyLoraName(_ raw: String) throws -> String {
         let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalized.isEmpty else {
@@ -2586,13 +3167,37 @@ final class ControlCenterViewModel: ObservableObject {
         return normalized
     }
 
-    private func expandedFileURL(from rawPath: String) -> URL {
+    private func sanitizeSA3LoraName(_ raw: String) throws -> String {
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else {
+            throw NSError(
+                domain: "ControlCenterViewModel",
+                code: 2206,
+                userInfo: [NSLocalizedDescriptionKey: "LoRA name is required."]
+            )
+        }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789_-")
+        guard normalized.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
+            throw NSError(
+                domain: "ControlCenterViewModel",
+                code: 2207,
+                userInfo: [NSLocalizedDescriptionKey: "LoRA name must use lowercase letters, numbers, '-' or '_'."]
+            )
+        }
+        return normalized
+    }
+
+    private func expandedFileURL(from rawPath: String, relativeTo baseURL: URL) -> URL {
         let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
         let expanded = NSString(string: trimmed).expandingTildeInPath
         if expanded.hasPrefix("/") {
             return URL(fileURLWithPath: expanded).standardizedFileURL
         }
-        return URL(fileURLWithPath: expanded, relativeTo: careyWrapperDirectoryURL()).standardizedFileURL
+        return URL(fileURLWithPath: expanded, relativeTo: baseURL).standardizedFileURL
+    }
+
+    private func expandedFileURL(from rawPath: String) -> URL {
+        expandedFileURL(from: rawPath, relativeTo: careyWrapperDirectoryURL())
     }
 
     private func defaultCareyStorageDirectory() -> URL {
@@ -2605,6 +3210,50 @@ final class ControlCenterViewModel: ObservableObject {
             ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
                 .appendingPathComponent("ace-lego/wrapper", isDirectory: true)
                 .standardizedFileURL
+    }
+
+    private func defaultSA3StorageDirectory() -> URL {
+        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent("Library/Application Support/GaryLocalhost/sa3", isDirectory: true)
+    }
+
+    private func sa3WorkingDirectoryURL() -> URL {
+        currentSA3Runtime()?.service.workingDirectory.standardizedFileURL
+            ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+                .appendingPathComponent("sa3", isDirectory: true)
+                .standardizedFileURL
+    }
+
+    private func sa3LoraRegistryURL() -> URL {
+        if let configured = currentSA3Runtime()?.service.environment["SA3_LORA_REGISTRY"]?.nilIfEmpty {
+            return expandedFileURL(from: configured, relativeTo: sa3WorkingDirectoryURL())
+        }
+        return defaultSA3StorageDirectory().appendingPathComponent("lora_registry.json")
+    }
+
+    private func sa3PromptsDirectoryURL() -> URL {
+        if let configured = currentSA3Runtime()?.service.environment["SA3_PROMPTS_DIR"]?.nilIfEmpty {
+            return expandedFileURL(from: configured, relativeTo: sa3WorkingDirectoryURL())
+        }
+        return defaultSA3StorageDirectory().appendingPathComponent("prompts", isDirectory: true)
+    }
+
+    private func sa3LoraCatalogURL() -> URL {
+        sa3LoraRegistryURL().deletingLastPathComponent().appendingPathComponent("lora_catalog.json")
+    }
+
+    private func sa3DefaultPromptsURL() -> URL {
+        sa3WorkingDirectoryURL().appendingPathComponent("prompts/defaults.json")
+    }
+
+    private func sa3PythonExecutableURL() -> URL? {
+        if let venvDirectory = currentSA3Runtime()?.service.bootstrap?.venvDirectory {
+            let url = venvDirectory.appendingPathComponent("bin/python")
+            if FileManager.default.fileExists(atPath: url.path) {
+                return url
+            }
+        }
+        return nil
     }
 
     private func careyLoraRegistryURL() -> URL {
@@ -2705,6 +3354,190 @@ final class ControlCenterViewModel: ObservableObject {
             let name = url.lastPathComponent
             return !name.contains(".v4bak") && !name.hasSuffix(".v4bak")
         }.count
+    }
+
+    private static func looksLikeSA3LoraCheckpoint(_ file: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: file.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+            return false
+        }
+        let ext = file.pathExtension.lowercased()
+        return ext == "ckpt" || ext == "safetensors"
+    }
+
+    private static func countSA3CaptionSidecars(in directory: URL) -> Int {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return 0
+        }
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey]
+        ) else {
+            return 0
+        }
+        return contents.filter { url in
+            guard url.pathExtension.lowercased() == "txt" else { return false }
+            let name = url.lastPathComponent
+            return !name.contains(".v4bak") && !name.hasSuffix(".v4bak")
+        }.count
+    }
+
+    private func sa3PromptFileURL(for name: String) -> URL {
+        sa3PromptsDirectoryURL().appendingPathComponent("\(name).json")
+    }
+
+    private func readSA3LoraCatalog(at url: URL) throws -> [String: SA3LoraCatalogEntry] {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return [:]
+        }
+
+        let data = try Data(contentsOf: url)
+        let decoded = try JSONDecoder().decode([String: SA3LoraCatalogEntry].self, from: data)
+        var normalized: [String: SA3LoraCatalogEntry] = [:]
+        for (name, var entry) in decoded {
+            let trimmedPath = entry.path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedPath.isEmpty else { continue }
+            entry.path = trimmedPath
+            entry.promptsPath = entry.promptsPath?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            if !entry.strength.isFinite {
+                entry.strength = 1.0
+            }
+            normalized[name] = entry
+        }
+        return normalized
+    }
+
+    private func saveSA3LoraCatalog(_ catalog: [String: SA3LoraCatalogEntry], to url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(catalog)
+        try data.write(to: url, options: .atomic)
+    }
+
+    private func resolveSA3PromptsSource(for entry: SA3LoraCatalogEntry) -> URL? {
+        if let promptsPath = entry.promptsPath?.nilIfEmpty {
+            let url = expandedFileURL(from: promptsPath, relativeTo: sa3WorkingDirectoryURL())
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                return url
+            }
+        }
+
+        let checkpointFile = expandedFileURL(from: entry.path, relativeTo: sa3WorkingDirectoryURL())
+        let parent = checkpointFile.deletingLastPathComponent()
+        return Self.countSA3CaptionSidecars(in: parent) > 0 ? parent : nil
+    }
+
+    private func readSA3PromptCount(from url: URL) -> Int {
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let dice = json["dice"] as? [String: Any] else {
+            return 0
+        }
+        return dice.values.reduce(0) { partialResult, value in
+            partialResult + ((value as? [Any])?.count ?? 0)
+        }
+    }
+
+    private func readSA3PromptPools() -> [String: Int] {
+        var pools: [String: Int] = [:]
+        let directory = sa3PromptsDirectoryURL()
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey]
+        ) else {
+            return pools
+        }
+
+        for fileURL in contents where fileURL.pathExtension.lowercased() == "json" {
+            let name = fileURL.deletingPathExtension().lastPathComponent
+            pools[name] = readSA3PromptCount(from: fileURL)
+        }
+        return pools
+    }
+
+    private func buildSA3LoraEntries(from catalog: [String: SA3LoraCatalogEntry]) -> [SA3LoraEntry] {
+        catalog.keys.sorted().compactMap { name in
+            guard let entry = catalog[name] else { return nil }
+            let checkpointFile = expandedFileURL(from: entry.path, relativeTo: sa3WorkingDirectoryURL())
+            let checkpointExists = Self.looksLikeSA3LoraCheckpoint(checkpointFile)
+            let resolvedPromptsURL = resolveSA3PromptsSource(for: entry)
+            let captionCount = resolvedPromptsURL.map { Self.countSA3CaptionSidecars(in: $0) } ?? 0
+            let promptFile = sa3PromptFileURL(for: name)
+            let promptFileExists = FileManager.default.fileExists(atPath: promptFile.path)
+            let promptCount = readSA3PromptCount(from: promptFile)
+
+            return SA3LoraEntry(
+                name: name,
+                path: checkpointFile.path,
+                promptsPath: entry.promptsPath,
+                resolvedPromptsPath: resolvedPromptsURL?.path,
+                promptFilePath: promptFile.path,
+                promptFileExists: promptFileExists,
+                promptCount: promptCount,
+                captionCount: captionCount,
+                strength: entry.strength,
+                checkpointExists: checkpointExists,
+                registered: checkpointExists
+            )
+        }
+    }
+
+    private func writeSA3LoraRegistry(entries: [SA3LoraEntry], to url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+
+        var payload: [String: [String: Any]] = [:]
+        for entry in entries where entry.registered {
+            payload[entry.name] = [
+                "path": entry.path,
+                "strength": entry.strength,
+            ]
+        }
+
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: url, options: .atomic)
+    }
+
+    private func ensureDefaultSA3Prompts() throws {
+        let source = sa3DefaultPromptsURL()
+        guard FileManager.default.fileExists(atPath: source.path) else { return }
+
+        let destination = sa3PromptsDirectoryURL().appendingPathComponent("defaults.json")
+        guard !FileManager.default.fileExists(atPath: destination.path) else { return }
+
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try FileManager.default.copyItem(at: source, to: destination)
+    }
+
+    private func buildSA3LoraState() throws -> SA3LoraState {
+        try ensureDefaultSA3Prompts()
+        let catalogURL = sa3LoraCatalogURL()
+        let registryURL = sa3LoraRegistryURL()
+        let promptsURL = sa3PromptsDirectoryURL()
+        let catalog = try readSA3LoraCatalog(at: catalogURL)
+        let entries = buildSA3LoraEntries(from: catalog)
+        try writeSA3LoraRegistry(entries: entries, to: registryURL)
+        return SA3LoraState(
+            entries: entries,
+            pools: readSA3PromptPools(),
+            catalogPath: catalogURL.path,
+            registryPath: registryURL.path,
+            promptsDir: promptsURL.path
+        )
     }
 
     private func readCareyLoraCatalog(at url: URL) throws -> [String: CareyLoraCatalogEntry] {
@@ -2976,6 +3809,8 @@ final class ControlCenterViewModel: ObservableObject {
             return "gary (musicgen)"
         case "melodyflow":
             return "terry (melodyflow)"
+        case "sa3":
+            return "sa3 (stable audio 3)"
         case "stable_audio":
             return "jerry (stable audio)"
         case "carey":

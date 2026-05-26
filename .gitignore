@@ -43,3 +43,7 @@ build-artifacts/
 
 # Local prompt engine checkout for foundation randomize experiments
 foundation/RC-stable-audio-tools/
+
+# Local reference clones and accidental package manager residue
+reference/
+/package-lock.json

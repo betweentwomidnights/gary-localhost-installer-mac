@@ -1,11 +1,34 @@
 import SwiftUI
 import AppKit
 import Combine
+import UniformTypeIdentifiers
 
 struct ControlCenterView: View {
     private enum FirstUseHelperStage: String {
         case rebuild
         case menuBar
+    }
+
+    private enum SA3AdvancedTab: String, CaseIterable, Identifiable {
+        case level
+        case latent
+        case continuation
+        case experimental
+
+        var id: String { rawValue }
+
+        var displayName: String {
+            switch self {
+            case .level:
+                return "level"
+            case .latent:
+                return "latent"
+            case .continuation:
+                return "continue"
+            case .experimental:
+                return "experimental"
+            }
+        }
     }
 
     @ObservedObject var viewModel: ControlCenterViewModel
@@ -14,6 +37,8 @@ struct ControlCenterView: View {
     @AppStorage("firstUseMenuBarOpenedV1") private var firstUseMenuBarOpened = false
     @State private var didObserveRebuildStart = false
     @State private var onboardingPulse = false
+    @State private var sa3AdvancedPanelExpanded = false
+    @State private var sa3AdvancedTab: SA3AdvancedTab = .level
     private let showOnboardingResetButton = false
 
     private var firstUseHelperStage: FirstUseHelperStage {
@@ -70,6 +95,9 @@ struct ControlCenterView: View {
         }
         .sheet(isPresented: $viewModel.isCareyLoraSheetPresented) {
             CareyLoraManagerSheet(viewModel: viewModel)
+        }
+        .sheet(isPresented: $viewModel.isSA3LoraSheetPresented) {
+            SA3LoraManagerSheet(viewModel: viewModel)
         }
         .sheet(item: $viewModel.rebuildFailureReport) { report in
             RebuildFailureSheet(viewModel: viewModel, report: report)
@@ -130,13 +158,16 @@ struct ControlCenterView: View {
                     onStop: { manager.stop(serviceID: runtime.id) },
                     onRestart: { manager.restart(serviceID: runtime.id) },
                     onRebuildEnv: { manager.rebuildEnvironment(serviceID: runtime.id) },
-                    onDownloadModels: (runtime.id == "audiocraft_mlx" || runtime.id == "melodyflow" || runtime.id == "stable_audio" || runtime.id == "carey" || runtime.id == "foundation") ? {
+                    onDownloadModels: (runtime.id == "audiocraft_mlx" || runtime.id == "melodyflow" || runtime.id == "sa3" || runtime.id == "stable_audio" || runtime.id == "carey" || runtime.id == "foundation") ? {
                         viewModel.openModelDownloadSheet(for: runtime.id)
                     } : nil,
-                    onManageCareyLoras: runtime.id == "carey" ? {
+                    onManageLoras: runtime.id == "carey" ? {
                         viewModel.openCareyLoraSheet()
-                    } : nil,
-                    downloadModelsExtraDisabled: runtime.id == "stable_audio" && !viewModel.stableAudioTokenConfigured
+                    } : (runtime.id == "sa3" ? {
+                        viewModel.openSA3LoraSheet()
+                    } : nil),
+                    manageLorasButtonTitle: runtime.id == "sa3" ? "loras" : "add loras",
+                    downloadModelsExtraDisabled: (runtime.id == "stable_audio" || runtime.id == "sa3") && !viewModel.stableAudioTokenConfigured
                 )
             }
             .listStyle(.inset)
@@ -315,6 +346,9 @@ struct ControlCenterView: View {
                 if runtime.id == "stable_audio" {
                     stableAudioAuthPanel()
                     Divider()
+                } else if runtime.id == "sa3" {
+                    sa3AuthPanel()
+                    Divider()
                 } else if runtime.id == "melodyflow" {
                     melodyFlowBackendPanel()
                     Divider()
@@ -368,6 +402,9 @@ struct ControlCenterView: View {
             )
             .font(.caption)
             .foregroundStyle(viewModel.stableAudioTokenConfigured ? .green : .orange)
+            Text("this keychain token is shared with sa3.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("generation backend")
@@ -394,7 +431,7 @@ struct ControlCenterView: View {
                     buttonTitle: "open stable audio page",
                     isEnabled: true
                 ) {
-                    NSWorkspace.shared.open(StableAudioAuthLinks.modelPage)
+                    NSWorkspace.shared.open(StableAudioAuthLinks.stableAudioModelPage)
                 }
 
                 stepRow(
@@ -437,6 +474,83 @@ struct ControlCenterView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.gray.opacity(0.08))
+        )
+    }
+
+    @ViewBuilder
+    private func sa3AuthPanel() -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("sa3 setup")
+                .font(.headline)
+            Text(
+                viewModel.stableAudioTokenConfigured
+                ? "shared hugging face token is configured in keychain."
+                : "shared hugging face token is missing."
+            )
+            .font(.caption)
+            .foregroundStyle(viewModel.stableAudioTokenConfigured ? .green : .orange)
+            Text("sa3 reuses the same keychain token as jerry. gated access only matters on the main stable-audio-3-medium page; the bundled t5gemma files do not need a separate approval step.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            stepRow(
+                number: 1,
+                title: "accept access for stable-audio-3-medium",
+                buttonTitle: "open sa3 model page",
+                isEnabled: true
+            ) {
+                NSWorkspace.shared.open(StableAudioAuthLinks.sa3ModelPage)
+            }
+
+            stepRow(
+                number: 2,
+                title: "create or review your read token on hugging face",
+                buttonTitle: "open token settings",
+                isEnabled: true
+            ) {
+                NSWorkspace.shared.open(StableAudioAuthLinks.tokenPage)
+            }
+
+            if let screenshotPath = viewModel.stableAudioStep2ScreenshotPath {
+                HoverExpandableScreenshot(
+                    screenshotPath: screenshotPath,
+                    caption: "token scope reference: check 'read access to contents of all public gated repos you can access' (hover to zoom)"
+                )
+            }
+
+            if !viewModel.stableAudioTokenConfigured {
+                HStack {
+                    Text("3. paste token here")
+                        .font(.subheadline)
+                    Spacer()
+                }
+                SecureField("hf_...", text: $viewModel.stableAudioTokenInput)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            HStack {
+                if !viewModel.stableAudioTokenConfigured {
+                    Button("save token") { viewModel.saveStableAudioToken() }
+                }
+                Button("remove token", role: .destructive) { viewModel.clearStableAudioToken() }
+                    .disabled(!viewModel.stableAudioTokenConfigured)
+                Button("refresh token status") { viewModel.refreshStableAudioTokenState() }
+                Spacer()
+            }
+
+            if !viewModel.stableAudioTokenStatus.isEmpty {
+                Text(viewModel.stableAudioTokenStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            sa3AdvancedSettingsPanel()
         }
         .padding(10)
         .background(
@@ -565,6 +679,142 @@ struct ControlCenterView: View {
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color.gray.opacity(0.08))
         )
+    }
+
+    @ViewBuilder
+    private func sa3AdvancedSettingsPanel() -> some View {
+        DisclosureGroup(isExpanded: $sa3AdvancedPanelExpanded) {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("sa3 advanced tab", selection: $sa3AdvancedTab) {
+                    ForEach(SA3AdvancedTab.allCases) { tab in
+                        Text(tab.displayName).tag(tab)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                if sa3AdvancedTab == .level {
+                    HStack(alignment: .top, spacing: 12) {
+                        sa3AdvancedField(
+                            title: "peak normalize dB",
+                            text: $viewModel.sa3PeakNormalizeDb,
+                            placeholder: "2.0",
+                            helpText: "Pre-scales the decoded waveform before the limiter. Use off to disable.",
+                            caption: "Pre-scales the decoded waveform before the limiter. Use off to disable."
+                        )
+                        sa3AdvancedField(
+                            title: "limiter ceiling dB",
+                            text: $viewModel.sa3LimiterCeilingDb,
+                            placeholder: "-0.3",
+                            helpText: "Soft anti-clip ceiling. Keep it at or below 0, or use off.",
+                            caption: "Soft anti-clip ceiling. Keep it at or below 0, or use off."
+                        )
+                    }
+                } else if sa3AdvancedTab == .latent {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(alignment: .top, spacing: 12) {
+                            sa3AdvancedField(
+                                title: "latent rescale",
+                                text: $viewModel.sa3LatentRescale,
+                                placeholder: "1.0",
+                                helpText: "Constant multiply before decode. 1.0 leaves latents unchanged.",
+                                caption: "Constant multiply before decode. 1.0 leaves latents unchanged."
+                            )
+                            sa3AdvancedField(
+                                title: "latent shift",
+                                text: $viewModel.sa3LatentShift,
+                                placeholder: "0.0",
+                                helpText: "Constant offset before decode. 0.0 leaves latents unchanged.",
+                                caption: "Constant offset before decode. 0.0 leaves latents unchanged."
+                            )
+                        }
+                        sa3AdvancedField(
+                            title: "adaptive target std",
+                            text: $viewModel.sa3LatentTargetStd,
+                            placeholder: "off",
+                            helpText: "Optional adaptive attenuation for hot LoRAs. Empty or off disables; try 0.9.",
+                            caption: "Optional adaptive attenuation for hot LoRAs. Empty or off disables; try 0.9."
+                        )
+                    }
+                } else if sa3AdvancedTab == .continuation {
+                    sa3AdvancedField(
+                        title: "continuation tail pad seconds",
+                        text: $viewModel.sa3ContinuationTailPad,
+                        placeholder: "6",
+                        helpText: "For continue mode: 0 ends at the cut, 6 keeps a natural tail, 20+ leans seamless.",
+                        caption: "For continue mode: 0 ends at the cut, 6 keeps a natural tail, 20+ leans seamless."
+                    )
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Text("precision")
+                                .font(.subheadline)
+                            Image(systemName: "questionmark.circle")
+                                .foregroundStyle(.secondary)
+                                .help("Experimental. Using float32 for the DiT may help loudness consistency, but it slows generation.")
+                        }
+                        Toggle(
+                            "use fp32 DiT",
+                            isOn: $viewModel.sa3UseFP32DiT
+                        )
+                        Text(
+                            "experimental. recent tests suggest fp32 DiT can improve loudness consistency, but it slows generation. turn it off to force fp16 DiT for speed testing."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+
+                HStack {
+                    Button("save") { viewModel.saveSA3RuntimeSettings() }
+                    Button("defaults") { viewModel.resetSA3RuntimeSettingsToDefaults() }
+                    Spacer()
+                }
+
+                if !viewModel.sa3RuntimeSettingsStatus.isEmpty {
+                    Text(viewModel.sa3RuntimeSettingsStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.top, 8)
+        } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("sa3 advanced")
+                    .font(.subheadline.weight(.semibold))
+                Text("output shaping, continuation defaults, and experimental precision.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func sa3AdvancedField(
+        title: String,
+        text: Binding<String>,
+        placeholder: String,
+        helpText: String,
+        caption: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.subheadline)
+                Image(systemName: "questionmark.circle")
+                    .foregroundStyle(.secondary)
+                    .help(helpText)
+            }
+
+            TextField(placeholder, text: text)
+                .textFieldStyle(.roundedBorder)
+
+            Text(caption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -797,6 +1047,339 @@ private struct RequirementsEditorSheet: View {
         }
         .padding(16)
         .frame(minWidth: 820, minHeight: 560)
+    }
+}
+
+private struct SA3LoraManagerSheet: View {
+    private struct SA3PromptPoolRow: Identifiable {
+        let name: String
+        let count: Int
+
+        var id: String { name }
+    }
+
+    @ObservedObject var viewModel: ControlCenterViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var formName: String = ""
+    @State private var checkpointPath: String = ""
+    @State private var promptsPath: String = ""
+
+    private var canSave: Bool {
+        !viewModel.isSA3LoraSaving
+            && !formName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !checkpointPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var canBuild: Bool {
+        viewModel.isSA3EnvironmentReady
+            && !viewModel.isSA3LoraBuilding
+    }
+
+    private var sortedPools: [SA3PromptPoolRow] {
+        (viewModel.sa3LoraState?.pools ?? [:])
+            .map { SA3PromptPoolRow(name: $0.key, count: $0.value) }
+            .sorted { lhs, rhs in
+                lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("sa3 lora manager")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("close")
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
+                .help("close")
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("pick the sa3 LoRA checkpoint file. if you still have the training dataset folder with txt sidecars, add that folder too and gary4local can build a prompt dice pool for the plugin.")
+                        .font(.subheadline)
+
+                    Text("sa3 loads LoRAs into the model at startup. if the model is already resident, reload or restart sa3 before testing a newly added LoRA.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if !viewModel.isSA3EnvironmentReady {
+                        Text("build sa3 first. you can still save LoRA entries now, but prompt generation is unavailable.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    } else if !viewModel.isSA3ServiceRunning {
+                        Text("sa3 is not running. you can save LoRA entries now; start sa3 before generation testing.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("new entry")
+                            .font(.headline)
+
+                        TextField("lora name", text: $formName)
+                            .textFieldStyle(.roundedBorder)
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("checkpoint file")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            HStack(spacing: 8) {
+                                TextField("path to your .ckpt or .safetensors file", text: $checkpointPath)
+                                    .textFieldStyle(.roundedBorder)
+                                Button("pick file") {
+                                    pickCheckpointFile()
+                                }
+                            }
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("dataset/prompts source folder (optional)")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            HStack(spacing: 8) {
+                                TextField("path to training captions", text: $promptsPath)
+                                    .textFieldStyle(.roundedBorder)
+                                Button("pick folder") {
+                                    pickPromptsFolder()
+                                }
+                            }
+                        }
+
+                        Text("the prompt builder reads each txt sidecar, strips the bpm/key tail, and writes one JSON per LoRA.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        HStack(spacing: 8) {
+                            Button(viewModel.isSA3LoraSaving ? "saving..." : "save lora") {
+                                Task {
+                                    await viewModel.saveSA3Lora(
+                                        name: formName,
+                                        checkpointPath: checkpointPath,
+                                        promptsPath: promptsPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : promptsPath
+                                    )
+                                    if viewModel.sa3LoraErrorMessage.isEmpty {
+                                        resetForm()
+                                    }
+                                }
+                            }
+                            .disabled(!canSave)
+
+                            Button("refresh") {
+                                Task { await viewModel.refreshSA3LoraState() }
+                            }
+                            .disabled(viewModel.isSA3LoraLoading || viewModel.isSA3LoraSaving || viewModel.isSA3LoraBuilding)
+
+                            Button(viewModel.isSA3LoraBuilding ? "building..." : "build prompts") {
+                                Task { await viewModel.buildSA3LoraPrompts() }
+                            }
+                            .disabled(!canBuild)
+
+                            Spacer()
+                        }
+                    }
+
+                    if !viewModel.sa3LoraStatusMessage.isEmpty {
+                        Text(viewModel.sa3LoraStatusMessage)
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+
+                    if !viewModel.sa3LoraErrorMessage.isEmpty {
+                        Text(viewModel.sa3LoraErrorMessage)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    if !viewModel.sa3LoraBuildOutput.isEmpty {
+                        ScrollView {
+                            Text(viewModel.sa3LoraBuildOutput)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(10)
+                        }
+                        .frame(minHeight: 90, maxHeight: 180)
+                        .background(Color(NSColor.textBackgroundColor))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.gray.opacity(0.2))
+                        )
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("registered loras")
+                            .font(.headline)
+
+                        if viewModel.isSA3LoraLoading && viewModel.sa3LoraState == nil {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else if let state = viewModel.sa3LoraState, !state.entries.isEmpty {
+                            List {
+                                ForEach(state.entries) { entry in
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        HStack(alignment: .firstTextBaseline) {
+                                            Text(entry.name)
+                                                .font(.headline)
+                                            Spacer()
+                                            Button("remove", role: .destructive) {
+                                                Task { await viewModel.removeSA3Lora(named: entry.name) }
+                                            }
+                                            .controlSize(.small)
+                                            .disabled(viewModel.isSA3LoraSaving || viewModel.isSA3LoraBuilding)
+                                        }
+
+                                        Text("strength \(entry.strength.formatted())")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+
+                                        Text("checkpoint: \(entry.path)")
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(.secondary)
+                                            .textSelection(.enabled)
+
+                                        if let promptsPath = entry.promptsPath, !promptsPath.isEmpty {
+                                            Text("prompt source: \(promptsPath)")
+                                                .font(.caption.monospaced())
+                                                .foregroundStyle(.secondary)
+                                                .textSelection(.enabled)
+                                        } else if entry.resolvedPromptsPath != nil {
+                                            Text("prompt source: using checkpoint folder sidecars")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        } else {
+                                            Text("prompt source: not set")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+
+                                        Text("prompt JSON: \(entry.promptFilePath)")
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(.secondary)
+                                            .textSelection(.enabled)
+
+                                        Text("\(entry.captionCount) txt sidecars detected, \(entry.promptCount) prompts built")
+                                            .font(.caption)
+                                            .foregroundStyle(entry.registered ? Color.secondary : Color.red)
+
+                                        if entry.captionCount == 0 {
+                                            Text("no txt sidecars found. the dice button will use defaults until a prompt JSON exists.")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .padding(.vertical, 4)
+                                }
+                            }
+                            .listStyle(.inset)
+                            .frame(minHeight: 180, idealHeight: 220)
+                        } else {
+                            Text("no loras added yet.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if !sortedPools.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("prompt pools")
+                                .font(.headline)
+
+                            List(sortedPools) { pool in
+                                HStack {
+                                    Text(pool.name)
+                                    Spacer()
+                                    Text("\(pool.count)")
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .listStyle(.inset)
+                            .frame(minHeight: 120, idealHeight: 150)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 820, minHeight: 620)
+    }
+
+    private func pickCheckpointFile() {
+        if let path = Self.pickFile() {
+            checkpointPath = path
+            if formName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                formName = suggestedName(from: path)
+            }
+        }
+    }
+
+    private func pickPromptsFolder() {
+        if let path = Self.pickDirectory() {
+            promptsPath = path
+            if formName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                formName = suggestedName(from: path)
+            }
+        }
+    }
+
+    private func resetForm() {
+        formName = ""
+        checkpointPath = ""
+        promptsPath = ""
+    }
+
+    private func suggestedName(from path: String) -> String {
+        let filename = URL(fileURLWithPath: path).lastPathComponent
+        let withoutExtension = filename.replacingOccurrences(
+            of: #"\.(ckpt|safetensors)$"#,
+            with: "",
+            options: .regularExpression
+        )
+        let cleaned = withoutExtension
+            .lowercased()
+            .replacingOccurrences(
+                of: #"[^a-z0-9_-]+"#,
+                with: "-",
+                options: .regularExpression
+            )
+        let trimmed = cleaned.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return String(trimmed.prefix(64))
+    }
+
+    private static func pickFile() -> String? {
+        let panel = NSOpenPanel()
+        panel.prompt = "choose"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "ckpt", conformingTo: .data),
+            UTType(filenameExtension: "safetensors", conformingTo: .data)
+        ].compactMap { $0 }
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
+    private static func pickDirectory() -> String? {
+        let panel = NSOpenPanel()
+        panel.prompt = "choose"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        return panel.runModal() == .OK ? panel.url?.path : nil
     }
 }
 
@@ -1180,6 +1763,8 @@ private struct ModelDownloadSheet: View {
 
             if viewModel.modelDownloadServiceID == "stable_audio" {
                 stableAudioPredownloadContent
+            } else if viewModel.modelDownloadServiceID == "sa3" {
+                sa3SetupContent
             } else if viewModel.modelDownloadServiceID == "carey" {
                 careyPredownloadContent
             } else {
@@ -1190,11 +1775,118 @@ private struct ModelDownloadSheet: View {
         .frame(minWidth: 760, minHeight: 520)
         .onAppear {
             if viewModel.modelDownloadServiceID != "stable_audio",
+               viewModel.modelDownloadServiceID != "sa3",
                viewModel.modelDownloadServiceID != "carey",
                viewModel.downloadableModels.isEmpty {
                 viewModel.refreshModelCatalogAndStatuses()
             }
         }
+    }
+
+    @ViewBuilder
+    private var sa3SetupContent: some View {
+        Text("pre-download the required sa3 model repos for offline use in gary4juce.")
+            .font(.subheadline)
+        Text("this service reuses the same keychain hugging face token as jerry.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        Text("accept access for both upstream repos before testing the backend.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        Text("if you skip this step, the first /load or generation request will still fetch the gated assets on demand.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+        if !viewModel.stableAudioTokenConfigured {
+            Text("hugging face token is required. save it in sa3 or jerry setup first.")
+                .font(.caption)
+                .foregroundStyle(.red)
+        }
+
+        if !viewModel.modelDownloadStatusMessage.isEmpty {
+            Text(viewModel.modelDownloadStatusMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        HStack(spacing: 8) {
+            Button("download required models") {
+                viewModel.startSA3PredownloadRequiredModels()
+            }
+            Button("refresh downloaded") {
+                viewModel.refreshSA3PredownloadInventory()
+            }
+            Spacer()
+        }
+        .disabled(!viewModel.canManageSA3Predownloads || viewModel.isModelDownloadInProgress)
+
+        if viewModel.isModelDownloadInProgress && viewModel.modelDownloadServiceID == "sa3" {
+            ProgressView(value: viewModel.sa3PredownloadProgress)
+                .controlSize(.small)
+        }
+
+        if !viewModel.sa3InventoryModels.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("downloaded models")
+                    .font(.caption.weight(.semibold))
+                ForEach(viewModel.sa3InventoryModels) { row in
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(row.downloaded ? Color.green : Color.gray.opacity(0.5))
+                            .frame(width: 8, height: 8)
+                        Text(row.label)
+                            .font(.caption.monospaced())
+                        Spacer()
+                        if row.downloaded {
+                            Text("downloaded")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        } else if !row.missing.isEmpty {
+                            Text("missing \(row.missing.joined(separator: ", "))")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("not downloaded")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+        }
+
+        Divider()
+
+        HStack {
+            Button("open stable-audio-3-medium") {
+                NSWorkspace.shared.open(StableAudioAuthLinks.sa3ModelPage)
+            }
+            Button("open token settings") {
+                NSWorkspace.shared.open(StableAudioAuthLinks.tokenPage)
+            }
+            Spacer()
+        }
+
+        VStack(alignment: .leading, spacing: 6) {
+            Text("notes")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text("use the sa3 or jerry service panel to save or remove the shared token.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("use the loras button on the sa3 service row to register local checkpoints and build prompt dice pools.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if !viewModel.canManageModelDownloads {
+                Text("start sa3 when you want to validate health and inspect logs.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+
+        Spacer(minLength: 0)
     }
 
     @ViewBuilder
@@ -2165,7 +2857,8 @@ private struct ServiceRow: View {
     let onRestart: () -> Void
     let onRebuildEnv: () -> Void
     let onDownloadModels: (() -> Void)?
-    let onManageCareyLoras: (() -> Void)?
+    let onManageLoras: (() -> Void)?
+    let manageLorasButtonTitle: String
     let downloadModelsExtraDisabled: Bool
 
     private var downloadModelsDisabled: Bool {
@@ -2189,9 +2882,9 @@ private struct ServiceRow: View {
                             .controlSize(.small)
                             .disabled(downloadModelsDisabled)
                         }
-                        if let onManageCareyLoras {
-                            Button("add loras") {
-                                onManageCareyLoras()
+                        if let onManageLoras {
+                            Button(manageLorasButtonTitle) {
+                                onManageLoras()
                             }
                             .controlSize(.small)
                         }
@@ -2254,6 +2947,8 @@ private func displayName(for runtime: ServiceRuntime) -> String {
         return "gary (musicgen)"
     case "melodyflow":
         return "terry (melodyflow)"
+    case "sa3":
+        return "sa3 (stable audio 3)"
     case "stable_audio":
         return "jerry (stable audio)"
     case "carey":
@@ -2271,6 +2966,8 @@ private func displayName(forServiceID serviceID: String, fallback: String) -> St
         return "gary (musicgen)"
     case "melodyflow":
         return "terry (melodyflow)"
+    case "sa3":
+        return "sa3 (stable audio 3)"
     case "stable_audio":
         return "jerry (stable audio)"
     case "carey":

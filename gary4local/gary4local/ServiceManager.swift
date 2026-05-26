@@ -21,15 +21,15 @@ private enum BootstrapError: LocalizedError {
 
 private enum ServiceStartError: LocalizedError {
     case portStillInUse(port: Int, pids: [Int32])
-    case missingStableAudioToken
+    case missingHuggingFaceToken(serviceName: String)
 
     var errorDescription: String? {
         switch self {
         case .portStillInUse(let port, let pids):
             let pidList = pids.map(String.init).joined(separator: ", ")
             return "port \(port) is still in use by pid(s): \(pidList)"
-        case .missingStableAudioToken:
-            return "stable audio requires hugging face access token. open stable audio setup and save your token."
+        case .missingHuggingFaceToken(let serviceName):
+            return "\(serviceName) requires a hugging face access token. open the service setup panel and save your token."
         }
     }
 }
@@ -66,6 +66,9 @@ final class ServiceManager: ObservableObject {
     private var careyBackendEngine = "mlx"
     private var careyUseXlModels = false
     private var careyUseSampledMlxVaeEncode = true
+    private var sa3RuntimeSettings = SA3RuntimeSettings.fallbackDefaults
+    private static let sharedHuggingFaceTokenServiceIDs: Set<String> = ["stable_audio", "sa3"]
+    private static let sharedHuggingFaceTokenEnvironmentKeys = ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"]
     private var processes: [String: Process] = [:]
     private var outputPipes: [String: Pipe] = [:]
     private var logHandles: [String: FileHandle] = [:]
@@ -134,6 +137,18 @@ final class ServiceManager: ObservableObject {
         guard let runtime = services.first(where: { $0.id == "carey" }) else { return }
         if runtime.processState == .running || runtime.processState == .starting {
             restart(serviceID: "carey")
+        }
+    }
+
+    func setSA3RuntimeSettings(_ settings: SA3RuntimeSettings, restartIfRunning: Bool) {
+        let normalized = settings.normalized
+        guard sa3RuntimeSettings != normalized else { return }
+        sa3RuntimeSettings = normalized
+
+        guard restartIfRunning else { return }
+        guard let runtime = services.first(where: { $0.id == "sa3" }) else { return }
+        if runtime.processState == .running || runtime.processState == .starting {
+            restart(serviceID: "sa3")
         }
     }
 
@@ -277,8 +292,9 @@ final class ServiceManager: ObservableObject {
 
         do {
             let environment = makeEnvironment(for: service)
-            if service.id == "stable_audio", environment["HF_TOKEN"]?.isEmpty != false {
-                throw ServiceStartError.missingStableAudioToken
+            if Self.sharedHuggingFaceTokenServiceIDs.contains(service.id),
+               environment["HF_TOKEN"]?.isEmpty != false {
+                throw ServiceStartError.missingHuggingFaceToken(serviceName: service.name)
             }
             try clearConflictingListenersIfNeeded(
                 for: service,
@@ -377,6 +393,22 @@ final class ServiceManager: ObservableObject {
     func refreshHealthNow(serviceID: String) {
         guard let service = services.first(where: { $0.id == serviceID })?.service else { return }
         startHealthMonitor(for: service)
+    }
+
+    func restartServicesUsingSharedHuggingFaceToken() -> [String] {
+        var restartedServiceNames: [String] = []
+
+        for runtime in services where Self.sharedHuggingFaceTokenServiceIDs.contains(runtime.id) {
+            switch runtime.processState {
+            case .running, .starting, .stopping:
+                restart(serviceID: runtime.id)
+                restartedServiceNames.append(runtime.service.name)
+            default:
+                continue
+            }
+        }
+
+        return restartedServiceNames
     }
 
     func rebuildEnvironment(
@@ -1381,17 +1413,30 @@ final class ServiceManager: ObservableObject {
         for (key, value) in service.environment {
             env[key] = value
         }
-        if service.id == "stable_audio",
-           env["HF_TOKEN"]?.isEmpty != false,
-           let token = StableAudioAuthKeychain.readToken(),
-           !token.isEmpty {
-            env["HF_TOKEN"] = token
+        if Self.sharedHuggingFaceTokenServiceIDs.contains(service.id) {
+            for key in Self.sharedHuggingFaceTokenEnvironmentKeys {
+                env.removeValue(forKey: key)
+            }
+
+            if let token = StableAudioAuthKeychain.readToken()?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !token.isEmpty {
+                env["HF_TOKEN"] = token
+                env["HUGGING_FACE_HUB_TOKEN"] = token
+            }
         }
         if service.id == "stable_audio" {
             env["STABLE_AUDIO_BACKEND_ENGINE"] = stableAudioBackendEngine
         } else if service.id == "melodyflow" {
             env["MELODYFLOW_BACKEND_ENGINE"] = melodyFlowBackendEngine
             env["MELODYFLOW_REQUIRE_MPS"] = melodyFlowBackendEngine == "mps" ? "1" : "0"
+        } else if service.id == "sa3" {
+            env["SA3_PEAK_NORMALIZE_DB"] = sa3RuntimeSettings.peakNormalizeDb
+            env["SA3_LIMITER_CEILING_DB"] = sa3RuntimeSettings.limiterCeilingDb
+            env["SA3_LATENT_RESCALE"] = sa3RuntimeSettings.latentRescale
+            env["SA3_LATENT_SHIFT"] = sa3RuntimeSettings.latentShift
+            env["SA3_LATENT_TARGET_STD"] = sa3RuntimeSettings.latentTargetStd
+            env["SA3_CONTINUE_TAIL_PAD"] = sa3RuntimeSettings.continuationTailPad
+            env["SA3_MLX_DIT_DTYPE"] = sa3RuntimeSettings.useFP32DiT ? "float32" : "float16"
         } else if service.id == "carey" {
             let useMlx = careyBackendEngine == "mlx"
             let baseConfig = careyUseXlModels ? "acestep-v15-xl-base" : "acestep-v15-base"

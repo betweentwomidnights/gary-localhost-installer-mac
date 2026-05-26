@@ -173,6 +173,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "gary (musicgen)"
         case "melodyflow":
             return "terry (melodyflow)"
+        case "sa3":
+            return "sa3 (stable audio 3)"
         case "stable_audio":
             return "jerry (stable audio)"
         default:
