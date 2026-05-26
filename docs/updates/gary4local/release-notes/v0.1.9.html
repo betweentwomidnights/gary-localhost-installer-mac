@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>gary4local v0.1.9 release notes</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 24px;
+        line-height: 1.55;
+        color: #111;
+      }
+
+      h1 {
+        margin-bottom: 0.25rem;
+      }
+
+      p {
+        margin-top: 0;
+        color: #444;
+      }
+
+      ul {
+        padding-left: 1.2rem;
+      }
+
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.95em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>gary4local v0.1.9</h1>
+    <p>Stable Audio 3 arrives on the macOS localhost stack for the Gary4JUCE 4.0.0-mac release train.</p>
+
+    <h2>Highlights</h2>
+    <ul>
+      <li>Adds local Stable Audio 3 model download, token reuse, and gated-access handling inside <code>gary4local</code>.</li>
+      <li>Adds SA3 generation, loop, transform, and continuation endpoints on the Apple Silicon MLX backend.</li>
+      <li>Adds experimental <code>latent_prefix</code> continuation mode for pingpong-based continuation workflows.</li>
+      <li>Adds SA3 LoRA registration plus prompt-pool building from training sidecars.</li>
+      <li>Adds advanced SA3 output-shaping controls for loudness tuning and experimental DiT precision testing.</li>
+    </ul>
+
+    <h2>Recommended Companion</h2>
+    <ul>
+      <li><code>gary4juce v4.0.0-mac</code></li>
+      <li>Release page: <a href="https://github.com/betweentwomidnights/gary4juce/releases/tag/v4.0.0-mac">https://github.com/betweentwomidnights/gary4juce/releases/tag/v4.0.0-mac</a></li>
+    </ul>
+
+    <h2>Notes</h2>
+    <ul>
+      <li>This build is distributed outside the Mac App Store as a notarized DMG.</li>
+      <li>Sparkle signatures are included for the in-app updater flow.</li>
+      <li>The recommended loudness path on macOS remains peak normalization plus a gentle limiter; the fp32 DiT toggle stays experimental.</li>
+    </ul>
+  </body>
+</html>

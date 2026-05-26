@@ -7,6 +7,7 @@ It pairs with [gary4juce](https://github.com/betweentwomidnights/gary4juce) and 
 ## Current Note
 
 - Auto-updater is now implemented in `gary4local` using Sparkle 2.
+- Recommended companion build for the current SA3 macOS release train: [gary4juce v4.0.0-mac](https://github.com/betweentwomidnights/gary4juce/releases/tag/v4.0.0-mac).
 - `foundation-1` has now been successfully added to `gary4local`, including model download flow, prompt randomization support, text generation, and audio2audio on the macOS MLX path.
 - Carey now includes the regular and XL `ace-step-v15-{base,sft,turbo}` model family toggle in `gary4local`, aligned with the Windows `gary-localhost-installer` flow.
 - TODO: investigate surfacing runtime generation failures, especially Carey stack traces, through the same popup/reporting UX currently used for build failures.
