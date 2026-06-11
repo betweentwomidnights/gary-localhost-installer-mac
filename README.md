@@ -1,4 +1,4 @@
-# Gary Localhost Installer (macOS)
+# gary4local (macOS)
 
 This repository combines the local backend environments used by the Gary plugin stack on Apple Silicon macOS.
 
