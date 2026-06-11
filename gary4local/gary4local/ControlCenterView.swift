@@ -99,6 +99,15 @@ struct ControlCenterView: View {
         .sheet(isPresented: $viewModel.isSA3LoraSheetPresented) {
             SA3LoraManagerSheet(viewModel: viewModel)
         }
+        .sheet(isPresented: $viewModel.isSA3TrainingSheetPresented) {
+            SA3LoraTrainingSheet(
+                trainer: viewModel.sa3TrainingManager,
+                serviceIsRunning: viewModel.isSA3ServiceRunning,
+                environmentReady: viewModel.isSA3EnvironmentReady,
+                tokenConfigured: viewModel.stableAudioTokenConfigured,
+                onStart: viewModel.startSA3LoraTraining
+            )
+        }
         .sheet(item: $viewModel.rebuildFailureReport) { report in
             RebuildFailureSheet(viewModel: viewModel, report: report)
         }
@@ -166,7 +175,10 @@ struct ControlCenterView: View {
                     } : (runtime.id == "sa3" ? {
                         viewModel.openSA3LoraSheet()
                     } : nil),
-                    manageLorasButtonTitle: runtime.id == "sa3" ? "loras" : "add loras",
+                    onTrainLora: runtime.id == "sa3" ? {
+                        viewModel.openSA3TrainingSheet()
+                    } : nil,
+                    manageLorasButtonTitle: "add lora",
                     downloadModelsExtraDisabled: (runtime.id == "stable_audio" || runtime.id == "sa3") && !viewModel.stableAudioTokenConfigured
                 )
             }
@@ -2858,6 +2870,7 @@ private struct ServiceRow: View {
     let onRebuildEnv: () -> Void
     let onDownloadModels: (() -> Void)?
     let onManageLoras: (() -> Void)?
+    let onTrainLora: (() -> Void)?
     let manageLorasButtonTitle: String
     let downloadModelsExtraDisabled: Bool
 
@@ -2881,12 +2894,6 @@ private struct ServiceRow: View {
                             }
                             .controlSize(.small)
                             .disabled(downloadModelsDisabled)
-                        }
-                        if let onManageLoras {
-                            Button(manageLorasButtonTitle) {
-                                onManageLoras()
-                            }
-                            .controlSize(.small)
                         }
                     }
                     Text("id: \(runtime.id)")
@@ -2925,6 +2932,16 @@ private struct ServiceRow: View {
                     action: onRebuildEnv
                 )
                 .disabled(runtime.isRunning || runtime.isBootstrapping || runtime.bootstrapState == .notConfigured)
+                if let onManageLoras {
+                    Button(manageLorasButtonTitle) {
+                        onManageLoras()
+                    }
+                }
+                if let onTrainLora {
+                    Button("train lora") {
+                        onTrainLora()
+                    }
+                }
                 Spacer()
                 Text(
                     "proc: \(runtime.processState.rawValue) / health: \(runtime.healthState.rawValue) / env: \(runtime.bootstrapState.rawValue)"

@@ -402,6 +402,7 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var careyLoraErrorMessage: String = ""
     @Published var careyLoraBuildOutput: String = ""
     @Published var isSA3LoraSheetPresented: Bool = false
+    @Published var isSA3TrainingSheetPresented: Bool = false
     @Published var sa3LoraState: SA3LoraState?
     @Published var isSA3LoraLoading: Bool = false
     @Published var isSA3LoraSaving: Bool = false
@@ -420,6 +421,8 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var requirementsEditorStatusMessage: String = ""
     @Published var modelDownloadServiceID: String = "audiocraft_mlx"
 
+    let sa3TrainingManager = SA3LoraTrainingManager()
+
     private var logRefreshTask: Task<Void, Never>?
     private var modelDownloadPollTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
@@ -435,6 +438,7 @@ final class ControlCenterViewModel: ObservableObject {
     private var careyProgressByLabel: [String: Int] = [:]
     private var careyActiveDownloadTargets: [CareyDownloadTarget] = []
     private var sa3DefaultRuntimeSettings = SA3RuntimeSettings.fallbackDefaults
+    private var sharedHuggingFaceToken: String?
 
     private static let careyProgressPercentRegex = try! NSRegularExpression(
         pattern: #"^[A-Za-z_]+:\s+([0-9]{1,3})%"#
@@ -1158,6 +1162,23 @@ final class ControlCenterViewModel: ObservableObject {
     func openSA3LoraSheet() {
         isSA3LoraSheetPresented = true
         Task { await refreshSA3LoraState() }
+    }
+
+    func openSA3TrainingSheet() {
+        sa3TrainingManager.refresh()
+        isSA3TrainingSheetPresented = true
+    }
+
+    func startSA3LoraTraining(_ request: SA3LoraTrainingRequest) {
+        guard let service = currentSA3Runtime()?.service else {
+            sa3TrainingManager.clearError()
+            return
+        }
+        sa3TrainingManager.start(
+            request: request,
+            service: service,
+            huggingFaceToken: sharedHuggingFaceToken
+        )
     }
 
     func refreshSA3LoraState() async {
@@ -2444,6 +2465,7 @@ final class ControlCenterViewModel: ObservableObject {
                 try StableAudioAuthKeychain.saveToken(token)
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
+                    self.sharedHuggingFaceToken = token
                     self.stableAudioTokenInput = ""
                     self.applyStableAudioTokenState(configured: true)
                     let restartedServices = self.manager?.restartServicesUsingSharedHuggingFaceToken() ?? []
@@ -2470,6 +2492,7 @@ final class ControlCenterViewModel: ObservableObject {
                 try StableAudioAuthKeychain.deleteToken()
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
+                    self.sharedHuggingFaceToken = nil
                     self.stableAudioTokenInput = ""
                     self.applyStableAudioTokenState(configured: false)
                     self.stableAudioTokenStatus = "saved token removed."
@@ -2485,8 +2508,10 @@ final class ControlCenterViewModel: ObservableObject {
 
     func refreshStableAudioTokenState() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let configured = StableAudioAuthKeychain.readToken()?.isEmpty == false
+            let token = StableAudioAuthKeychain.readToken()
+            let configured = token?.isEmpty == false
             DispatchQueue.main.async { [weak self] in
+                self?.sharedHuggingFaceToken = token
                 self?.applyStableAudioTokenState(configured: configured)
             }
         }
