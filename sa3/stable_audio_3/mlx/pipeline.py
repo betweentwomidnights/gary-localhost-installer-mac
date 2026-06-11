@@ -146,15 +146,130 @@ class StableAudioMLXPipeline:
 
         try:
             from stable_audio_3.pipeline import StableAudioPipeline
-            from stable_audio_3.mlx.autoencoder import MLXAudioAutoencoder
-            from stable_audio_3.mlx.conditioning import MLXNumberConditioner
-            from stable_audio_3.mlx.dit import StableAudioMLXDiT
-            from stable_audio_3.mlx.t5gemma import T5GemmaTextConditioner
         except ModuleNotFoundError as exc:
             raise RuntimeError(
                 "The torch Stable Audio pipeline dependencies are required for "
                 "runtime MLX conversion."
             ) from exc
+
+        torch_device_arg = None if torch_device == "auto" else torch_device
+        torch_pipeline = StableAudioPipeline.from_pretrained(
+            model_name_or_path,
+            device=torch_device_arg,
+            model_half=model_half,
+        )
+
+        resolved_config_path = None
+        try:
+            resolved_config_path = resolve_pretrained_config_path(
+                model_name_or_path,
+                search_roots=search_roots,
+            )
+        except (FileNotFoundError, TypeError):
+            resolved_config_path = None
+
+        return cls._from_loaded_torch_pipeline(
+            torch_pipeline,
+            source_name=str(model_name_or_path),
+            resolved_config_path=resolved_config_path,
+            dtype=dtype,
+            dit_dtype=dit_dtype,
+            text_dtype=text_dtype,
+            number_dtype=number_dtype,
+            autoencoder_dtype=autoencoder_dtype,
+            attention=attention,
+        )
+
+    @classmethod
+    def from_torch_checkpoint(
+        cls,
+        config_path: str | Path,
+        checkpoint_path: str | Path,
+        *,
+        torch_device: str | None = "cpu",
+        dtype: str = "float32",
+        dit_dtype: str | None = None,
+        text_dtype: str | None = None,
+        number_dtype: str | None = None,
+        autoencoder_dtype: str | None = None,
+        attention: str = "sliding",
+        model_half: bool = False,
+    ) -> "StableAudioMLXPipeline":
+        """Load a local torch checkpoint and convert its runtime modules to MLX."""
+        require_mlx_runtime()
+        if attention not in {"sliding", "full"}:
+            raise ValueError(f"attention must be 'sliding' or 'full', got {attention!r}.")
+
+        resolved_config_path = Path(config_path).expanduser().absolute()
+        # Keep the Hugging Face snapshot symlink name intact. Resolving it to the
+        # extensionless blob path prevents the checkpoint loader from recognizing
+        # safetensors files.
+        resolved_checkpoint_path = Path(checkpoint_path).expanduser().absolute()
+        if not resolved_config_path.is_file():
+            raise FileNotFoundError(f"Model config not found: {resolved_config_path}")
+        if not resolved_checkpoint_path.is_file():
+            raise FileNotFoundError(f"Model checkpoint not found: {resolved_checkpoint_path}")
+
+        try:
+            from stable_audio_3.loading_utils import load_diffusion_cond
+            from stable_audio_3.pipeline import StableAudioPipeline
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "The torch Stable Audio pipeline dependencies are required for "
+                "runtime MLX conversion."
+            ) from exc
+
+        with resolved_config_path.open() as handle:
+            model_config = json.load(handle)
+
+        torch_device_arg = (
+            "cpu" if torch_device is None or torch_device == "auto" else torch_device
+        )
+        torch_model = load_diffusion_cond(
+            model_config,
+            str(resolved_checkpoint_path),
+            device=torch_device_arg,
+            model_half=model_half,
+        )
+        torch_model.use_lora = False
+        torch_model.lora_names = []
+        torch_pipeline = StableAudioPipeline(
+            torch_model,
+            model_config,
+            torch_device_arg,
+            model_half,
+        )
+
+        return cls._from_loaded_torch_pipeline(
+            torch_pipeline,
+            source_name=resolved_checkpoint_path.stem,
+            resolved_config_path=resolved_config_path,
+            dtype=dtype,
+            dit_dtype=dit_dtype,
+            text_dtype=text_dtype,
+            number_dtype=number_dtype,
+            autoencoder_dtype=autoencoder_dtype,
+            attention=attention,
+        )
+
+    @classmethod
+    def _from_loaded_torch_pipeline(
+        cls,
+        torch_pipeline,
+        *,
+        source_name: str,
+        resolved_config_path: Path | None,
+        dtype: str,
+        dit_dtype: str | None,
+        text_dtype: str | None,
+        number_dtype: str | None,
+        autoencoder_dtype: str | None,
+        attention: str,
+    ) -> "StableAudioMLXPipeline":
+        from stable_audio_3.mlx.autoencoder import MLXAudioAutoencoder
+        from stable_audio_3.mlx.conditioning import MLXNumberConditioner
+        from stable_audio_3.mlx.dit import StableAudioMLXDiT
+        from stable_audio_3.mlx.t5gemma import T5GemmaTextConditioner
 
         mx = import_mlx_core(required=True)
         dit_dtype = dit_dtype or dtype
@@ -165,14 +280,7 @@ class StableAudioMLXPipeline:
         text_mlx_dtype = getattr(mx, text_dtype)
         number_mlx_dtype = getattr(mx, number_dtype)
         autoencoder_mlx_dtype = getattr(mx, autoencoder_dtype)
-        torch_device_arg = None if torch_device == "auto" else torch_device
-        torch_pipeline = StableAudioPipeline.from_pretrained(
-            model_name_or_path,
-            device=torch_device_arg,
-            model_half=model_half,
-        )
         model_config = torch_pipeline.model_config
-        source_name = str(model_name_or_path)
         requirements = extract_mlx_port_requirements(model_config, source_name=source_name)
         compatibility = analyze_mlx_compatibility(
             requirements,
@@ -201,15 +309,6 @@ class StableAudioMLXPipeline:
         # Match torch eval behavior for prompt-generation decode: no stochastic
         # softnorm noise unless a caller deliberately changes the module later.
         autoencoder.bottleneck.noise_regularize = False
-
-        resolved_config_path = None
-        try:
-            resolved_config_path = resolve_pretrained_config_path(
-                model_name_or_path,
-                search_roots=search_roots,
-            )
-        except (FileNotFoundError, TypeError):
-            resolved_config_path = None
 
         return cls(
             source_name=source_name,
@@ -1220,7 +1319,10 @@ def resolve_pretrained_config_path(
 
     model_cfg = all_models.get(model_name_or_path)
     if model_cfg is not None:
-        local_config, _ = model_cfg.resolve()
+        if hasattr(model_cfg, "resolve_config"):
+            local_config = model_cfg.resolve_config()
+        else:
+            local_config, _ = model_cfg.resolve()
         return Path(local_config).expanduser().resolve()
 
     search_root_list = list(search_roots or ())

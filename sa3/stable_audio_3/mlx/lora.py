@@ -27,7 +27,15 @@ _LORA_KEY_RE = re.compile(
     r"^(?P<prefix>.+)\.parametrizations\.weight\.(?P<index>\d+)\."
     r"(?P<param>lora_A|lora_B|M_xs|magnitude|magnitude_r|magnitude_c|U|V)$"
 )
-_SUPPORTED_ADAPTERS = {"lora", "dora", "dora-rows", "dora-cols", "bora"}
+_XS_ADAPTERS = {"lora-xs", "dora-rows-xs", "dora-cols-xs", "bora-xs"}
+_SUPPORTED_ADAPTERS = {
+    "lora",
+    "dora",
+    "dora-rows",
+    "dora-cols",
+    "bora",
+    *_XS_ADAPTERS,
+}
 
 
 @dataclass(frozen=True)
@@ -96,28 +104,35 @@ class _MLXLoRALayer:
     def apply(self, target_weight: np.ndarray, *, strength: float) -> np.ndarray:
         if float(strength) == 0.0:
             return target_weight
-        if self.adapter_type in {"lora", "dora", "dora-rows", "dora-cols", "bora"}:
+        if self.adapter_type in _SUPPORTED_ADAPTERS:
             return self._apply_lora_family(target_weight, strength=float(strength))
         raise ValueError(f"Unsupported MLX LoRA adapter type: {self.adapter_type!r}")
 
     def _apply_lora_family(self, target_weight: np.ndarray, *, strength: float) -> np.ndarray:
-        delta_2d, rank = _lora_delta_2d(self.params)
-        source_shape = _source_shape_for_delta(tuple(target_weight.shape), delta_2d.shape)
+        if self.adapter_type in _XS_ADAPTERS:
+            source_shape = _source_shape_for_xs(tuple(target_weight.shape), self.params)
+        else:
+            delta_2d, _ = _lora_delta_2d(self.params)
+            source_shape = _source_shape_for_delta(tuple(target_weight.shape), delta_2d.shape)
         base_source = _target_to_source_weight(target_weight, source_shape)
         base_2d = base_source.reshape(source_shape[0], -1).astype(np.float32, copy=False)
+        if self.adapter_type in _XS_ADAPTERS:
+            delta_2d, rank = _xs_delta_2d(self.params, base_2d)
+        else:
+            delta_2d, rank = _lora_delta_2d(self.params)
 
         scaling = float(self.alpha) / float(rank)
         v = base_2d + (scaling * strength) * delta_2d.astype(np.float32, copy=False)
 
-        if self.adapter_type == "lora":
+        if self.adapter_type in {"lora", "lora-xs"}:
             adapted_2d = v
-        elif self.adapter_type in {"dora", "dora-rows"}:
+        elif self.adapter_type in {"dora", "dora-rows", "dora-rows-xs"}:
             magnitude = _require_param(self.params, "magnitude", self.source_name).reshape(-1)
             adapted_2d = _dora_scale(v, magnitude, norm_dim=1)
-        elif self.adapter_type == "dora-cols":
+        elif self.adapter_type in {"dora-cols", "dora-cols-xs"}:
             magnitude = _require_param(self.params, "magnitude", self.source_name).reshape(-1)
             adapted_2d = _dora_scale(v, magnitude, norm_dim=0)
-        elif self.adapter_type == "bora":
+        elif self.adapter_type in {"bora", "bora-xs"}:
             magnitude_r = _require_param(self.params, "magnitude_r", self.source_name).reshape(-1)
             magnitude_c = _require_param(self.params, "magnitude_c", self.source_name).reshape(-1)
             adapted_2d = _bora_scale(v, magnitude_r, magnitude_c)
@@ -195,13 +210,35 @@ class MLXLoRASet:
                 if target_key is None:
                     missing_targets.append(source_name)
                     continue
-                if "lora_A" not in params or "lora_B" not in params:
+                if adapter_type in _XS_ADAPTERS:
+                    if "M_xs" not in params:
+                        skipped_layers.append(f"{source_name}: missing M_xs")
+                        continue
+                elif "lora_A" not in params or "lora_B" not in params:
                     skipped_layers.append(f"{source_name}: missing lora_A/lora_B")
                     continue
                 rank = _rank_from_lora_params(params) or global_rank
                 if rank <= 0:
                     skipped_layers.append(f"{source_name}: unable to infer rank")
                     continue
+                if adapter_type in _XS_ADAPTERS and (
+                    "U" not in params or "V" not in params
+                ):
+                    target_weight = np.asarray(
+                        target_params[target_key],
+                        dtype=np.float32,
+                    )
+                    source_shape = _source_shape_for_xs(
+                        tuple(target_weight.shape),
+                        params,
+                    )
+                    base_source = _target_to_source_weight(
+                        target_weight,
+                        source_shape,
+                    )
+                    base_2d = base_source.reshape(source_shape[0], -1)
+                    u, v = _svd_bases(base_2d, rank)
+                    params = {**params, "U": u, "V": v}
                 layers.append(
                     _MLXLoRALayer(
                         lora_index=lora_index,
@@ -523,14 +560,26 @@ def _group_lora_state_dict(state_dict: dict[str, tp.Any]) -> dict[str, dict[str,
 
 
 def _adapter_type_from_state(adapter_type: str, state_dict: dict[str, tp.Any]) -> str:
+    keys = tuple(state_dict.keys())
+    has_xs = any(key.endswith(".M_xs") for key in keys)
+    if has_xs:
+        if adapter_type in {"bora", "bora-xs"} or any(
+            key.endswith(".magnitude_r") or key.endswith(".magnitude_c")
+            for key in keys
+        ):
+            return "bora-xs"
+        if adapter_type in {"dora-cols", "dora-cols-xs"}:
+            return "dora-cols-xs"
+        if adapter_type in {"dora", "dora-rows", "dora-rows-xs"} or any(
+            key.endswith(".magnitude") for key in keys
+        ):
+            return "dora-rows-xs"
+        return "lora-xs"
     if adapter_type == "lora":
-        keys = tuple(state_dict.keys())
         if any(key.endswith(".magnitude_r") or key.endswith(".magnitude_c") for key in keys):
             return "bora"
         if any(key.endswith(".magnitude") for key in keys):
             return "dora-rows"
-        if any(key.endswith(".M_xs") for key in keys):
-            return "lora-xs"
     return adapter_type
 
 
@@ -572,6 +621,9 @@ def _target_key_candidates(source_weight_key: str) -> tuple[str, ...]:
 
 
 def _rank_from_lora_params(params: dict[str, np.ndarray]) -> int:
+    core = params.get("M_xs")
+    if core is not None and core.ndim == 2 and core.shape[0] == core.shape[1]:
+        return int(core.shape[0])
     a = params.get("lora_A")
     b = params.get("lora_B")
     if a is None or b is None:
@@ -603,6 +655,42 @@ def _lora_delta_2d(params: dict[str, np.ndarray]) -> tuple[np.ndarray, int]:
     raise ValueError(f"Unable to multiply LoRA matrices with shapes A={a.shape}, B={b.shape}")
 
 
+def _xs_delta_2d(
+    params: dict[str, np.ndarray],
+    base_2d: np.ndarray,
+) -> tuple[np.ndarray, int]:
+    core = _require_param(params, "M_xs", "LoRA-XS layer")
+    if core.ndim != 2 or core.shape[0] != core.shape[1]:
+        raise ValueError(f"LoRA-XS core must be square, got shape {core.shape}")
+    rank = int(core.shape[0])
+    if rank > min(base_2d.shape):
+        raise ValueError(
+            f"LoRA-XS rank {rank} exceeds base weight shape {base_2d.shape}"
+        )
+
+    u = params.get("U")
+    v = params.get("V")
+    if u is None or v is None:
+        u, v = _svd_bases(base_2d, rank)
+    else:
+        u = u.astype(np.float32, copy=False)
+        v = v.astype(np.float32, copy=False)
+        if u.shape != (base_2d.shape[0], rank):
+            raise ValueError(
+                f"LoRA-XS U shape {u.shape} does not match "
+                f"{(base_2d.shape[0], rank)}"
+            )
+        if v.shape != (base_2d.shape[1], rank):
+            raise ValueError(
+                f"LoRA-XS V shape {v.shape} does not match "
+                f"{(base_2d.shape[1], rank)}"
+            )
+    delta = u.astype(np.float64) @ core.astype(np.float64) @ v.astype(np.float64).T
+    if not np.isfinite(delta).all():
+        raise ValueError("LoRA-XS delta contains non-finite values")
+    return delta.astype(np.float32, copy=False), rank
+
+
 def _require_param(params: dict[str, np.ndarray], key: str, layer_name: str) -> np.ndarray:
     value = params.get(key)
     if value is None:
@@ -625,6 +713,22 @@ def _source_shape_for_delta(
         if candidate[0] == delta_shape[0] and int(np.prod(candidate[1:])) == delta_shape[1]:
             return candidate
     raise ValueError(f"Unable to map LoRA delta {delta_shape} to target shape {target_shape}")
+
+
+def _source_shape_for_xs(
+    target_shape: tuple[int, ...],
+    params: dict[str, np.ndarray],
+) -> tuple[int, ...]:
+    u = params.get("U")
+    v = params.get("V")
+    if u is not None and v is not None:
+        return _source_shape_for_delta(
+            target_shape,
+            (int(u.shape[0]), int(v.shape[0])),
+        )
+    if len(target_shape) == 3:
+        return (target_shape[0], target_shape[2], target_shape[1])
+    return target_shape
 
 
 def _target_to_source_weight(target: np.ndarray, source_shape: tuple[int, ...]) -> np.ndarray:
@@ -674,3 +778,25 @@ def _bora_scale(v: np.ndarray, magnitude_r: np.ndarray, magnitude_c: np.ndarray)
     intermediate = magnitude_r[:, None] * row_normed
     col_normed = intermediate / np.maximum(np.linalg.norm(intermediate, axis=0, keepdims=True), 1e-12)
     return col_normed * magnitude_c[None, :]
+
+
+def _svd_bases(weight_2d: np.ndarray, rank: int) -> tuple[np.ndarray, np.ndarray]:
+    u, _, vh = np.linalg.svd(
+        weight_2d.astype(np.float32, copy=False),
+        full_matrices=False,
+    )
+    u, vh = _canonicalize_svd_signs(u, vh)
+    return (
+        u[:, :rank].astype(np.float32, copy=False),
+        vh[:rank, :].T.astype(np.float32, copy=False),
+    )
+
+
+def _canonicalize_svd_signs(
+    u: np.ndarray,
+    vh: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    max_abs_indices = np.abs(u).argmax(axis=0)
+    signs = np.sign(u[max_abs_indices, np.arange(u.shape[1])])
+    signs[signs == 0] = 1
+    return u * signs[None, :], vh * signs[:, None]

@@ -11,6 +11,22 @@ The Mac implementation uses an MLX-backed inference path built from the
 validated `sa3-mlx` conversion layer while preserving the same HTTP contract
 used by the Windows reference service.
 
+The first terminal-first MLX LoRA training smoke is documented in
+[`docs/sa3/MLX_LORA_TRAINING.md`](../docs/sa3/MLX_LORA_TRAINING.md).
+
+The Mac control center exposes the MLX trainer directly from the `sa3` service
+row. It recursively trains audio folders, supports per-track `.txt` prompts and
+a shared trigger, persists jobs under Application Support, supports
+cancellation and progress polling, and installs successful checkpoints into
+the SA3 LoRA registry automatically.
+
+The trainer also mirrors the Windows experimental loudness fix. When enabled,
+each source track is iteratively re-encoded while its input gain is adjusted
+toward a target latent RMS. It uses the same four correction rounds and 3%
+tolerance as the Windows implementation. The default `0.90` target matches the
+base model; the source audio remains untouched and the measured RMS, gain, pass
+count, and convergence result are stored with the cached latents.
+
 LoRA registration uses a Carey-style flow in the control center: the user points
 at an SA3 `.ckpt` or `.safetensors` checkpoint and, optionally, a dataset folder
 containing training `.txt` sidecars. In the Mac app wiring, the registry lives

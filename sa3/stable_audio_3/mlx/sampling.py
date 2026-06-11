@@ -89,6 +89,16 @@ def distribution_shift_spec_from_model_config(model_config: dict[str, tp.Any]) -
     return distribution_shift_spec_from_options(None)
 
 
+def training_distribution_shift_spec_from_model_config(
+    model_config: dict[str, tp.Any],
+) -> DistributionShiftSpec | None:
+    diffusion = model_config.get("model", {}).get("diffusion", {})
+    options = diffusion.get("distribution_shift_options")
+    if options is None:
+        return None
+    return distribution_shift_spec_from_options(options)
+
+
 def distribution_shift_spec_from_object(value: tp.Any) -> DistributionShiftSpec | None:
     if value is None:
         return None
@@ -251,6 +261,32 @@ def shift_schedule_values(
     if len(shifted_rows) == 1 and effective_seq_len is not None and not isinstance(effective_seq_len, (list, tuple)):
         return shifted_rows[0]
     return tuple(shifted_rows)
+
+
+def shift_timestep_values(
+    values: tp.Sequence[float],
+    *,
+    dist_shift: tp.Any,
+    effective_seq_len: float | tp.Sequence[float],
+) -> tuple[float, ...]:
+    spec = _coerce_shift_spec(dist_shift)
+    base_values = tuple(float(value) for value in values)
+    if spec is None or spec.kind == "none":
+        return base_values
+
+    seq_lens = _as_seq_len_list(effective_seq_len)
+    if seq_lens is None:
+        raise ValueError("effective_seq_len is required for timestep distribution shifting.")
+    if len(seq_lens) == 1:
+        seq_lens *= len(base_values)
+    if len(seq_lens) != len(base_values):
+        raise ValueError(
+            "effective_seq_len must contain one value or match the timestep batch size."
+        )
+    return tuple(
+        _shift_scalar_timestep(value, seq_len, spec)
+        for value, seq_len in zip(base_values, seq_lens, strict=True)
+    )
 
 
 def make_rf_schedule_values(

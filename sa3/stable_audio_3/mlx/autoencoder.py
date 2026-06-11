@@ -550,6 +550,120 @@ class MLXAudioAutoencoder(nn.Module):
             latents = self.bottleneck.encode(latents)
         return latents
 
+    def encode_audio(
+        self,
+        audio,
+        *,
+        chunked: bool = False,
+        chunk_size: int = 128,
+        overlap: int = 32,
+        chunk_batch_size: int = 1,
+    ):
+        samples_per_latent = int(self.downsampling_ratio)
+        chunk_size = int(chunk_size)
+        overlap = int(overlap)
+        chunk_batch_size = int(chunk_batch_size)
+        chunk_size_samples = chunk_size * samples_per_latent
+        if not chunked or int(audio.shape[-1]) < chunk_size_samples:
+            return self.encode(audio)
+        if chunk_size < 1:
+            raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+        if overlap < 0 or overlap >= chunk_size:
+            raise ValueError(
+                f"overlap must be >= 0 and smaller than chunk_size, got {overlap}"
+            )
+        if chunk_batch_size < 1:
+            raise ValueError(f"chunk_batch_size must be positive, got {chunk_batch_size}")
+
+        total_samples = int(audio.shape[-1])
+        hop_samples = (chunk_size - overlap) * samples_per_latent
+        chunk_starts = list(
+            range(0, total_samples - chunk_size_samples + 1, hop_samples)
+        )
+        final_start = total_samples - chunk_size_samples
+        if chunk_starts[-1] != final_start:
+            chunk_starts.append(final_start)
+
+        batch_size = int(audio.shape[0])
+        encoded_chunks = []
+        for offset in range(0, len(chunk_starts), chunk_batch_size):
+            batch_starts = chunk_starts[offset : offset + chunk_batch_size]
+            chunk_audio = mx.concatenate(
+                [
+                    audio[..., start : start + chunk_size_samples]
+                    for start in batch_starts
+                ],
+                axis=0,
+            )
+            encoded_batch = self.encode(chunk_audio)
+            mx.eval(encoded_batch)
+            encoded_chunks.extend(
+                encoded_batch[index * batch_size : (index + 1) * batch_size]
+                for index in range(len(batch_starts))
+            )
+
+        total_latents = total_samples // samples_per_latent
+        half_overlap_latents = overlap // 2
+        intervals = []
+        num_chunks = len(chunk_starts)
+        for index, (start_sample, chunk) in enumerate(
+            zip(chunk_starts, encoded_chunks)
+        ):
+            is_first = index == 0
+            is_last = index == num_chunks - 1
+            out_start = (
+                total_latents - chunk_size
+                if is_last
+                else start_sample // samples_per_latent
+            )
+            left = 0 if is_first else half_overlap_latents
+            right = chunk_size if is_last else chunk_size - half_overlap_latents
+            intervals.append(
+                {
+                    "target_start": out_start + left,
+                    "target_end": out_start + right,
+                    "left": left,
+                    "right": right,
+                    "chunk": chunk,
+                }
+            )
+
+        pieces = []
+        cursor = 0
+        output_shape_prefix = tuple(int(dim) for dim in encoded_chunks[0].shape[:-1])
+        for index, interval in enumerate(intervals):
+            next_start = (
+                int(intervals[index + 1]["target_start"])
+                if index + 1 < len(intervals)
+                else int(interval["target_end"])
+            )
+            target_start = int(interval["target_start"])
+            target_end = min(int(interval["target_end"]), next_start)
+            clipped_start = max(target_start, cursor)
+            if clipped_start > cursor:
+                pieces.append(
+                    mx.zeros(
+                        (*output_shape_prefix, clipped_start - cursor),
+                        dtype=encoded_chunks[0].dtype,
+                    )
+                )
+                cursor = clipped_start
+            if target_end <= clipped_start:
+                continue
+            left = int(interval["left"]) + clipped_start - target_start
+            right = left + target_end - clipped_start
+            pieces.append(interval["chunk"][..., left:right])
+            cursor = target_end
+
+        if cursor < total_latents:
+            pieces.append(
+                mx.zeros(
+                    (*output_shape_prefix, total_latents - cursor),
+                    dtype=encoded_chunks[0].dtype,
+                )
+            )
+        return mx.concatenate(pieces, axis=-1)
+
     def decode(self, latents, *, add_bottleneck_noise: bool | None = None):
         if self.bottleneck is not None:
             latents = self.bottleneck.decode(latents, add_noise=add_bottleneck_noise)
