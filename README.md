@@ -4,6 +4,10 @@ This repository combines the local backend environments used by the Gary plugin 
 
 It pairs with [gary4juce](https://github.com/betweentwomidnights/gary4juce) and now includes a working macOS Swift app target (`gary4local`) that manages local services from a window + menu bar control center.
 
+## Maintainer Note
+
+this README is currently somewhat of a placeholder, and mostly maintained by robots. i am currently feeling pretty overwhelmed by the size of this project as a solo developer, and proper human documentation has not been top of mind on this particular repo. apologies.
+
 ## Current Note
 
 - Auto-updater is now implemented in `gary4local` using Sparkle 2.
