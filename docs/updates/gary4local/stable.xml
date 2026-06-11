@@ -7,17 +7,17 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <description>Stable Sparkle appcast for gary4local.</description>
     <language>en</language>
     <item>
-      <title>Version 0.1.9</title>
-      <pubDate>Tue, 26 May 2026 06:47:04 +0000</pubDate>
-      <sparkle:version>109</sparkle:version>
-      <sparkle:shortVersionString>0.1.9</sparkle:shortVersionString>
+      <title>Version 0.1.10</title>
+      <pubDate>Thu, 11 Jun 2026 11:35:38 +0000</pubDate>
+      <sparkle:version>110</sparkle:version>
+      <sparkle:shortVersionString>0.1.10</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.6</sparkle:minimumSystemVersion>
-      <sparkle:releaseNotesLink>https://betweentwomidnights.github.io/gary-localhost-installer-mac/updates/gary4local/release-notes/v0.1.9.html</sparkle:releaseNotesLink>
-      <description><![CDATA[gary4local v0.1.9 stable update]]></description>
-      <enclosure url="https://github.com/betweentwomidnights/gary-localhost-installer-mac/releases/download/v0.1.9/gary4local-v0.1.9-mac-arm64.dmg" sparkle:edSignature="0rABe103t3mgxi47/1XTa47yzqoAY0d63USa6u5kJrylCPId+WscfFi93u175lBty688tIm4CfIoJv4gLYNrBQ==" sparkle:os="macos" length="9200455" type="application/x-apple-diskimage"></enclosure>
+      <sparkle:releaseNotesLink>https://betweentwomidnights.github.io/gary-localhost-installer-mac/updates/gary4local/release-notes/v0.1.10.html</sparkle:releaseNotesLink>
+      <description><![CDATA[gary4local v0.1.10 stable update]]></description>
+      <enclosure url="https://github.com/betweentwomidnights/gary-localhost-installer-mac/releases/download/v0.1.10/gary4local-v0.1.10-mac-arm64.dmg" sparkle:edSignature="lhWdGtprgoTPmMr1ylzhySUtCsYbf0JSDjJywIdFsXDEDX2bvXMTB0Pb3fGvLvCtalN8hiH/0C/m+oQtA8x/AA==" sparkle:os="macos" length="9337551" type="application/x-apple-diskimage"></enclosure>
     </item>
   </channel>
 </rss><!-- sparkle-signatures:
-edSignature: cdmFBaVEU47u3UXHmaIjsZ67LHos4mnes//WRRoMSzG07gGhB6DzrL1YZ7SjrfESMctzRQwxbSZATKnZGdnwDw==
-length: 1576
+edSignature: k8X+TsiCPsFtakL7OfZ74lT1zXYKrKco5xOlX4ny9zapHcr88fdEswUrgB3WsboLko5Xt+Tv/Meg2p7VeZaQCA==
+length: 1582
 -->
