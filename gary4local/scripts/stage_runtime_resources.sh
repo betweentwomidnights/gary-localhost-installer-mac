@@ -50,6 +50,12 @@ copy_tree "${REPO_ROOT}/sa3" "${RUNTIME_DST}/sa3"
 copy_tree "${REPO_ROOT}/stable-audio-tools" "${RUNTIME_DST}/stable-audio-tools"
 copy_tree "${REPO_ROOT}/foundation" "${RUNTIME_DST}/foundation"
 
+# Keep SA3 development and validation material in source control, not user bundles.
+rm -rf "${RUNTIME_DST}/sa3/tests" || true
+rm -f "${RUNTIME_DST}/sa3/README.md" || true
+rm -f "${RUNTIME_DST}/sa3/scripts/smoke_mlx_lora_training.py" || true
+rm -f "${RUNTIME_DST}/sa3/scripts/validate_mlx_lora.py" || true
+
 mkdir -p "${RUNTIME_DST}/scripts"
 cp "${REPO_ROOT}/scripts/download_carey_models.sh" "${RUNTIME_DST}/scripts/download_carey_models.sh"
 chmod +x "${RUNTIME_DST}/scripts/download_carey_models.sh"
