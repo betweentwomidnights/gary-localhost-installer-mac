@@ -56,61 +56,46 @@ These staging repos are used to validate MLX integrations before promoting minim
 
 ## Current Status
 
-### Working Now
+### Shipping Now
 
-- All three Python environments can be rebuilt in-place from a fresh clone.
-- `gary4local` launches from Xcode as a macOS app with:
-  - main control-center window
-  - menu bar extra with per-service controls
-  - live log tail display and rebuild controls
-- Per-service `Start` / `Stop` / `Restart` / `Rebuild Env` and global `Rebuild All Environments` are wired.
-- Service startup/restart handles conflicting listeners on service ports.
-- Log viewer uses a bounded tail window to keep UI/resource usage stable.
-- Stable Audio setup supports Hugging Face token save/read/delete in macOS Keychain.
-- Stable Audio start is gated on token presence, with setup links and Step 2 hover screenshot reference.
-- Stable Audio now includes optional MLX backend support (toggleable with MPS in `gary4local`), implemented from [stable-audio-mlx](https://github.com/betweentwomidnights/stable-audio-mlx).
-- MelodyFlow now includes optional backend switching in `gary4local`:
-  - `mps` (baseline torch path)
-  - `mlx_native_torch_codec` (MLX flow + torch codec)
-  - `mlx_native_mlx_codec` (end-to-end MLX flow + MLX codec)
-  Implemented from the staging flow in [melodyflow-mlx](https://github.com/betweentwomidnights/melodyflow-mlx).
-- Audiocraft MLX + MelodyFlow rebuild/run have been validated from this repo with the JUCE plugin flow.
-- App icon asset set now uses the repository-provided Gary icon.
-- Model download transport note (Apple Silicon): in our testing, `hf_xet` can have very slow/unstable time-to-first-byte and throughput. We currently prefer reliable fallback to HTTPS downloads (often around `~10 MB/s`) when needed.
+- `gary4local` is now a signed + notarized Apple Silicon macOS app with Sparkle-based in-app updates.
+- The Swift control center and menu bar app handle per-service start/stop/restart/rebuild, bounded live logs, setup flows, and local model/runtime management.
+- Service startup still clears conflicting listeners on the expected ports so restart behavior is a little more forgiving than a bare terminal workflow.
+- The shipped service stack currently includes:
+  - Carey (ACE-Step), including the regular / XL `base`, `sft`, and `turbo` model-family flow now used on the current Gary side.
+  - `foundation-1` on the MLX path, including model download flow, prompt randomization, text generation, and audio2audio.
+  - MelodyFlow with backend switching between `mps`, `mlx_native_torch_codec`, and `mlx_native_mlx_codec`.
+  - Stable Audio 3 on the Apple Silicon MLX path, including gated model download flow, generation/continuation, LoRA registration, prompt-pool building, and user-facing loudness / DiT precision controls.
+- Stable Audio 3 also now includes local LoRA training on macOS, built as an MLX path with parity to the [Dada Bots `underfit`](https://github.com/dada-bots/underfit) workflow. That includes dataset prompt editing, persistent job state, log tailing, cancellation, and automatic `.safetensors` adapter registration for `gary4juce`.
+- The release flow is live now, not theoretical: Developer ID signing, notarization, GitHub Releases, Sparkle appcasts, and release-notes pages are all part of the shipping path.
 
-### Next Production Pass
+### Near-Term Cleanup
 
-- Menu bar branding:
-  - replace default slider symbol with a custom Gary-tray icon
-  - finalize dock/menu-bar icon consistency
-- App menu polish:
-  - define what stays in `About`, `Help`, and top-level menus
-  - add project links (GitHub, Discord) under `Help`
-  - remove/limit default menu items that are not useful for end users
-- UI polish:
-  - service naming/copy pass (`gary` / `terry` / `jerry`)
-  - visual style alignment with gary4juce theme (while keeping native macOS clarity)
-- Packaging/release:
-  - bundle runtime payload + production manifest for distribution
-  - signing + notarization
-  - DMG installer workflow
+- proper cross-repo README cleanup across `gary-localhost-installer`, `gary-localhost-installer-mac`, and `gary4juce`
+- better surfacing of runtime failures, especially places where backend stack traces still hide in logs instead of showing up in the app
+- continued UX cleanup around SA3-specific quirks like token setup, prompt-pool building, continuation modes, and training expectations
+- continued trimming of bundle-only clutter while preserving the local runtimes we actually need to ship
 
-### DMG Runtime Packaging (current approach)
+### Runtime Packaging
 
-- `gary4local` now stages runtime backend source code into app resources during build:
+- Release builds stage the backend runtime trees into app resources during build:
   - `Contents/Resources/runtime/ace-lego`
   - `Contents/Resources/runtime/audiocraft-mlx`
   - `Contents/Resources/runtime/melodyflow`
+  - `Contents/Resources/runtime/sa3`
   - `Contents/Resources/runtime/stable-audio-tools`
   - `Contents/Resources/runtime/foundation`
-- Production manifest is staged to:
+- The production manifest is staged to:
   - `Contents/Resources/manifest/services.production.json`
 - Mutable user data remains outside the app bundle:
-  - venvs/caches: `~/Library/Application Support/GaryLocalhost/`
+  - venvs/caches/models: `~/Library/Application Support/GaryLocalhost/`
   - logs: `~/Library/Logs/GaryLocalhost/`
-- See `control-center/docs/CODE_SIGNING.md` for signing + notarization workflow.
-- For a trusted Apple Silicon handoff build from an Intel Mac, use `./scripts/build_gary4local_adhoc_dmg.sh`.
-- For a notarized Developer ID DMG, use `./scripts/build_gary4local_release_dmg.sh`.
+- Build helpers:
+  - trusted Apple Silicon handoff build from an Intel Mac: `./scripts/build_gary4local_adhoc_dmg.sh`
+  - notarized Developer ID DMG: `./scripts/build_gary4local_release_dmg.sh`
+- Maintainer docs for the release/update path live in:
+  - `docs/releasing/SPARKLE_RELEASE.md`
+  - `docs/updates/README.md`
 
 ## Rebuild Python Environments
 
