@@ -115,6 +115,7 @@ Important:
 - when using `gh release create`, do not pass shell-escaped `\n` sequences in `--notes`
 - prefer a real multiline notes file with `--notes-file` so the published release body does not end up with literal `\n\n`
 - after publishing, spot-check the rendered GitHub release body once in the browser or via `gh release view`
+- if the paired `gary4juce` release introduced licensing/compliance packaging changes, mention that briefly in the release body so the cross-repo pairing stays explicit
 
 ### 3. Prepare release notes
 
@@ -131,6 +132,7 @@ Keep it concise and user-facing.
 Companion-version rule:
 
 - if the release notes mention the recommended `gary4juce` build, always link to the exact release tag URL, not the generic releases index
+- if the paired `gary4juce` release changed its shipped licensing/compliance materials, note that briefly here as well
 
 ### 4. Sign the update archive for Sparkle
 
