@@ -13,7 +13,7 @@ officially vendored SA3 and Underfit packages easier.
 
 The work is intentionally split into two Stable Audio 3 pull requests.
 
-### PR 1: MLX Training and LoRA Primitives
+### PR 1: MLX Audio Encoding, Training, and LoRA Primitives
 
 The first PR adds reusable model-level functionality to the existing
 `optimized/mlx` runtime:
@@ -220,15 +220,39 @@ the other.
 As of June 14, 2026, the local upstream branch has passed:
 
 - Ruff lint and formatting checks
-- 16 focused MLX primitive and parity tests
+- 25 focused MLX primitive and parity tests
 - The existing official PyTorch LoRA test
 - A real optimized medium-DiT forward, backward, and AdamW step
 - Save and load of a real MLX-generated adapter checkpoint
 - Application of Gary's 500-step DoRA bell checkpoint to the official
   optimized medium model
+- A new 500-step DoRA bell training run composed entirely from the proposed
+  official MLX primitives
 
 The real Gary checkpoint applied to all 36 expected layers with no missing or
 skipped targets and produced a finite forward pass at strength `0.65`.
+
+The new official-primitives training smoke used the cached medium RF/base
+checkpoint, the bell waveform at
+`gary4juce_1780905995851.wav`, rank 4, a 96-token crop, full distribution
+shift, and the same 36 late-transformer targets used by Gary. The official
+SAME-L encoder produced 172 valid latent frames. All 500 optimization steps
+were finite; mean loss moved from `0.792` over the first 50 steps to `0.495`
+over the final 50 steps.
+
+The resulting checkpoint:
+
+- Contains 108 adapter tensors and loads through the official PyTorch
+  checkpoint reader as rank-4 DoRA rows
+- Applies to all 36 optimized ARC targets with no missing or skipped layers
+- Changes a matched eight-second ARC inference substantially (`delta RMS
+  0.256`) while retaining finite audio output
+
+This integration run also caught a concrete MLX compatibility issue before
+submission: bias-free `Linear` and `Conv1d` modules may omit the `bias`
+attribute instead of setting it to `None`. The trainable DoRA/BoRA path now
+uses an optional attribute lookup, with regression coverage for both layer
+types.
 
 A broader test run reached 44 passed and 5 skipped before entering an unrelated
 Hugging Face model download. No test failure was observed before that run was
