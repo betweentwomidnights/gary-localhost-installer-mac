@@ -22,13 +22,16 @@ The first PR adds reusable model-level functionality to the existing
 - LoRA, DoRA rows and columns, BoRA, and their XS variants
 - Official SA3/Underfit-compatible safetensors loading and saving
 - Fixed-strength MLX LoRA materialization for one-shot inference
+- SAME waveform-to-latent encoding with codec alignment, chunking, and
+  latent validity masks
 - Rectified-flow training loss
 - Training timestep samplers and distribution shifts
 - Focused MLX and PyTorch parity tests
 
-This PR does not add a dataset trainer, command-line training workflow, Gradio
-backend, or Gary-specific application behavior. Its purpose is to establish the
-smallest reusable public boundary that those integrations can consume.
+This PR does not add a dataset crawler, cache format, complete command-line
+training workflow, Gradio backend, or Gary-specific application behavior. Its
+purpose is to establish the smallest reusable public boundary that those
+integrations can consume.
 
 ### PR 2: MLX CLI and Gradio Integration
 
@@ -77,9 +80,10 @@ Gary owns a reusable application pipeline under
 official `optimized/mlx/models/defs` package so it works with the project's
 existing small and medium optimized DiT definitions.
 
-The contribution adds only `lora.py` and `training.py` primitives. It does not
-introduce Gary's parallel model loader, autoencoder, conditioning, sampling,
-pipeline, API, or runtime hierarchy.
+The contribution adds focused `lora.py`, `training.py`, and
+`audio_encoding.py` primitives. It reuses the official optimized SAME
+encoders and does not introduce Gary's parallel model loader, autoencoder,
+conditioning, sampling, pipeline, API, or runtime hierarchy.
 
 ### Runtime Dependencies
 
@@ -282,6 +286,8 @@ than attributed to adapter-math differences.
 - Changes to the official PyTorch CLI
 - Changes to `run_gradio.py` or the existing Gradio interface
 - A standalone MLX training executable
+- Dataset traversal, audio-file decoding and resampling, latent cache
+  persistence, and caption metadata policy
 - Gary Control Center UI and native job management
 - Application Support paths and model registries
 - Gary presets and experimental loudness correction
@@ -305,6 +311,8 @@ A reasonable public framing is:
   definitions and pure-MLX runtime constraints.
 - Checkpoints and adapter math are tested directly against the official
   PyTorch implementation.
+- MLX training callers can pre-encode waveforms through the official SAME
+  encoders before entering the rectified-flow loss.
 - The downstream branch can be linked once as evidence of an end-to-end
   integration, without describing Gary's UI, release system, or product
   roadmap.

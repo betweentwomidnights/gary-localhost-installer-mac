@@ -13,7 +13,7 @@ package.
 
 The intended contribution order is:
 
-1. Submit focused MLX LoRA training and inference primitives to
+1. Submit focused MLX audio-encoding, LoRA training, and inference primitives to
    `stability-ai/stable-audio-3`.
 2. Follow with official MLX CLI and Gradio integration built on a reusable
    generation pipeline.
@@ -58,8 +58,8 @@ As of June 14, 2026, Gary4local users have confirmed end-to-end MLX training
 and inference on Apple Silicon. The Stable Audio 3 maintainers have invited a
 pull request for the reusable MLX training primitives.
 
-The first local upstream branch is intentionally limited to adapter, checkpoint,
-training-distribution, and rectified-flow-loss primitives with focused parity
-tests. CLI and Gradio integration will be proposed separately so the primitive
-API can be reviewed without coupling it to a larger inference-interface
-refactor.
+The first local upstream branch is intentionally limited to waveform-to-latent
+encoding, adapter, checkpoint, training-distribution, and rectified-flow-loss
+primitives with focused parity tests. Dataset orchestration, CLI, and Gradio
+integration will be proposed separately so the primitive API can be reviewed
+without coupling it to a larger interface refactor.
