@@ -15,9 +15,15 @@ The intended contribution order is:
 
 1. Submit focused MLX LoRA training and inference primitives to
    `stability-ai/stable-audio-3`.
-2. Submit an Underfit MLX backend that uses the accepted SA3 API.
-3. Replace Gary4local's corresponding vendored implementations when the
+2. Follow with official MLX CLI and Gradio integration built on a reusable
+   generation pipeline.
+3. Submit an Underfit MLX backend that uses the accepted SA3 API.
+4. Replace Gary4local's corresponding vendored implementations when the
    upstream versions provide the behavior and iteration speed the app needs.
+
+The detailed provenance, adaptation decisions, validation evidence, and
+vendoring checklist are recorded in
+[`STABLE_AUDIO_3_UPSTREAM_PR_NOTES.md`](STABLE_AUDIO_3_UPSTREAM_PR_NOTES.md).
 
 ## Current Product Policy
 
@@ -48,10 +54,12 @@ control-center workflow.
 
 ## Status
 
-As of June 8, 2026, the Mac implementation has terminal smoke coverage for
-standard LoRA, DoRA rows, BoRA, LoRA-XS, DoRA-XS, and BoRA-XS training and MLX
-inference. Upstream interest has been raised with the Stable Audio 3
-maintainers. Gary4local now also has a native one-audio MLX training workflow
-with persistent progress, cancellation, automatic LoRA registration, and prompt
-dice installation. Dataset-folder parity with the Windows Underfit workflow
-remains local follow-up work.
+As of June 14, 2026, Gary4local users have confirmed end-to-end MLX training
+and inference on Apple Silicon. The Stable Audio 3 maintainers have invited a
+pull request for the reusable MLX training primitives.
+
+The first local upstream branch is intentionally limited to adapter, checkpoint,
+training-distribution, and rectified-flow-loss primitives with focused parity
+tests. CLI and Gradio integration will be proposed separately so the primitive
+API can be reviewed without coupling it to a larger inference-interface
+refactor.
