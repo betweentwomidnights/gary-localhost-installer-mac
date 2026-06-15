@@ -258,7 +258,7 @@ A broader test run reached 44 passed and 5 skipped before entering an unrelated
 Hugging Face model download. No test failure was observed before that run was
 stopped.
 
-## Cross-Backend Listening Smoke
+## Cross-Backend Listening Tests
 
 On June 14, 2026, a matched listening smoke compared the official optimized
 MLX runtime with Gary's MLX pipeline using:
@@ -304,6 +304,58 @@ comparison. The product currently uses FP32 DiT, FP16 autoencoder, chunked
 decode, six seconds of duration padding, and output normalization/limiting.
 Those settings should be evaluated separately as product-quality policy rather
 than attributed to adapter-math differences.
+
+### Official-Primitives Training Ear Test
+
+The new 500-step official-primitives checkpoint was trained with:
+
+- The bell-arpeggio source `gary4juce_1780905995851.wav`
+- Prompt `garybell, bright bell arpeggio, shimmering metallic plucks,
+  rhythmic, stereo`
+
+It was then applied at strength `1.0` to:
+
+- Prompt `garybell, lofi hip hop beat, warm vinyl texture, dusty drums, mellow
+  bass, stereo`
+- Seed `20260608`
+- Eight ping-pong steps
+- Eight seconds of ARC inference
+
+The adapted result audibly carries the source bell arpeggio into the lo-fi
+hip-hop generation. This is a perceptual end-to-end confirmation that the
+official waveform encoder, prompt conditioning, DoRA optimization, checkpoint
+format, and ARC inference application compose correctly. The trigger has no
+special runtime mechanism; `garybell` is learned through its presence in the
+training prompt and is supplied again at inference.
+
+### Open Gary Alignment Investigation
+
+Building the upstream version exposed alignment differences that were not
+obvious while working only inside Gary:
+
+- The bell source contains exactly `704,512` samples, or 172 latent frames at
+  SAME's 4,096-sample downsampling ratio.
+- The upstream primitive pads only to SAME-L's required codec alignment and
+  therefore encodes 172 frames.
+- Gary currently rounds encoded sources to a multiple of 16 latent frames,
+  padding the same source to `720,896` samples and producing 176 frames.
+- For the matched eight-second inference, the optimized runtime uses 87 latent
+  positions while Gary rounds to 88 and supplies a padding mask.
+
+Neither behavior is currently established as perceptually better. Gary's
+additional alignment may provide a convenient uniform shape for model and crop
+operations, but it also changes available crop offsets, padded context,
+attention length, and the shape and progression of random draws. The official
+minimal alignment avoids unnecessary padded frames but does not reproduce
+Gary's exact training or inference trajectory.
+
+This should be evaluated downstream with controlled listening tests rather
+than resolved by assumption. Useful comparisons include 172 versus 176-frame
+training with identical prompts and sampled timesteps, 87 versus 88-position
+inference with explicit masks, and repeated seeds across several source types.
+Until those tests exist, these differences should remain documented as an open
+Gary4local quality and compatibility question rather than characterized as an
+upstream parity failure.
 
 ## Deliberately Excluded from PR 1
 
