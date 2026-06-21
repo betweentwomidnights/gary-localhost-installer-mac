@@ -145,6 +145,15 @@ checkpoint metadata. This is broader than Gary's simplified UI, which exposes
 the useful product choices without requiring users to understand every
 underlying variant.
 
+This adapter family is not an Underfit-only invention. Official PyTorch SA3
+already supports these adapter choices, and Underfit already exposes them in its
+PyTorch dashboard and training path. The future Underfit question is therefore
+not "implement BoRA or XS", but "add an MLX-capable backend that can call the
+official SA3 MLX primitives once they exist." That work is primarily
+interface/orchestration work: backend selection, Apple Silicon capability
+checks, dataset and pre-encode plumbing, run progress and cancellation,
+checkpoint surfacing, and demo/Gradio launch behavior.
+
 ### Inference Application
 
 Gary's runtime supports dynamic, scheduled, multi-LoRA application for UI
@@ -195,9 +204,11 @@ Gary includes the complete training workflow:
 
 The first upstream PR includes only the reusable trainable adapters, timestep
 sampling and shifting, rectified-flow loss, and checkpoint contract. Dataset
-and optimization orchestration remain outside Stable Audio 3 until the
-maintainers establish the preferred integration boundary, most likely through
-Underfit.
+discovery, latent-cache policy, complete training commands, and managed run
+orchestration remain outside PR 1. Underfit already owns much of that UX for the
+PyTorch SA3 path; a future Underfit contribution would most likely wire an MLX
+backend into those existing dashboard/orchestration patterns rather than
+reimplementing the SA3 adapter family.
 
 ## Compatibility Contract
 
@@ -368,7 +379,7 @@ upstream parity failure.
 - Application Support paths and model registries
 - Gary presets and experimental loudness correction
 - Sparkle, packaging, or release-build behavior
-- Underfit interface changes
+- Underfit MLX backend, dashboard, or interface changes
 
 These exclusions should be stated directly in the PR so maintainers can review
 the primitive API without needing to evaluate an application integration at
@@ -402,15 +413,17 @@ this internal record.
 
 ## Future Vendoring Checklist
 
-After the Stable Audio 3 and Underfit contributions are accepted and released:
+After the Stable Audio 3 MLX primitives are accepted and any official Underfit
+MLX integration exists:
 
 1. Compare the released SA3 primitive API with Gary's vendored
    `stable_audio_3/mlx/training.py` and `lora.py`.
 2. Replace duplicated adapter math and checkpoint handling with official SA3.
 3. Keep Gary's defaults, loudness processing, progress persistence, model
    registry, and native UI as thin product layers.
-4. Move dataset and optimization orchestration to the official Underfit MLX
-   backend when it provides equivalent cancellation and progress hooks.
+4. Evaluate whether Gary should consume Underfit's MLX orchestration for dataset
+   scanning, pre-encoding, managed training runs, cancellation, progress, and
+   checkpoint surfacing, or keep those as native Gary product behavior.
 5. Decide whether Gary should adopt the official optimized model pipeline or
    retain its reusable pipeline while importing official primitives.
 6. Add cross-package checkpoint fixtures before removing the vendored fallback.
@@ -418,5 +431,6 @@ After the Stable Audio 3 and Underfit contributions are accepted and released:
    smoke tests pass from a clean Gary installation.
 
 The checkpoint contract is already the migration bridge. The largest remaining
-architectural decision is the reusable MLX generation API that will support
-both the official CLI/Gradio work and Gary's eventual upstream vendoring.
+architectural decisions are the reusable MLX generation API for official
+CLI/Gradio work and whether Gary should eventually rely on Underfit for MLX run
+orchestration while continuing to inherit adapter math from official SA3.
