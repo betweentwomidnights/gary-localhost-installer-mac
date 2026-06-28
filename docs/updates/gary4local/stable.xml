@@ -7,17 +7,17 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <description>Stable Sparkle appcast for gary4local.</description>
     <language>en</language>
     <item>
-      <title>Version 0.1.10</title>
-      <pubDate>Thu, 11 Jun 2026 11:35:38 +0000</pubDate>
-      <sparkle:version>110</sparkle:version>
-      <sparkle:shortVersionString>0.1.10</sparkle:shortVersionString>
+      <title>Version 0.1.11</title>
+      <pubDate>Sun, 28 Jun 2026 09:12:44 +0000</pubDate>
+      <sparkle:version>111</sparkle:version>
+      <sparkle:shortVersionString>0.1.11</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.6</sparkle:minimumSystemVersion>
-      <sparkle:releaseNotesLink>https://betweentwomidnights.github.io/gary-localhost-installer-mac/updates/gary4local/release-notes/v0.1.10.html</sparkle:releaseNotesLink>
-      <description><![CDATA[gary4local v0.1.10 stable update]]></description>
-      <enclosure url="https://github.com/betweentwomidnights/gary-localhost-installer-mac/releases/download/v0.1.10/gary4local-v0.1.10-mac-arm64.dmg" sparkle:edSignature="lhWdGtprgoTPmMr1ylzhySUtCsYbf0JSDjJywIdFsXDEDX2bvXMTB0Pb3fGvLvCtalN8hiH/0C/m+oQtA8x/AA==" sparkle:os="macos" length="9337551" type="application/x-apple-diskimage"></enclosure>
+      <sparkle:releaseNotesLink>https://betweentwomidnights.github.io/gary-localhost-installer-mac/updates/gary4local/release-notes/v0.1.11.html</sparkle:releaseNotesLink>
+      <description><![CDATA[gary4local v0.1.11 stable update]]></description>
+      <enclosure url="https://github.com/betweentwomidnights/gary-localhost-installer-mac/releases/download/v0.1.11/gary4local-v0.1.11-mac-arm64.dmg" sparkle:edSignature="WrzNcKrzD+dFFsIoNkG43BfdDSydHo9FWuolNuABUnIwMw5HQWSu3UN2Rof//YJykcSYr1McBDnDMeR7pJKzAg==" sparkle:os="macos" length="9579343" type="application/x-apple-diskimage"></enclosure>
     </item>
   </channel>
 </rss><!-- sparkle-signatures:
-edSignature: k8X+TsiCPsFtakL7OfZ74lT1zXYKrKco5xOlX4ny9zapHcr88fdEswUrgB3WsboLko5Xt+Tv/Meg2p7VeZaQCA==
+edSignature: jb8fRap460/aD/QAA+W7/GSdYXiN4NJSNmM9TRF45EvLgojkBhHU2vPrPoPEHmornSAWF0oiAKsgShaJ07l6BQ==
 length: 1582
 -->

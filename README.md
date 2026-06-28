@@ -12,7 +12,7 @@ this README is currently somewhat of a placeholder, and mostly maintained by rob
 
 - fair warning: i am not super happy with training and generation time for ace-step on the MLX path right now, but the machine we use for testing is a MacBook Air with 32GB of unified memory. my hope is that the experience is better on more powerful Apple Silicon MacBooks, and we will keep looking for sensible optimizations.
 - Auto-updater is now implemented in `gary4local` using Sparkle 2.
-- Recommended companion build for the current SA3 macOS release train: [gary4juce v4.0.2-mac](https://github.com/betweentwomidnights/gary4juce/releases/tag/v4.0.2-mac).
+- Recommended companion build for the current SA3 macOS release train: [gary4juce v4.0.4-mac](https://github.com/betweentwomidnights/gary4juce/releases/tag/v4.0.4-mac).
 - `foundation-1` has now been successfully added to `gary4local`, including model download flow, prompt randomization support, text generation, and audio2audio on the macOS MLX path.
 - Carey now includes the regular and XL `ace-step-v15-{base,sft,turbo}` model family toggle in `gary4local`, aligned with the Windows `gary-localhost-installer` flow.
 - Stable Audio 3 now includes local LoRA training on macOS, built as an MLX path with parity to the [Dada Bots `underfit`](https://github.com/dada-bots/underfit) trainer while we work toward upstreaming the implementation.
