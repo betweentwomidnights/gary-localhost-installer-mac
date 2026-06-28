@@ -1276,7 +1276,11 @@ def _genre_variants(genre: str) -> list[str]:
     return variants
 
 
-def collect_caption_pool(dataset_dir: Path) -> list[str]:
+def collect_caption_pool(
+    dataset_dir: Path,
+    *,
+    include_genres: bool,
+) -> list[str]:
     seen: set[str] = set()
     pool: list[str] = []
     for audio_path in discover_audio_files(dataset_dir):
@@ -1286,7 +1290,7 @@ def collect_caption_pool(dataset_dir: Path) -> list[str]:
         genre = meta.get("genre", "").strip()
         if caption:
             entries.append(caption)
-        if genre:
+        if include_genres and genre:
             entries.extend(_genre_variants(genre))
         for entry in entries:
             if entry not in seen:
@@ -1334,7 +1338,10 @@ def register_trained_lora(args: argparse.Namespace, final_checkpoint: Path) -> N
         pools = read_json(args.captions_json_path, {})
         if not isinstance(pools, dict):
             pools = {}
-        pools[args.name] = collect_caption_pool(args.dataset_dir)
+        pools[args.name] = collect_caption_pool(
+            args.dataset_dir,
+            include_genres=args.genre_ratio > 0,
+        )
         write_json(args.captions_json_path, pools)
 
 

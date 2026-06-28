@@ -450,6 +450,8 @@ class TrainMLXLoraJobTests(unittest.TestCase):
                     str(temp / "registry.json"),
                     "--captions-json-path",
                     str(temp / "captions.json"),
+                    "--genre-ratio",
+                    "20",
                 ]
             )
             args.name = job.slugify(args.name)
@@ -466,6 +468,34 @@ class TrainMLXLoraJobTests(unittest.TestCase):
             self.assertEqual(registry["billie-test"]["adapter_type"], "dora")
             self.assertIn("neon pop hook", captions["billie-test"])
             self.assertIn("Pop, Synth pop", captions["billie-test"])
+
+    def test_registration_omits_genre_prompts_when_genre_ratio_is_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temp = Path(raw)
+            dataset_dir = temp / "dataset"
+            audio = dataset_dir / "song.wav"
+            _write_wav(audio)
+            audio.with_suffix(".txt").write_text(
+                "caption: neon pop hook\ngenre: Pop, Synth pop\nlyrics: hello\n",
+                encoding="utf-8",
+            )
+            args = job.build_parser().parse_args(
+                _base_args(temp, dataset_dir)
+                + [
+                    "--captions-json-path",
+                    str(temp / "captions.json"),
+                    "--genre-ratio",
+                    "0",
+                ]
+            )
+            args.name = job.slugify(args.name)
+
+            checkpoint = temp / "adapter"
+            checkpoint.mkdir()
+            job.register_trained_lora(args, checkpoint)
+
+            captions = json.loads((temp / "captions.json").read_text())
+            self.assertEqual(captions["billie-test"], ["neon pop hook"])
 
 
 if __name__ == "__main__":
