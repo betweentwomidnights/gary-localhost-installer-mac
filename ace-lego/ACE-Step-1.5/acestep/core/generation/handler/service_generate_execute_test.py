@@ -246,7 +246,10 @@ class ServiceGenerateExecuteMixinTests(unittest.TestCase):
         self.assertEqual(captured["cfg_interval_start"], 0.2)
         self.assertEqual(captured["cfg_interval_end"], 0.85)
         self.assertTrue(captured["use_adg"])
-        self.assertEqual(captured["timesteps"].tolist(), [1.0, 0.6, 0.3])
+        torch.testing.assert_close(
+            captured["timesteps"],
+            torch.tensor([1.0, 0.6, 0.3], dtype=torch.float32),
+        )
         self.assertEqual(float(outputs["time_costs"]["diffusion_time_cost"]), 0.5)
         self.assertEqual(tuple(encoder_hidden_states.shape), (1, 2, 4))
         self.assertEqual(tuple(encoder_attention_mask.shape), (1, 2))

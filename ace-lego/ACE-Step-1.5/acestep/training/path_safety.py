@@ -15,10 +15,15 @@ from typing import Optional
 
 from loguru import logger
 
+def _normalize_real_path(path: str) -> str:
+    """Return a normalized absolute path with symlinks resolved."""
+    return os.path.normpath(os.path.realpath(os.path.abspath(path)))
+
+
 # Root directory that all user-provided paths must resolve under.
 # Defaults to the working directory at import time.  Override via
 # ``set_safe_root`` if needed (e.g. in tests).
-_SAFE_ROOT: str = os.path.normpath(os.path.abspath(os.getcwd()))
+_SAFE_ROOT: str = _normalize_real_path(os.getcwd())
 
 
 def set_safe_root(root: str) -> None:
@@ -28,7 +33,7 @@ def set_safe_root(root: str) -> None:
         root: New safe root (will be normalised).
     """
     global _SAFE_ROOT  # noqa: PLW0603
-    _SAFE_ROOT = os.path.normpath(os.path.abspath(root))
+    _SAFE_ROOT = _normalize_real_path(root)
 
 
 def get_safe_root() -> str:
@@ -54,16 +59,16 @@ def safe_path(user_path: str, *, base: Optional[str] = None) -> str:
         ValueError: If the normalised path escapes the safe root.
     """
     if base is not None:
-        root = os.path.normpath(os.path.abspath(base))
+        root = _normalize_real_path(base)
     else:
         root = _SAFE_ROOT
 
     # Normalise the user path.  If it is relative, resolve it against
     # *root*; if absolute, normalise it directly.
     if os.path.isabs(user_path):
-        normalised = os.path.normpath(user_path)
+        normalised = _normalize_real_path(user_path)
     else:
-        normalised = os.path.normpath(os.path.join(root, user_path))
+        normalised = _normalize_real_path(os.path.join(root, user_path))
 
     # ── CodeQL-recognised sanitiser barrier ──
     # ``normpath(…).startswith(safe_prefix)`` is the pattern that

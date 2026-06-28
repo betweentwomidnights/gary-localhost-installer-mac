@@ -66,8 +66,9 @@ class IoAudioMixinTests(unittest.TestCase):
         """Reference audio should short-circuit for silent input."""
         host = _Host()
         silent = torch.zeros(2, 16, dtype=torch.float32)
-        fake_ta = _fake_torchaudio_module(lambda *_args, **_kwargs: (silent, 48000))
-        with patch.dict(sys.modules, {"torchaudio": fake_ta}):
+        fake_sf = types.ModuleType("soundfile")
+        fake_sf.read = lambda *_args, **_kwargs: (silent.T.numpy(), 48000)
+        with patch.dict(sys.modules, {"soundfile": fake_sf}):
             result = host.process_reference_audio("silent.wav")
         self.assertIsNone(result)
 
@@ -76,9 +77,10 @@ class IoAudioMixinTests(unittest.TestCase):
         host = _Host()
         base = torch.linspace(-1.0, 1.0, 1_800_000, dtype=torch.float32)
         audio = torch.stack([base, -base], dim=0)
-        fake_ta = _fake_torchaudio_module(lambda *_args, **_kwargs: (audio, 48000))
+        fake_sf = types.ModuleType("soundfile")
+        fake_sf.read = lambda *_args, **_kwargs: (audio.T.numpy(), 48000)
 
-        with patch.dict(sys.modules, {"torchaudio": fake_ta}):
+        with patch.dict(sys.modules, {"soundfile": fake_sf}):
             with patch("acestep.core.generation.handler.io_audio.random.randint", side_effect=[10, 20, 30]):
                 result = host.process_reference_audio("ref.wav")
 
@@ -97,8 +99,9 @@ class IoAudioMixinTests(unittest.TestCase):
     def test_process_reference_audio_returns_none_on_load_error(self):
         """Reference audio processing should return None when loading fails."""
         host = _Host()
-        fake_ta = _fake_torchaudio_module(lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("bad")))
-        with patch.dict(sys.modules, {"torchaudio": fake_ta}):
+        fake_sf = types.ModuleType("soundfile")
+        fake_sf.read = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("bad"))
+        with patch.dict(sys.modules, {"soundfile": fake_sf}):
             result = host.process_reference_audio("bad.wav")
         self.assertIsNone(result)
 

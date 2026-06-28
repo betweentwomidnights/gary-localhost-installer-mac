@@ -17,7 +17,7 @@ import json
 import os
 import sys
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
 # Pre-mock gradio so the acestep.ui.gradio package __init__.py
@@ -32,6 +32,7 @@ from acestep.ui.gradio.help_content import (  # noqa: E402
     _next_id,
     create_help_button,
 )
+import acestep.ui.gradio.help_content as help_content_module  # noqa: E402
 from acestep.ui.gradio.i18n import I18n  # noqa: E402
 
 
@@ -245,20 +246,15 @@ class CreateHelpButtonTests(unittest.TestCase):
 
     def test_create_help_button_calls_gr_html(self):
         """create_help_button should call gr.HTML and return the result."""
-        import gradio as gr  # This is the mock
-
         mock_html = MagicMock()
-        gr.HTML.return_value = mock_html
+        with patch.object(help_content_module.gr, "HTML", return_value=mock_html) as mock_gr_html:
+            result = create_help_button("getting_started")
 
-        result = create_help_button("getting_started")
-
-        gr.HTML.assert_called()
+        mock_gr_html.assert_called_once()
         self.assertEqual(result, mock_html)
 
     def test_create_help_button_html_contains_modal(self):
         """The generated HTML should contain modal markup."""
-        import gradio as gr
-
         # Capture the value= kwarg passed to gr.HTML
         captured = {}
 
@@ -266,8 +262,8 @@ class CreateHelpButtonTests(unittest.TestCase):
             captured.update(kwargs)
             return MagicMock()
 
-        gr.HTML.side_effect = capture_html
-        create_help_button("getting_started")
+        with patch.object(help_content_module.gr, "HTML", side_effect=capture_html):
+            create_help_button("getting_started")
 
         html_value = captured.get("value", "")
         self.assertIn("help-modal-overlay", html_value)
