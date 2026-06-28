@@ -16,10 +16,13 @@ if you want the Windows version, that's here:
 `v0.1.11` is the mac release paired with
 [gary4juce v4.0.4-mac](https://github.com/betweentwomidnights/gary4juce/releases/tag/v4.0.4-mac).
 
-the main fix in this one is carey parity around `genre_ratio` during ACE-Step
-LoRA training. on the mac path we now pre-encode the relevant tracks twice so
-the per-epoch genre-vs-caption behavior matches the windows flow and the dice
-button logic lines up with what the UI says it's doing.
+the main thing in this one is that you can now train an ACE-Step LoRA directly
+inside `gary4local`, done in MLX.
+
+the smaller follow-up fix in the same release is carey parity around
+`genre_ratio` during training. on the mac path we now pre-encode the relevant
+tracks twice so the per-epoch genre-vs-caption behavior matches the windows
+flow and the dice button logic lines up with what the UI says it's doing.
 
 older Sparkle release notes live under
 [`docs/updates/gary4local/release-notes/`](docs/updates/gary4local/release-notes/).

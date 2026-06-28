@@ -37,13 +37,13 @@
   </head>
   <body>
     <h1>gary4local v0.1.11</h1>
-    <p>The macOS localhost stack now ships the Carey parity fixes and training UX updates for the Gary4JUCE 4.0.4-mac release train.</p>
+    <p>You can now train an ACE-Step LoRA directly inside <code>gary4local</code>, done in MLX, as part of the Gary4JUCE 4.0.4-mac release train.</p>
 
     <h2>Highlights</h2>
     <ul>
-      <li>Carey ACE-Step training on macOS now matches the PC flow more closely, including the genre-versus-caption variant behavior driven by <code>genre_ratio</code>.</li>
-      <li>ACE-Step tracks are pre-encoded twice where needed so the training UI, dice prompt behavior, and per-epoch prompt selection stay aligned.</li>
-      <li>The recent Carey service and ACE-Step LoRA training UI work remains included in the signed macOS release path.</li>
+      <li>Train an ACE-Step LoRA directly inside <code>gary4local</code> on the pure MLX path instead of bouncing out to a separate training flow.</li>
+      <li>The new mac UI covers dataset prep, prompt-side editing, logs, cancellation, and the rest of the local Carey training workflow.</li>
+      <li>The <code>genre_ratio</code> follow-up fix is also included here, with the needed double pre-encode behavior so the training UI and dice prompt behavior stay aligned with PC parity.</li>
     </ul>
 
     <h2>Recommended Companion</h2>

@@ -13,11 +13,11 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
       <sparkle:shortVersionString>0.1.11</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.6</sparkle:minimumSystemVersion>
       <sparkle:releaseNotesLink>https://betweentwomidnights.github.io/gary-localhost-installer-mac/updates/gary4local/release-notes/v0.1.11.html</sparkle:releaseNotesLink>
-      <description><![CDATA[gary4local v0.1.11 stable update]]></description>
+      <description><![CDATA[now you can train an ace-step lora directly inside gary4local. done in MLX.]]></description>
       <enclosure url="https://github.com/betweentwomidnights/gary-localhost-installer-mac/releases/download/v0.1.11/gary4local-v0.1.11-mac-arm64.dmg" sparkle:edSignature="WrzNcKrzD+dFFsIoNkG43BfdDSydHo9FWuolNuABUnIwMw5HQWSu3UN2Rof//YJykcSYr1McBDnDMeR7pJKzAg==" sparkle:os="macos" length="9579343" type="application/x-apple-diskimage"></enclosure>
     </item>
   </channel>
 </rss><!-- sparkle-signatures:
-edSignature: jb8fRap460/aD/QAA+W7/GSdYXiN4NJSNmM9TRF45EvLgojkBhHU2vPrPoPEHmornSAWF0oiAKsgShaJ07l6BQ==
-length: 1582
+edSignature: r58oXH6IWlDNNrFEuKuwNNcZRs8TFZP6s5zNebA+LaiV/PVwPqtBhn3mDQCtrse7zHDmhCVTgBtcQA1XRY2WAQ==
+length: 1625
 -->
