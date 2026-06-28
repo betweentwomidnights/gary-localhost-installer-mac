@@ -1,6 +1,7 @@
 """Unit tests for extracted MLX DiT initialization mixin."""
 
 import importlib.util
+import os
 import sys
 import types
 import unittest
@@ -107,11 +108,12 @@ class MlxDitInitMixinTests(unittest.TestCase):
         host = _DitHost()
         fake_mlx = types.ModuleType("acestep.models.mlx")
         fake_mlx.mlx_available = lambda: True
+        fake_decoder = Mock()
         fake_dit_model = types.ModuleType("acestep.models.mlx.dit_model")
         fake_dit_model.MLXDiTDecoder = type(
             "FakeDecoder",
             (),
-            {"from_config": classmethod(lambda _cls, _cfg: object())},
+            {"from_config": classmethod(lambda _cls, _cfg: fake_decoder)},
         )
         fake_dit_convert = types.ModuleType("acestep.models.mlx.dit_convert")
         fake_dit_convert.convert_and_load = Mock()
@@ -127,6 +129,36 @@ class MlxDitInitMixinTests(unittest.TestCase):
         self.assertTrue(host.use_mlx_dit)
         self.assertTrue(host.mlx_dit_compiled)
         fake_dit_convert.convert_and_load.assert_called_once()
+        fake_decoder.materialize_static_buffers.assert_not_called()
+
+    def test_init_mlx_dit_materializes_static_buffers_when_enabled(self):
+        """It materializes static buffers when the env gate is enabled."""
+        host = _DitHost()
+        fake_mlx = types.ModuleType("acestep.models.mlx")
+        fake_mlx.mlx_available = lambda: True
+        fake_decoder = Mock()
+        fake_dit_model = types.ModuleType("acestep.models.mlx.dit_model")
+        fake_dit_model.MLXDiTDecoder = type(
+            "FakeDecoder",
+            (),
+            {"from_config": classmethod(lambda _cls, _cfg: fake_decoder)},
+        )
+        fake_dit_convert = types.ModuleType("acestep.models.mlx.dit_convert")
+        fake_dit_convert.convert_and_load = Mock()
+        with patch.dict(
+            os.environ,
+            {"ACESTEP_MLX_DIT_MATERIALIZE_STATIC_BUFFERS": "1"},
+            clear=False,
+        ), patch.dict(
+            sys.modules,
+            {
+                "acestep.models.mlx": fake_mlx,
+                "acestep.models.mlx.dit_model": fake_dit_model,
+                "acestep.models.mlx.dit_convert": fake_dit_convert,
+            },
+        ):
+            self.assertTrue(host._init_mlx_dit(compile_model=False))
+        fake_decoder.materialize_static_buffers.assert_called_once_with()
 
     def test_sync_mlx_dit_from_model_reuses_existing_decoder(self):
         """It reloads the current MLX decoder weights from the PyTorch model."""

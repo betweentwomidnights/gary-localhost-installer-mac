@@ -2817,33 +2817,47 @@ def create_app() -> FastAPI:
                     else:
                         audio_paths = rec.result.get("audio_paths", [])
                         metas = rec.result.get("metas", {}) or {}
+                        final_prompt = rec.result.get("prompt", "")
+                        final_lyrics = rec.result.get("lyrics", "")
+                        generation_info = rec.result.get("generation_info", "")
+                        seed_value = rec.result.get("seed_value", "")
+                        lm_model = rec.result.get("lm_model", "")
+                        dit_model = rec.result.get("dit_model", "")
                         result_data = [
                             {
                                 "file": p, "wave": "", "status": status_int,
                                 "create_time": int(create_time), "env": env,
-                                "prompt": metas.get("caption", ""),
-                                "lyrics": metas.get("lyrics", ""),
+                                "prompt": final_prompt,
+                                "lyrics": final_lyrics,
                                 "metas": {
                                     "bpm": metas.get("bpm"),
                                     "duration": metas.get("duration"),
                                     "genres": metas.get("genres", ""),
                                     "keyscale": metas.get("keyscale", ""),
                                     "timesignature": metas.get("timesignature", ""),
-                                }
+                                },
+                                "generation_info": generation_info,
+                                "seed_value": seed_value,
+                                "lm_model": lm_model,
+                                "dit_model": dit_model,
                             }
                             for p in audio_paths
                         ] if audio_paths else [{
                             "file": "", "wave": "", "status": status_int,
                             "create_time": int(create_time), "env": env,
-                            "prompt": metas.get("caption", ""),
-                            "lyrics": metas.get("lyrics", ""),
+                            "prompt": final_prompt,
+                            "lyrics": final_lyrics,
                             "metas": {
                                 "bpm": metas.get("bpm"),
                                 "duration": metas.get("duration"),
                                 "genres": metas.get("genres", ""),
                                 "keyscale": metas.get("keyscale", ""),
                                 "timesignature": metas.get("timesignature", ""),
-                            }
+                            },
+                            "generation_info": generation_info,
+                            "seed_value": seed_value,
+                            "lm_model": lm_model,
+                            "dit_model": dit_model,
                         }]
                 else:
                     result_data = [{

@@ -31,6 +31,10 @@ from acestep.gpu_config import get_lm_gpu_memory_ratio, get_gpu_memory_gb, get_l
 VRAM_SAFE_FREE_GB = 2.0
 
 
+def _env_truthy(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _warn_if_prerelease_python():
     v = sys.version_info
     if getattr(v, "releaselevel", "final") != "final" and sys.platform.startswith("linux"):
@@ -598,6 +602,8 @@ class LLMHandler:
                     else:
                         logger.warning(f"MLX backend failed: {mlx_status}")
                         if backend == "mlx":
+                            if _env_truthy("ACESTEP_REQUIRE_MLX_LM"):
+                                return mlx_status, False
                             # User explicitly requested MLX, fall back to PyTorch
                             logger.warning("MLX explicitly requested but failed, falling back to PyTorch backend")
                             success, status_msg = self._load_pytorch_model(full_lm_model_path, device)
@@ -608,6 +614,8 @@ class LLMHandler:
                         # else: backend was "vllm" on MPS, continue to vllm attempt below
                 elif backend == "mlx":
                     logger.warning("MLX not available (requires Apple Silicon + mlx-lm package)")
+                    if _env_truthy("ACESTEP_REQUIRE_MLX_LM"):
+                        return "❌ MLX backend unavailable (requires Apple Silicon + mlx-lm package)", False
                     # Fall back to PyTorch
                     success, status_msg = self._load_pytorch_model(full_lm_model_path, device)
                     if not success:

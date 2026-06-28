@@ -65,6 +65,7 @@ final class ServiceManager: ObservableObject {
     private var melodyFlowBackendEngine = "mps"
     private var careyBackendEngine = "mlx"
     private var careyUseXlModels = false
+    private var careyUseScragVae = false
     private var careyUseSampledMlxVaeEncode = true
     private var sa3RuntimeSettings = SA3RuntimeSettings.fallbackDefaults
     private static let sharedHuggingFaceTokenServiceIDs: Set<String> = ["stable_audio", "sa3"]
@@ -121,6 +122,17 @@ final class ServiceManager: ObservableObject {
     func setCareyUseXlModels(_ enabled: Bool, restartIfRunning: Bool) {
         guard careyUseXlModels != enabled else { return }
         careyUseXlModels = enabled
+
+        guard restartIfRunning else { return }
+        guard let runtime = services.first(where: { $0.id == "carey" }) else { return }
+        if runtime.processState == .running || runtime.processState == .starting {
+            restart(serviceID: "carey")
+        }
+    }
+
+    func setCareyUseScragVae(_ enabled: Bool, restartIfRunning: Bool) {
+        guard careyUseScragVae != enabled else { return }
+        careyUseScragVae = enabled
 
         guard restartIfRunning else { return }
         guard let runtime = services.first(where: { $0.id == "carey" }) else { return }
@@ -1450,9 +1462,14 @@ final class ServiceManager: ObservableObject {
             env["ACESTEP_BASE_CONFIG_PATH"] = baseConfig
             env["ACESTEP_SFT_CONFIG_PATH"] = sftConfig
             env["ACESTEP_TURBO_CONFIG_PATH"] = turboConfig
-            env["ACESTEP_LEGO_CONFIG_PATH"] = "acestep-v15-base"
-            env["ACESTEP_REGULAR_CONFIG_PATH"] = "acestep-v15-base"
+            env["ACESTEP_LEGO_CONFIG_PATH"] = baseConfig
+            env["ACESTEP_REGULAR_CONFIG_PATH"] = baseConfig
             env["ACESTEP_MLX_VAE_ENCODE_SAMPLE"] = careyUseSampledMlxVaeEncode ? "1" : "0"
+            if careyUseScragVae {
+                env["ACESTEP_VAE_PATH"] = "scrag-vae"
+            } else {
+                env.removeValue(forKey: "ACESTEP_VAE_PATH")
+            }
         }
         return env
     }

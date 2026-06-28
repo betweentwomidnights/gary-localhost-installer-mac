@@ -29,6 +29,7 @@ DOWNLOAD_BASE=0
 DOWNLOAD_SFT=0
 DOWNLOAD_TURBO=0
 DOWNLOAD_SHARED=0
+DOWNLOAD_SCRAG_VAE=0
 
 if [[ ! -d "${ACE_ROOT}" ]]; then
   echo "ACE-Step repo not found at: ${ACE_ROOT}"
@@ -46,6 +47,7 @@ normalize_carey_download_targets() {
     DOWNLOAD_SFT=1
     DOWNLOAD_TURBO=1
     DOWNLOAD_SHARED=1
+    DOWNLOAD_SCRAG_VAE=1
     return 0
   fi
 
@@ -65,6 +67,9 @@ normalize_carey_download_targets() {
       shared)
         DOWNLOAD_SHARED=1
         ;;
+      scrag|scrag-vae|scragvae)
+        DOWNLOAD_SCRAG_VAE=1
+        ;;
       "")
         ;;
       *)
@@ -74,7 +79,7 @@ normalize_carey_download_targets() {
     esac
   done
 
-  if (( DOWNLOAD_BASE == 0 && DOWNLOAD_SFT == 0 && DOWNLOAD_TURBO == 0 && DOWNLOAD_SHARED == 0 )); then
+  if (( DOWNLOAD_BASE == 0 && DOWNLOAD_SFT == 0 && DOWNLOAD_TURBO == 0 && DOWNLOAD_SHARED == 0 && DOWNLOAD_SCRAG_VAE == 0 )); then
     echo "CAREY_DOWNLOAD_TARGETS did not select any downloads." >&2
     return 1
   fi
@@ -551,8 +556,13 @@ if (( DOWNLOAD_SHARED == 1 )); then
   download_required_file "VAE Config" "ACE-Step/Ace-Step1.5" "vae/config.json" "vae/config.json"
 fi
 
+if (( DOWNLOAD_SCRAG_VAE == 1 )); then
+  download_required_file "ScragVAE Weights" "scragnog/Ace-Step-1.5-ScragVAE" "diffusion_pytorch_model.safetensors" "scrag-vae/diffusion_pytorch_model.safetensors"
+  download_required_file "ScragVAE Config" "scragnog/Ace-Step-1.5-ScragVAE" "config.json" "scrag-vae/config.json"
+fi
+
 echo
-echo "All required Carey model files are present."
+echo "Requested Carey model files are present."
 echo "Quick check:"
 quick_check_paths=()
 if (( DOWNLOAD_BASE == 1 )); then
@@ -573,6 +583,12 @@ if (( DOWNLOAD_SHARED == 1 )); then
     "${CHECKPOINTS_DIR}/Qwen3-Embedding-0.6B/config.json"
     "${CHECKPOINTS_DIR}/Qwen3-Embedding-0.6B/tokenizer.json"
     "${CHECKPOINTS_DIR}/vae/diffusion_pytorch_model.safetensors"
+  )
+fi
+if (( DOWNLOAD_SCRAG_VAE == 1 )); then
+  quick_check_paths+=(
+    "${CHECKPOINTS_DIR}/scrag-vae/config.json"
+    "${CHECKPOINTS_DIR}/scrag-vae/diffusion_pytorch_model.safetensors"
   )
 fi
 

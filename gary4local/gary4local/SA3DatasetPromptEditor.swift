@@ -128,6 +128,7 @@ struct SA3DatasetPromptEditorSheet: View {
                         : "prepend custom trigger word: \(triggerText)",
                     isOn: $includeTrigger
                 )
+                .tint(GaryTheme.red)
                 .disabled(triggerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                 HStack {
@@ -274,7 +275,7 @@ struct SA3DatasetPromptEditorSheet: View {
             .foregroundStyle(.secondary)
             Spacer()
             Button(isSaving ? "saving..." : "save sidecars", action: saveEntries)
-                .buttonStyle(.borderedProminent)
+                .garyPrimaryButtonStyle()
                 .disabled(isSaving || dirtyCount == 0)
         }
         .padding(14)

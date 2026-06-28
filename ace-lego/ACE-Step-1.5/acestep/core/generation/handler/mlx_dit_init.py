@@ -1,6 +1,7 @@
 """MLX DiT initialization helpers for Apple Silicon acceleration."""
 
 import copy
+import os
 from types import SimpleNamespace
 from typing import Optional, Tuple
 from loguru import logger
@@ -9,6 +10,31 @@ from time import perf_counter
 
 class MlxDitInitMixin:
     """Initialize native MLX DiT decoder state used by generation runtime."""
+
+    @staticmethod
+    def _env_bool_flag(name: str, default: bool) -> bool:
+        value = os.environ.get(name)
+        if value is None:
+            return default
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    def _maybe_materialize_mlx_dit_static_buffers(self, mlx_decoder) -> None:
+        """Optionally materialize reusable MLX DiT static buffers for worker reuse."""
+        if not self._env_bool_flag("ACESTEP_MLX_DIT_MATERIALIZE_STATIC_BUFFERS", False):
+            return
+
+        materialize = getattr(mlx_decoder, "materialize_static_buffers", None)
+        if not callable(materialize):
+            logger.info("[MLX-DiT] Static buffer materialization requested but unavailable on decoder.")
+            return
+
+        started = perf_counter()
+        materialize()
+        elapsed = perf_counter() - started
+        logger.info(
+            "[MLX-DiT] Materialized static buffers in {:.3f}s.",
+            elapsed,
+        )
 
     def _mlx_conversion_model(self):
         """Return a model-like object whose decoder exposes plain weights for MLX conversion."""
@@ -93,6 +119,7 @@ class MlxDitInitMixin:
 
             mlx_decoder = MLXDiTDecoder.from_config(self.config)
             convert_and_load(self.model, mlx_decoder)
+            self._maybe_materialize_mlx_dit_static_buffers(mlx_decoder)
             self.mlx_decoder = mlx_decoder
             self.use_mlx_dit = True
             self.mlx_dit_compiled = compile_model
@@ -137,6 +164,7 @@ class MlxDitInitMixin:
             finally:
                 if callable(cleanup):
                     cleanup()
+            self._maybe_materialize_mlx_dit_static_buffers(self.mlx_decoder)
             elapsed = perf_counter() - started
             logger.info(f"[MLX-DiT] Refreshed native MLX decoder after {reason} in {elapsed:.1f}s.")
             return True, None

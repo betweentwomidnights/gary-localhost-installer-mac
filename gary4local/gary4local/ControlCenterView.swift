@@ -96,6 +96,14 @@ struct ControlCenterView: View {
         .sheet(isPresented: $viewModel.isCareyLoraSheetPresented) {
             CareyLoraManagerSheet(viewModel: viewModel)
         }
+        .sheet(isPresented: $viewModel.isCareyAceTrainingSheetPresented) {
+            CareyAceTrainingSheet(
+                trainer: viewModel.careyAceTrainingManager,
+                serviceIsRunning: viewModel.isCareyServiceRunning,
+                environmentReady: viewModel.isCareyEnvironmentReady,
+                onStart: viewModel.startCareyAceTraining
+            )
+        }
         .sheet(isPresented: $viewModel.isSA3LoraSheetPresented) {
             SA3LoraManagerSheet(viewModel: viewModel)
         }
@@ -165,7 +173,6 @@ struct ControlCenterView: View {
                     onSelect: { viewModel.selectService(runtime.id) },
                     onStart: { manager.start(serviceID: runtime.id) },
                     onStop: { manager.stop(serviceID: runtime.id) },
-                    onRestart: { manager.restart(serviceID: runtime.id) },
                     onRebuildEnv: { manager.rebuildEnvironment(serviceID: runtime.id) },
                     onDownloadModels: (runtime.id == "audiocraft_mlx" || runtime.id == "melodyflow" || runtime.id == "sa3" || runtime.id == "stable_audio" || runtime.id == "carey" || runtime.id == "foundation") ? {
                         viewModel.openModelDownloadSheet(for: runtime.id)
@@ -175,10 +182,13 @@ struct ControlCenterView: View {
                     } : (runtime.id == "sa3" ? {
                         viewModel.openSA3LoraSheet()
                     } : nil),
-                    onTrainLora: runtime.id == "sa3" ? {
+                    onTrainLora: runtime.id == "carey" ? {
+                        viewModel.openCareyAceTrainingSheet()
+                    } : (runtime.id == "sa3" ? {
                         viewModel.openSA3TrainingSheet()
-                    } : nil,
+                    } : nil),
                     manageLorasButtonTitle: "add lora",
+                    canManageDownloads: viewModel.canManageModelDownloads(for: runtime.id),
                     downloadModelsExtraDisabled: (runtime.id == "stable_audio" || runtime.id == "sa3") && !viewModel.stableAudioTokenConfigured
                 )
             }
@@ -431,6 +441,7 @@ struct ControlCenterView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                .garyPickerAccent()
                 Text("applies to localhost generation default. changing this restarts stable audio if it's running.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -590,6 +601,7 @@ struct ControlCenterView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                .garyPickerAccent()
                 Text(
                     "mps is the quality baseline. mlx+torch keeps mlx flow with torch codec. "
                     + "mlx end-to-end uses native mlx codec and may differ in output quality."
@@ -630,6 +642,7 @@ struct ControlCenterView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                .garyPickerAccent()
                 Text(
                     "mlx uses native MLX DiT/VAE for faster generation. "
                     + "mps uses the torch+mps path for compatibility checks. "
@@ -651,11 +664,44 @@ struct ControlCenterView: View {
                 )
                 Text(
                     "switches carey between regular acestep-v15-base/sft/turbo and "
-                    + "xl-base/xl-sft/xl-turbo. lego still stays on unadapted acestep-v15-base. "
-                    + "xl can be tighter on memory and changing this restarts carey if it is already running."
+                    + "xl-base/xl-sft/xl-turbo. lego uses the active base family and can use matching LoRAs. "
+                    + "regular base is still the safer default when you are not loading a LoRA. "
+                    + "changing this restarts carey if it is already running."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("decoder")
+                    .font(.subheadline)
+                Toggle(
+                    "use ScragVAE",
+                    isOn: Binding(
+                        get: { viewModel.careyUseScragVae },
+                        set: { viewModel.setCareyUseScragVae($0) }
+                    )
+                )
+                .disabled(!viewModel.canEnableCareyScragVae)
+                Text(
+                    "ScragVAE is a drop-in alternate decoder by scragnog. it often adds a little more air and detail; "
+                    + "stock VAE stays one click away if a render feels strange."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    Button("thank scragnog / view model") {
+                        guard let url = URL(string: "https://huggingface.co/scragnog/Ace-Step-1.5-ScragVAE") else { return }
+                        NSWorkspace.shared.open(url)
+                    }
+                    .buttonStyle(.link)
+
+                    if !viewModel.isCareyScragVaeDownloaded {
+                        Text("download ScragVAE from carey's model list before enabling it.")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
             }
 
             if viewModel.showsExperimentalCareyMlxVaeEncodeToggle {
@@ -704,6 +750,7 @@ struct ControlCenterView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                .garyPickerAccent()
 
                 if sa3AdvancedTab == .level {
                     HStack(alignment: .top, spacing: 12) {
@@ -915,7 +962,7 @@ private struct RebuildFailureSheet: View {
                         .foregroundStyle(.secondary)
                     HStack(spacing: 10) {
                         Button("email") { viewModel.openSupportEmail() }
-                            .buttonStyle(.borderedProminent)
+                            .garyPrimaryButtonStyle()
                             .controlSize(.large)
                         Button(action: { viewModel.openSupportDiscord() }) {
                             Image("DiscordIcon")
@@ -1494,6 +1541,7 @@ private struct CareyLoraManagerSheet: View {
                             }
                         }
                         .pickerStyle(.segmented)
+                        .garyPickerAccent()
 
                         VStack(alignment: .leading, spacing: 6) {
                             Text("checkpoint folder")
@@ -1796,6 +1844,26 @@ private struct ModelDownloadSheet: View {
     }
 
     @ViewBuilder
+    private var modelDownloadStatusText: some View {
+        if !viewModel.modelDownloadStatusMessage.isEmpty {
+            let isAlert = isAlertModelDownloadStatus(viewModel.modelDownloadStatusMessage)
+            Text(viewModel.modelDownloadStatusMessage)
+                .font(.caption.weight(isAlert ? .semibold : .regular))
+                .foregroundStyle(isAlert ? Color.red : Color.secondary)
+        }
+    }
+
+    private func isAlertModelDownloadStatus(_ message: String) -> Bool {
+        let normalized = message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        return normalized.contains("rejected")
+            || normalized.contains("invalid token")
+            || normalized.contains("save your hugging face token")
+            || normalized.contains("token is required")
+            || (normalized.contains("token") && normalized.contains("failed"))
+    }
+
+    @ViewBuilder
     private var sa3SetupContent: some View {
         Text("pre-download the required sa3 model repos for offline use in gary4juce.")
             .font(.subheadline)
@@ -1815,11 +1883,7 @@ private struct ModelDownloadSheet: View {
                 .foregroundStyle(.red)
         }
 
-        if !viewModel.modelDownloadStatusMessage.isEmpty {
-            Text(viewModel.modelDownloadStatusMessage)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
+        modelDownloadStatusText
 
         HStack(spacing: 8) {
             Button("download required models") {
@@ -1868,24 +1932,9 @@ private struct ModelDownloadSheet: View {
             .padding(.vertical, 2)
         }
 
-        Divider()
-
-        HStack {
-            Button("open stable-audio-3-medium") {
-                NSWorkspace.shared.open(StableAudioAuthLinks.sa3ModelPage)
-            }
-            Button("open token settings") {
-                NSWorkspace.shared.open(StableAudioAuthLinks.tokenPage)
-            }
-            Spacer()
-        }
-
         VStack(alignment: .leading, spacing: 6) {
             Text("notes")
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text("use the sa3 or jerry service panel to save or remove the shared token.")
-                .font(.caption)
                 .foregroundStyle(.secondary)
             Text("use the loras button on the sa3 service row to register local checkpoints and build prompt dice pools.")
                 .font(.caption)
@@ -1912,11 +1961,7 @@ private struct ModelDownloadSheet: View {
             .font(.caption)
             .foregroundStyle(.secondary)
 
-        if !viewModel.modelDownloadStatusMessage.isEmpty {
-            Text(viewModel.modelDownloadStatusMessage)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
+        modelDownloadStatusText
 
         HStack {
             Button("refresh statuses") {
@@ -2008,11 +2053,7 @@ private struct ModelDownloadSheet: View {
                 .foregroundStyle(.red)
         }
 
-        if !viewModel.modelDownloadStatusMessage.isEmpty {
-            Text(viewModel.modelDownloadStatusMessage)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
+        modelDownloadStatusText
 
         HStack(spacing: 8) {
             Button("download open-1.0") {
@@ -2093,6 +2134,7 @@ private struct ModelDownloadSheet: View {
                     }
                 }
                 .labelsHidden()
+                .garyPickerAccent()
 
                 HStack(spacing: 8) {
                     Button("download selected checkpoint") {
@@ -2160,21 +2202,20 @@ private struct ModelDownloadSheet: View {
     private var careyPredownloadContent: some View {
         Text("pre-download carey lego dependencies for offline use in gary4juce.")
             .font(.subheadline)
-        Text("carey uses ace-step lego mode with `acestep_init_llm=false`. cover and complete use the selected regular or xl family, but lego always stays on unadapted acestep-v15-base.")
+        Text("carey uses ace-step lego mode with `acestep_init_llm=false`. lego uses the active base family only, while complete can use base, sft, or turbo from that same family.")
             .font(.caption)
             .foregroundStyle(.secondary)
         Text("service startup is lazy. use this sheet to pre-download the selected regular or xl model family before generating.")
             .font(.caption)
             .foregroundStyle(.secondary)
-        Text("downloading any one of base, sft, or turbo also pulls in the shared qwen + vae assets.")
+        Text("plain regular base is still the safer lego default without a LoRA. xl-base gets more interesting once you have a matching xl LoRA.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        Text("downloading any one of base, sft, or turbo also pulls in the shared qwen + vae assets. ScragVAE is optional.")
             .font(.caption)
             .foregroundStyle(.secondary)
 
-        if !viewModel.modelDownloadStatusMessage.isEmpty {
-            Text(viewModel.modelDownloadStatusMessage)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
+        modelDownloadStatusText
 
         HStack(spacing: 8) {
             Button("download all") {
@@ -2215,6 +2256,57 @@ private struct ModelDownloadSheet: View {
                 Text("required components (\(downloadedFileCount)/\(totalFileCount) files)")
                     .font(.caption.weight(.semibold))
                 ForEach(groupedRows) { row in
+                    HStack(spacing: 8) {
+                        let indicatorColor: Color = row.isComplete
+                            ? .green
+                            : (row.downloadedFileCount > 0 ? .orange : Color.gray.opacity(0.5))
+                        Circle()
+                            .fill(indicatorColor)
+                            .frame(width: 8, height: 8)
+                        Text(row.label)
+                            .font(.caption.monospaced())
+                        Spacer()
+                        Text(
+                            row.isComplete
+                            ? formatByteCount(row.downloadedBytes)
+                            : "\(row.downloadedFileCount)/\(row.totalFileCount) files"
+                        )
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        if let downloadTarget = row.downloadTarget {
+                            Button(
+                                viewModel.isCareyDownloadTargetActive(downloadTarget)
+                                    ? "downloading..."
+                                    : (row.isComplete ? "downloaded" : "download")
+                            ) {
+                                viewModel.startCareyFocusedDownload(for: downloadTarget)
+                            }
+                            .disabled(
+                                row.isComplete
+                                || !viewModel.canRunCareyFocusedDownload
+                                || viewModel.isModelDownloadInProgress
+                                || viewModel.isCareyLifecycleActionInProgress
+                            )
+                        }
+                    }
+                    Text(row.relativePrefix)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+
+        if !viewModel.careyOptionalModels.isEmpty {
+            Divider()
+
+            let scragRows = careyGroupedOptionalModels(from: viewModel.careyOptionalModels)
+            let scragDownloaded = viewModel.careyOptionalModels.filter(\.downloaded).count
+            let scragTotal = viewModel.careyOptionalModels.count
+            VStack(alignment: .leading, spacing: 6) {
+                Text("optional components (\(scragDownloaded)/\(scragTotal) files)")
+                    .font(.caption.weight(.semibold))
+                ForEach(scragRows) { row in
                     HStack(spacing: 8) {
                         let indicatorColor: Color = row.isComplete
                             ? .green
@@ -2320,18 +2412,42 @@ private struct ModelDownloadSheet: View {
         let baseConfig = useXlModels ? "acestep-v15-xl-base" : "acestep-v15-base"
         let sftConfig = useXlModels ? "acestep-v15-xl-sft" : "acestep-v15-sft"
         let turboConfig = useXlModels ? "acestep-v15-xl-turbo" : "acestep-v15-turbo"
-        let legoConfig = "acestep-v15-base"
         var groups: [(id: String, label: String, prefix: String, downloadTarget: CareyDownloadTarget?)] = [
-            ("dit_base", "DiT Base (\(baseConfig))", "checkpoints/\(baseConfig)/", CareyDownloadTarget.base),
-        ]
-        if useXlModels {
-            groups.append(("dit_lego_base", "DiT Lego Base (\(legoConfig))", "checkpoints/\(legoConfig)/", CareyDownloadTarget.base))
-        }
-        groups += [
+            ("dit_base", "DiT Base / Lego Base (\(baseConfig))", "checkpoints/\(baseConfig)/", CareyDownloadTarget.base),
             ("dit_sft", "DiT SFT (\(sftConfig))", "checkpoints/\(sftConfig)/", CareyDownloadTarget.sft),
             ("dit_turbo", "DiT Turbo (\(turboConfig))", "checkpoints/\(turboConfig)/", CareyDownloadTarget.turbo),
             ("qwen_encoder", "Qwen Text Encoder", "checkpoints/Qwen3-Embedding-0.6B/", nil),
             ("vae", "VAE", "checkpoints/vae/", nil),
+        ]
+
+        return groups.compactMap { group in
+            let matched = rows.filter { $0.relativePath.hasPrefix(group.prefix) }
+            guard !matched.isEmpty else { return nil }
+
+            let downloadedFileCount = matched.filter(\.downloaded).count
+            let downloadedBytes = matched.reduce(into: Int64(0)) { partial, row in
+                if row.downloaded {
+                    partial += row.sizeBytes
+                }
+            }
+
+            return CareyRequiredGroupStatus(
+                id: group.id,
+                label: group.label,
+                relativePrefix: group.prefix,
+                downloadTarget: group.downloadTarget,
+                downloadedFileCount: downloadedFileCount,
+                totalFileCount: matched.count,
+                downloadedBytes: downloadedBytes
+            )
+        }
+    }
+
+    private func careyGroupedOptionalModels(
+        from rows: [CareyRequiredModelStatus]
+    ) -> [CareyRequiredGroupStatus] {
+        let groups: [(id: String, label: String, prefix: String, downloadTarget: CareyDownloadTarget?)] = [
+            ("scrag_vae", "ScragVAE (alternate decoder)", "checkpoints/scrag-vae/", CareyDownloadTarget.scragVae),
         ]
 
         return groups.compactMap { group in
@@ -2866,18 +2982,33 @@ private struct ServiceRow: View {
     let onSelect: () -> Void
     let onStart: () -> Void
     let onStop: () -> Void
-    let onRestart: () -> Void
     let onRebuildEnv: () -> Void
     let onDownloadModels: (() -> Void)?
     let onManageLoras: (() -> Void)?
     let onTrainLora: (() -> Void)?
     let manageLorasButtonTitle: String
+    let canManageDownloads: Bool
     let downloadModelsExtraDisabled: Bool
 
     private var downloadModelsDisabled: Bool {
         guard onDownloadModels != nil else { return true }
-        let requiresRunning = runtime.id != "carey"
-        return (requiresRunning && !runtime.isRunning) || runtime.isBootstrapping || downloadModelsExtraDisabled
+        return !canManageDownloads || downloadModelsExtraDisabled
+    }
+
+    private var startStopTitle: String {
+        runtime.isRunning ? "stop" : "start"
+    }
+
+    private func startStopAction() {
+        if runtime.isRunning {
+            onStop()
+        } else {
+            onStart()
+        }
+    }
+
+    private var startStopDisabled: Bool {
+        runtime.isBootstrapping || runtime.processState == .starting || runtime.processState == .stopping
     }
 
     var body: some View {
@@ -2893,6 +3024,7 @@ private struct ServiceRow: View {
                                 onDownloadModels()
                             }
                             .controlSize(.small)
+                            .garyPrimaryButtonStyle()
                             .disabled(downloadModelsDisabled)
                         }
                     }
@@ -2921,12 +3053,8 @@ private struct ServiceRow: View {
             }
 
             HStack {
-                Button("start", action: onStart)
-                    .disabled(runtime.isRunning || runtime.isBootstrapping)
-                Button("stop", action: onStop)
-                    .disabled(!runtime.isRunning)
-                Button("restart", action: onRestart)
-                    .disabled(runtime.isBootstrapping)
+                Button(startStopTitle, action: startStopAction)
+                    .disabled(startStopDisabled)
                 Button(
                     runtime.isBootstrapping ? "rebuilding..." : "rebuild env",
                     action: onRebuildEnv
@@ -2936,11 +3064,13 @@ private struct ServiceRow: View {
                     Button(manageLorasButtonTitle) {
                         onManageLoras()
                     }
+                    .garyPrimaryButtonStyle()
                 }
                 if let onTrainLora {
                     Button("train lora") {
                         onTrainLora()
                     }
+                    .garyPrimaryButtonStyle()
                 }
                 Spacer()
                 Text(

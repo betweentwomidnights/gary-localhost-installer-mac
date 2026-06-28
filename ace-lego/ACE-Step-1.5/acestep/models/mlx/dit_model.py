@@ -7,6 +7,7 @@ from typing import Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
+from mlx.nn.utils import checkpoint as mlx_checkpoint
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,34 @@ def _create_sliding_window_mask(
     return mask[None, None, :, :]  # [1, 1, L, L]
 
 
+def _create_padding_attention_mask(
+    attention_mask: mx.array,
+    *,
+    query_len: int,
+    key_len: int,
+    dtype: mx.Dtype = mx.float32,
+) -> mx.array:
+    """Create an additive cross-attention mask from a [B, K] padding mask."""
+    if len(attention_mask.shape) == 1:
+        attention_mask = attention_mask[None, :]
+    if len(attention_mask.shape) == 4:
+        return attention_mask.astype(dtype)
+    if len(attention_mask.shape) != 2:
+        raise ValueError(
+            "encoder_attention_mask must have shape [K], [B, K], or [B, 1, Q, K]"
+        )
+    if attention_mask.shape[1] != key_len:
+        raise ValueError(
+            f"encoder_attention_mask length {attention_mask.shape[1]} does not match "
+            f"encoder sequence length {key_len}"
+        )
+
+    valid = (attention_mask > 0)[:, None, None, :]
+    zeros = mx.zeros((valid.shape[0], 1, query_len, key_len), dtype=dtype)
+    neginf = mx.full((valid.shape[0], 1, query_len, key_len), -1e9, dtype=dtype)
+    return mx.where(valid, zeros, neginf)
+
+
 # ---------------------------------------------------------------------------
 # Rotary Position Embedding
 # ---------------------------------------------------------------------------
@@ -77,11 +106,22 @@ class MLXRotaryEmbedding(nn.Module):
         self._cos = mx.cos(freqs)  # [max_len, head_dim]
         self._sin = mx.sin(freqs)  # [max_len, head_dim]
 
-    def __call__(self, seq_len: int) -> Tuple[mx.array, mx.array]:
+    def __call__(
+        self,
+        seq_len: int,
+        dtype: Optional[mx.Dtype] = None,
+    ) -> Tuple[mx.array, mx.array]:
         """Return (cos, sin) each shaped [1, 1, seq_len, head_dim]."""
         cos = self._cos[:seq_len][None, None, :, :]
         sin = self._sin[:seq_len][None, None, :, :]
+        if dtype is not None:
+            cos = cos.astype(dtype)
+            sin = sin.astype(dtype)
         return cos, sin
+
+    def materialize_static_buffers(self) -> None:
+        """Materialize cached RoPE tables on the active MLX stream."""
+        mx.eval(self._cos, self._sin)
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +483,7 @@ class MLXDiTDecoder(nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.patch_size = patch_size
+        self.gradient_checkpointing = False
         inner_dim = hidden_size
 
         if layer_types is None:
@@ -517,6 +558,10 @@ class MLXDiTDecoder(nn.Module):
             )
         return self._sliding_masks[seq_len]
 
+    def materialize_static_buffers(self) -> None:
+        """Materialize non-parameter MLX buffers before cross-thread reuse."""
+        self.rotary_emb.materialize_static_buffers()
+
     def __call__(
         self,
         hidden_states: mx.array,
@@ -524,6 +569,7 @@ class MLXDiTDecoder(nn.Module):
         timestep_r: mx.array,
         encoder_hidden_states: mx.array,
         context_latents: mx.array,
+        encoder_attention_mask: Optional[mx.array] = None,
         cache: Optional[MLXCrossAttentionCache] = None,
         use_cache: bool = True,
     ) -> Tuple[mx.array, Optional[MLXCrossAttentionCache]]:
@@ -533,6 +579,7 @@ class MLXDiTDecoder(nn.Module):
             timestep: [B] current timestep
             timestep_r: [B] reference timestep
             encoder_hidden_states: [B, enc_L, D] from condition encoder
+            encoder_attention_mask: [B, enc_L] condition padding mask
             context_latents: [B, T, C_ctx] (src_latents + chunk_masks)
             cache: cross-attention KV cache
             use_cache: whether to cache cross-attention KV
@@ -570,28 +617,38 @@ class MLXDiTDecoder(nn.Module):
 
         seq_len = hidden_states.shape[1]
         dtype = hidden_states.dtype
+        encoder_seq_len = encoder_hidden_states.shape[1]
 
         # Position embeddings (RoPE)
-        cos, sin = self.rotary_emb(seq_len)
+        cos, sin = self.rotary_emb(seq_len, dtype=dtype)
 
         # Attention masks
         # Self-attention: full layers get None; sliding layers get windowed mask
-        # Cross-attention: always None (no masking)
+        # Cross-attention: use encoder padding mask when provided by preprocessing.
         sliding_mask = None
         has_sliding = any(lt == "sliding_attention" for lt in self._layer_types)
         if has_sliding:
             sliding_mask = self._get_sliding_mask(seq_len, dtype)
+        cross_attn_mask = None
+        if encoder_attention_mask is not None:
+            cross_attn_mask = _create_padding_attention_mask(
+                encoder_attention_mask,
+                query_len=seq_len,
+                key_len=encoder_seq_len,
+                dtype=dtype,
+            )
 
         # Process through transformer layers
         for layer in self.layers:
             self_attn_mask = sliding_mask if layer.layer_type == "sliding_attention" else None
-            hidden_states = layer(
+            layer_forward = mlx_checkpoint(layer) if self.gradient_checkpointing else layer
+            hidden_states = layer_forward(
                 hidden_states,
                 position_cos_sin=(cos, sin),
                 temb=timestep_proj,
                 self_attn_mask=self_attn_mask,
                 encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=None,
+                encoder_attention_mask=cross_attn_mask,
                 cache=cache,
                 use_cache=use_cache,
             )

@@ -127,6 +127,7 @@
 /* Begin PBXShellScriptBuildPhase section */
 		61A1FEEA2F4A1C6200B3B3A1 /* Stage Runtime Resources */ = {
 			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = (
 			);

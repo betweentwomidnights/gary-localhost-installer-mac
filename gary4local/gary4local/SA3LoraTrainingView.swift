@@ -159,6 +159,7 @@ struct SA3LoraTrainingSheet: View {
                     }
                     .labelsHidden()
                     .frame(maxWidth: 240, alignment: .leading)
+                    .garyPickerAccent()
                 }
 
                 GridRow {
@@ -202,7 +203,7 @@ struct SA3LoraTrainingSheet: View {
                                 .foregroundStyle(.secondary)
                             }
                         }
-                        .toggleStyle(.checkbox)
+                        .garyCheckboxStyle()
 
                         if loudnessFixEnabled {
                             HStack(alignment: .top, spacing: 10) {
@@ -238,7 +239,7 @@ struct SA3LoraTrainingSheet: View {
                     systemImage: "waveform.badge.plus"
                 )
             }
-            .buttonStyle(.borderedProminent)
+            .garyPrimaryButtonStyle()
             .disabled(!canStart)
 
             Button("cancel training", role: .destructive) {

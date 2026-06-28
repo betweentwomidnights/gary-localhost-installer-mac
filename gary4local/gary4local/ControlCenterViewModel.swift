@@ -175,6 +175,7 @@ enum CareyDownloadTarget: String, CaseIterable, Identifiable {
     case sft
     case turbo
     case shared
+    case scragVae = "scrag-vae"
 
     var id: String { rawValue }
 
@@ -188,6 +189,8 @@ enum CareyDownloadTarget: String, CaseIterable, Identifiable {
             return "turbo"
         case .shared:
             return "shared"
+        case .scragVae:
+            return "scrag vae"
         }
     }
 }
@@ -262,10 +265,12 @@ struct CareyLoraState {
 }
 
 struct SA3InventoryModelStatus: Identifiable {
-    let id: String
+    let repoID: String
     let label: String
     let downloaded: Bool
     let missing: [String]
+
+    var id: String { "\(repoID)::\(label)" }
 }
 
 struct SA3LoraCatalogEntry: Codable {
@@ -344,6 +349,7 @@ final class ControlCenterViewModel: ObservableObject {
     private static let melodyFlowBackendDefaultsKey = "melodyFlowBackendEngine"
     private static let careyBackendDefaultsKey = "careyBackendEngine"
     private static let careyUseXlModelsDefaultsKey = "careyUseXlModels"
+    private static let careyUseScragVaeDefaultsKey = "careyUseScragVae"
     private static let careyUseSampledMlxVaeEncodeDefaultsKey = "careyUseSampledMlxVaeEncode"
     private static let experimentalCareyMlxVaeEncodeToggleDefaultsKey = "experimentalCareyMlxVaeEncodeToggleEnabled"
     private static let sa3RuntimeSettingsDefaultsKey = "sa3RuntimeSettings"
@@ -377,6 +383,7 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var sa3PredownloadProgress: Double = 0
     @Published var sa3PredownloadTargetLabel: String = ""
     @Published var careyRequiredModels: [CareyRequiredModelStatus] = []
+    @Published var careyOptionalModels: [CareyRequiredModelStatus] = []
     @Published var isCareyDownloadInProgress: Bool = false
     @Published var isCareyLifecycleActionInProgress: Bool = false
     @Published var careyPredownloadProgress: Double = 0
@@ -385,6 +392,7 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var melodyFlowBackendEngine: MelodyFlowBackendEngine = .mps
     @Published var careyBackendEngine: CareyBackendEngine = .mlx
     @Published var careyUseXlModels: Bool = false
+    @Published var careyUseScragVae: Bool = false
     @Published var careyUseSampledMlxVaeEncode: Bool = true
     @Published var sa3PeakNormalizeDb: String = SA3RuntimeSettings.fallbackDefaults.peakNormalizeDb
     @Published var sa3LimiterCeilingDb: String = SA3RuntimeSettings.fallbackDefaults.limiterCeilingDb
@@ -401,6 +409,7 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var careyLoraStatusMessage: String = ""
     @Published var careyLoraErrorMessage: String = ""
     @Published var careyLoraBuildOutput: String = ""
+    @Published var isCareyAceTrainingSheetPresented: Bool = false
     @Published var isSA3LoraSheetPresented: Bool = false
     @Published var isSA3TrainingSheetPresented: Bool = false
     @Published var sa3LoraState: SA3LoraState?
@@ -422,9 +431,15 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var modelDownloadServiceID: String = "audiocraft_mlx"
 
     let sa3TrainingManager = SA3LoraTrainingManager()
+    let careyAceTrainingManager = CareyAceTrainingManager()
 
     private var logRefreshTask: Task<Void, Never>?
     private var modelDownloadPollTask: Task<Void, Never>?
+    private var garyLocalDownloadTask: Task<Void, Never>?
+    private var foundationLocalDownloadTask: Task<Void, Never>?
+    private var melodyflowLocalDownloadTask: Task<Void, Never>?
+    private var stableAudioLocalDownloadTask: Task<Void, Never>?
+    private var sa3LocalDownloadTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
     private var managerCancellables = Set<AnyCancellable>()
     private var isLogRefreshInFlight = false
@@ -467,6 +482,11 @@ final class ControlCenterViewModel: ObservableObject {
         ("Qwen Chat Template", "checkpoints/Qwen3-Embedding-0.6B/chat_template.jinja"),
         ("VAE Weights", "checkpoints/vae/diffusion_pytorch_model.safetensors"),
         ("VAE Config", "checkpoints/vae/config.json"),
+    ]
+
+    private static let careyOptionalModelFiles: [(label: String, relativePath: String)] = [
+        ("ScragVAE Weights", "checkpoints/scrag-vae/diffusion_pytorch_model.safetensors"),
+        ("ScragVAE Config", "checkpoints/scrag-vae/config.json"),
     ]
 
     private static func careyDiTRequiredFiles(
@@ -667,6 +687,7 @@ final class ControlCenterViewModel: ObservableObject {
         ) ?? CareyBackendEngine.mlx.rawValue
         careyBackendEngine = CareyBackendEngine.from(rawValue: savedCareyBackend)
         careyUseXlModels = UserDefaults.standard.bool(forKey: Self.careyUseXlModelsDefaultsKey)
+        careyUseScragVae = UserDefaults.standard.bool(forKey: Self.careyUseScragVaeDefaultsKey)
         if UserDefaults.standard.object(forKey: Self.careyUseSampledMlxVaeEncodeDefaultsKey) != nil {
             careyUseSampledMlxVaeEncode = UserDefaults.standard.bool(
                 forKey: Self.careyUseSampledMlxVaeEncodeDefaultsKey
@@ -685,6 +706,11 @@ final class ControlCenterViewModel: ObservableObject {
     deinit {
         logRefreshTask?.cancel()
         modelDownloadPollTask?.cancel()
+        garyLocalDownloadTask?.cancel()
+        foundationLocalDownloadTask?.cancel()
+        melodyflowLocalDownloadTask?.cancel()
+        stableAudioLocalDownloadTask?.cancel()
+        sa3LocalDownloadTask?.cancel()
         careyDownloadTask?.cancel()
     }
 
@@ -704,10 +730,35 @@ final class ControlCenterViewModel: ObservableObject {
     }
 
     var canManageModelDownloads: Bool {
-        guard let runtime = manager?.services.first(where: { $0.id == modelDownloadServiceID }) else {
+        canManageModelDownloads(for: modelDownloadServiceID)
+    }
+
+    func canManageModelDownloads(for serviceID: String) -> Bool {
+        guard let runtime = manager?.services.first(where: { $0.id == serviceID }) else {
             return false
         }
-        return runtime.processState == .running
+        if runtime.isBootstrapping {
+            return false
+        }
+        if runtime.processState == .running {
+            return true
+        }
+        switch serviceID {
+        case "audiocraft_mlx":
+            return canRunGaryOfflineDownloads
+        case "foundation":
+            return canRunFoundationOfflineDownloads
+        case "melodyflow":
+            return canRunMelodyflowOfflineDownloads
+        case "sa3":
+            return canRunSA3OfflineDownloads
+        case "stable_audio":
+            return canRunStableAudioOfflineDownloads
+        case "carey":
+            return canRunCareyFocusedDownload
+        default:
+            return false
+        }
     }
 
     var modelDownloadServiceDisplayName: String {
@@ -735,12 +786,89 @@ final class ControlCenterViewModel: ObservableObject {
         return resolveCareyDownloadScriptURL(for: runtime) != nil
     }
 
+    var canRunGaryOfflineDownloads: Bool {
+        guard let runtime = currentGaryRuntime() else {
+            return false
+        }
+        guard FileManager.default.fileExists(atPath: runtime.service.executable.path) else {
+            return false
+        }
+        return garyPredownloadHelperURL(for: runtime) != nil
+    }
+
+    var canRunFoundationOfflineDownloads: Bool {
+        guard let runtime = currentFoundationRuntime() else {
+            return false
+        }
+        guard FileManager.default.fileExists(atPath: runtime.service.executable.path) else {
+            return false
+        }
+        return foundationPredownloadHelperURL(for: runtime) != nil
+    }
+
+    var canRunMelodyflowOfflineDownloads: Bool {
+        guard let runtime = currentMelodyflowRuntime() else {
+            return false
+        }
+        guard FileManager.default.fileExists(atPath: runtime.service.executable.path) else {
+            return false
+        }
+        return melodyflowPredownloadHelperURL(for: runtime) != nil
+    }
+
+    var canRunSA3OfflineDownloads: Bool {
+        guard let runtime = currentSA3Runtime() else {
+            return false
+        }
+        guard FileManager.default.fileExists(atPath: runtime.service.executable.path) else {
+            return false
+        }
+        return sa3PredownloadHelperURL(for: runtime) != nil
+    }
+
+    var canRunStableAudioOfflineDownloads: Bool {
+        guard let runtime = currentStableAudioRuntime() else {
+            return false
+        }
+        guard FileManager.default.fileExists(atPath: runtime.service.executable.path) else {
+            return false
+        }
+        return stableAudioPredownloadHelperURL(for: runtime) != nil
+    }
+
     var isCareyServiceRunning: Bool {
         manager?.services.first(where: { $0.id == "carey" })?.processState == .running
     }
 
     var isCareyEnvironmentReady: Bool {
         careyPythonExecutableURL() != nil
+    }
+
+    var isCareyScragVaeDownloaded: Bool {
+        if !careyOptionalModels.isEmpty {
+            return careyOptionalModels.allSatisfy(\.downloaded)
+        }
+        guard let runtime = manager?.services.first(where: { $0.id == "carey" }) else { return false }
+        let checkpointDirectory = resolveCareyCheckpointDirectory(for: runtime)
+        let fileManager = FileManager.default
+        return Self.careyOptionalModelFiles.allSatisfy { row in
+            let fileURL = Self.resolveCareyModelFileURL(
+                baseCheckpointDirectory: checkpointDirectory,
+                relativePath: row.relativePath
+            )
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory),
+                  !isDirectory.boolValue,
+                  let attrs = try? fileManager.attributesOfItem(atPath: fileURL.path),
+                  let size = attrs[.size] as? NSNumber else {
+                return false
+            }
+            return size.int64Value > 0
+        }
+    }
+
+    var canEnableCareyScragVae: Bool {
+        isCareyScragVaeDownloaded || careyUseScragVae
     }
 
     var isSA3ServiceRunning: Bool {
@@ -757,7 +885,7 @@ final class ControlCenterViewModel: ObservableObject {
 
     private func activeCareyConfigNames() -> (base: String, sft: String, turbo: String, lego: String) {
         if careyUseXlModels {
-            return ("acestep-v15-xl-base", "acestep-v15-xl-sft", "acestep-v15-xl-turbo", "acestep-v15-base")
+            return ("acestep-v15-xl-base", "acestep-v15-xl-sft", "acestep-v15-xl-turbo", "acestep-v15-xl-base")
         }
         return ("acestep-v15-base", "acestep-v15-sft", "acestep-v15-turbo", "acestep-v15-base")
     }
@@ -792,6 +920,9 @@ final class ControlCenterViewModel: ObservableObject {
         if includesShared {
             files += Self.careySharedRequiredModelFiles
         }
+        if targetSet.contains(.scragVae) {
+            files += Self.careyOptionalModelFiles
+        }
         return files
     }
 
@@ -813,6 +944,16 @@ final class ControlCenterViewModel: ObservableObject {
     func loadManifest() {
         modelDownloadPollTask?.cancel()
         modelDownloadPollTask = nil
+        garyLocalDownloadTask?.cancel()
+        garyLocalDownloadTask = nil
+        foundationLocalDownloadTask?.cancel()
+        foundationLocalDownloadTask = nil
+        melodyflowLocalDownloadTask?.cancel()
+        melodyflowLocalDownloadTask = nil
+        stableAudioLocalDownloadTask?.cancel()
+        stableAudioLocalDownloadTask = nil
+        sa3LocalDownloadTask?.cancel()
+        sa3LocalDownloadTask = nil
         careyDownloadTask?.cancel()
         careyDownloadTask = nil
         isModelDownloadInProgress = false
@@ -822,6 +963,7 @@ final class ControlCenterViewModel: ObservableObject {
         activeModelDownloadSessionID = nil
         careyActiveDownloadTargets = []
         careyRequiredModels = []
+        careyOptionalModels = []
         rebuildFailureReport = nil
         rebuildDiagnosticsStatusMessage = ""
         managerCancellables.removeAll()
@@ -839,6 +981,7 @@ final class ControlCenterViewModel: ObservableObject {
             manager.setMelodyFlowBackendEngine(melodyFlowBackendEngine.rawValue, restartIfRunning: false)
             manager.setCareyBackendEngine(careyBackendEngine.rawValue, restartIfRunning: false)
             manager.setCareyUseXlModels(careyUseXlModels, restartIfRunning: false)
+            manager.setCareyUseScragVae(careyUseScragVae, restartIfRunning: false)
             manager.setCareyUseSampledMlxVaeEncode(careyUseSampledMlxVaeEncode, restartIfRunning: false)
             manager.setSA3RuntimeSettings(currentSA3RuntimeSettings().normalized, restartIfRunning: false)
             self.manager = manager
@@ -861,6 +1004,7 @@ final class ControlCenterViewModel: ObservableObject {
             logRefreshTask = nil
             downloadableModels = []
             careyRequiredModels = []
+            careyOptionalModels = []
             modelDownloadStatusMessage = ""
             isModelCatalogLoading = false
         }
@@ -1064,6 +1208,28 @@ final class ControlCenterViewModel: ObservableObject {
         }
     }
 
+    func setCareyUseScragVae(_ enabled: Bool) {
+        guard careyUseScragVae != enabled else { return }
+        if enabled && !isCareyScragVaeDownloaded {
+            careyBackendStatus = "download ScragVAE first, then this switch will wake up."
+            return
+        }
+
+        careyUseScragVae = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.careyUseScragVaeDefaultsKey)
+        manager?.setCareyUseScragVae(enabled, restartIfRunning: true)
+
+        if manager?.services.first(where: { $0.id == "carey" })?.isRunning == true {
+            careyBackendStatus = enabled
+                ? "ScragVAE enabled. carey is restarting..."
+                : "stock VAE enabled. carey is restarting..."
+        } else {
+            careyBackendStatus = enabled
+                ? "ScragVAE enabled for the next carey start."
+                : "stock VAE enabled for the next carey start."
+        }
+    }
+
     func setCareyUseSampledMlxVaeEncode(_ enabled: Bool) {
         guard careyUseSampledMlxVaeEncode != enabled else { return }
         careyUseSampledMlxVaeEncode = enabled
@@ -1169,6 +1335,11 @@ final class ControlCenterViewModel: ObservableObject {
         isSA3TrainingSheetPresented = true
     }
 
+    func openCareyAceTrainingSheet() {
+        careyAceTrainingManager.refresh()
+        isCareyAceTrainingSheetPresented = true
+    }
+
     func startSA3LoraTraining(_ request: SA3LoraTrainingRequest) {
         guard let service = currentSA3Runtime()?.service else {
             sa3TrainingManager.clearError()
@@ -1177,6 +1348,24 @@ final class ControlCenterViewModel: ObservableObject {
         sa3TrainingManager.start(
             request: request,
             service: service,
+            huggingFaceToken: sharedHuggingFaceToken
+        )
+    }
+
+    func startCareyAceTraining(_ request: CareyAceTrainingRequest) {
+        guard let service = currentCareyRuntime()?.service,
+              let pythonURL = careyPythonExecutableURL() else {
+            careyAceTrainingManager.clearError()
+            return
+        }
+        careyAceTrainingManager.start(
+            request: request,
+            service: service,
+            pythonURL: pythonURL,
+            checkpointDirectory: careyCheckpointDirectoryURL(),
+            loraCatalogURL: careyLoraCatalogURL(),
+            loraRegistryURL: careyLoraRegistryURL(),
+            captionsURL: careyCaptionsURL(),
             huggingFaceToken: sharedHuggingFaceToken
         )
     }
@@ -1528,7 +1717,13 @@ final class ControlCenterViewModel: ObservableObject {
             isModelDownloadSheetPresented = true
             return
         }
+        let changedService = modelDownloadServiceID != serviceID
         modelDownloadServiceID = serviceID
+        if changedService {
+            downloadableModels = []
+            isModelCatalogLoading = true
+            modelDownloadStatusMessage = "loading model catalog..."
+        }
         isModelDownloadSheetPresented = true
         if serviceID == "stable_audio" {
             prepareStableAudioPredownloadState()
@@ -1559,6 +1754,27 @@ final class ControlCenterViewModel: ObservableObject {
             return
         }
 
+        if modelDownloadServiceID == "audiocraft_mlx",
+           modelDownloadAPIBaseURL(for: modelDownloadServiceID) == nil,
+           canRunGaryOfflineDownloads {
+            refreshGaryOfflineModelCatalogAndStatuses()
+            return
+        }
+
+        if modelDownloadServiceID == "foundation",
+           modelDownloadAPIBaseURL(for: modelDownloadServiceID) == nil,
+           canRunFoundationOfflineDownloads {
+            refreshFoundationOfflineModelCatalogAndStatuses()
+            return
+        }
+
+        if modelDownloadServiceID == "melodyflow",
+           modelDownloadAPIBaseURL(for: modelDownloadServiceID) == nil,
+           canRunMelodyflowOfflineDownloads {
+            refreshMelodyflowOfflineModelCatalogAndStatuses()
+            return
+        }
+
         if isModelDownloadInProgress {
             modelDownloadStatusMessage = "a model download is already in progress."
             return
@@ -1566,13 +1782,32 @@ final class ControlCenterViewModel: ObservableObject {
 
         modelDownloadPollTask?.cancel()
         modelDownloadPollTask = nil
+        garyLocalDownloadTask?.cancel()
+        garyLocalDownloadTask = nil
+        foundationLocalDownloadTask?.cancel()
+        foundationLocalDownloadTask = nil
+        melodyflowLocalDownloadTask?.cancel()
+        melodyflowLocalDownloadTask = nil
+        stableAudioLocalDownloadTask?.cancel()
+        stableAudioLocalDownloadTask = nil
         activeModelDownloadSessionID = nil
         activeModelDownloadPath = nil
         isModelDownloadInProgress = false
 
         guard let baseURL = modelDownloadAPIBaseURL(for: modelDownloadServiceID) else {
             downloadableModels = []
-            modelDownloadStatusMessage = "start \(modelDownloadServiceDisplayName) to manage model downloads."
+            modelDownloadStatusMessage = {
+                switch modelDownloadServiceID {
+                case "audiocraft_mlx":
+                    return "build gary before managing model downloads."
+                case "foundation":
+                    return "build foundation-1 before managing model downloads."
+                case "melodyflow":
+                    return "build terry (melodyflow) before managing model downloads."
+                default:
+                    return "start \(modelDownloadServiceDisplayName) to manage model downloads."
+                }
+            }()
             isModelCatalogLoading = false
             return
         }
@@ -1639,7 +1874,11 @@ final class ControlCenterViewModel: ObservableObject {
         let serviceID = modelDownloadServiceID
         guard serviceID == "stable_audio" else { return }
         guard let baseURL = modelDownloadAPIBaseURL(for: serviceID) else {
-            modelDownloadStatusMessage = "start \(modelDownloadServiceDisplayName) to fetch checkpoints."
+            if canRunStableAudioOfflineDownloads {
+                fetchStableAudioOfflinePredownloadCheckpoints()
+                return
+            }
+            modelDownloadStatusMessage = "build jerry before fetching checkpoints."
             return
         }
 
@@ -1801,7 +2040,11 @@ final class ControlCenterViewModel: ObservableObject {
             return
         }
         guard let baseURL = modelDownloadAPIBaseURL(for: serviceID) else {
-            modelDownloadStatusMessage = "start \(modelDownloadServiceDisplayName) to pre-download models."
+            if canRunStableAudioOfflineDownloads {
+                startStableAudioOfflinePredownload(payload: payload, targetLabel: targetLabel)
+                return
+            }
+            modelDownloadStatusMessage = "build jerry before pre-downloading models."
             return
         }
         guard !isModelDownloadInProgress else {
@@ -1859,7 +2102,10 @@ final class ControlCenterViewModel: ObservableObject {
     private func prepareStableAudioPredownloadState() {
         downloadableModels = []
         isModelCatalogLoading = false
-        stableAudioPredownloadProgress = 0
+        if !isModelDownloadInProgress {
+            stableAudioPredownloadProgress = 0
+            stableAudioPredownloadTargetLabel = ""
+        }
         stableAudioInventoryModels = []
         stableAudioCachedFinetunes = []
         if stableAudioPredownloadRepoInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1885,6 +2131,10 @@ final class ControlCenterViewModel: ObservableObject {
             return
         }
         guard let baseURL = modelDownloadAPIBaseURL(for: serviceID) else {
+            if canRunSA3OfflineDownloads {
+                startSA3OfflinePredownloadRequiredModels()
+                return
+            }
             modelDownloadStatusMessage = "start \(modelDownloadServiceDisplayName) to pre-download models."
             return
         }
@@ -1967,7 +2217,11 @@ final class ControlCenterViewModel: ObservableObject {
         let serviceID = modelDownloadServiceID
         guard serviceID == "sa3" else { return }
         guard let baseURL = modelDownloadAPIBaseURL(for: serviceID) else {
-            sa3InventoryModels = []
+            if canRunSA3OfflineDownloads {
+                refreshSA3OfflinePredownloadInventory()
+            } else {
+                sa3InventoryModels = []
+            }
             return
         }
 
@@ -1992,7 +2246,7 @@ final class ControlCenterViewModel: ObservableObject {
 
                 self.sa3InventoryModels = payload.knownModels.map { row in
                     SA3InventoryModelStatus(
-                        id: row.repoID,
+                        repoID: row.repoID,
                         label: row.label,
                         downloaded: row.downloaded,
                         missing: row.missing
@@ -2010,9 +2264,13 @@ final class ControlCenterViewModel: ObservableObject {
         let serviceID = modelDownloadServiceID
         guard serviceID == "stable_audio" else { return }
         guard let baseURL = modelDownloadAPIBaseURL(for: serviceID) else {
-            stableAudioInventoryModels = []
-            stableAudioCachedFinetunes = []
-            stableAudioPredownloadCheckpointDownloaded = [:]
+            if canRunStableAudioOfflineDownloads {
+                refreshStableAudioOfflinePredownloadInventory(checkpointsHint: checkpointsHint)
+            } else {
+                stableAudioInventoryModels = []
+                stableAudioCachedFinetunes = []
+                stableAudioPredownloadCheckpointDownloaded = [:]
+            }
             return
         }
 
@@ -2077,10 +2335,10 @@ final class ControlCenterViewModel: ObservableObject {
         }
         refreshCareyPredownloadInventory()
         if isCareyDownloadInProgress {
-            modelDownloadStatusMessage = "downloading required carey files..."
+            modelDownloadStatusMessage = "downloading carey model files..."
         } else if canRunCareyFocusedDownload {
             let familyDescription = careyUseXlModels ? "xl" : "regular"
-            modelDownloadStatusMessage = "download the \(familyDescription) carey model family you want to use, or fetch all three at once."
+            modelDownloadStatusMessage = "download the \(familyDescription) carey model family you want to use, or fetch all three at once. ScragVAE is optional."
         } else {
             modelDownloadStatusMessage = "focused download script not found (expected in runtime/scripts or workspace/scripts)."
         }
@@ -2090,41 +2348,50 @@ final class ControlCenterViewModel: ObservableObject {
         guard modelDownloadServiceID == "carey" else { return }
         guard let runtime = manager?.services.first(where: { $0.id == "carey" }) else {
             careyRequiredModels = []
+            careyOptionalModels = []
             return
         }
 
         let fileManager = FileManager.default
         let checkpointDirectory = resolveCareyCheckpointDirectory(for: runtime)
         let requiredModelFiles = activeCareyRequiredModelFiles()
-        let rows = requiredModelFiles.map { row in
-            let fileURL = Self.resolveCareyModelFileURL(
-                baseCheckpointDirectory: checkpointDirectory,
-                relativePath: row.relativePath
-            )
-            var isDirectory: ObjCBool = false
-            let exists = fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory) && !isDirectory.boolValue
-            let bytes: Int64
-            if exists,
-               let attrs = try? fileManager.attributesOfItem(atPath: fileURL.path),
-               let size = attrs[.size] as? NSNumber {
-                bytes = size.int64Value
-            } else {
-                bytes = 0
+        let inventoryRows = { (rows: [(label: String, relativePath: String)]) in
+            rows.map { row in
+                let fileURL = Self.resolveCareyModelFileURL(
+                    baseCheckpointDirectory: checkpointDirectory,
+                    relativePath: row.relativePath
+                )
+                var isDirectory: ObjCBool = false
+                let exists = fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory) && !isDirectory.boolValue
+                let bytes: Int64
+                if exists,
+                   let attrs = try? fileManager.attributesOfItem(atPath: fileURL.path),
+                   let size = attrs[.size] as? NSNumber {
+                    bytes = size.int64Value
+                } else {
+                    bytes = 0
+                }
+                return CareyRequiredModelStatus(
+                    id: row.relativePath,
+                    label: row.label,
+                    relativePath: row.relativePath,
+                    downloaded: exists && bytes > 0,
+                    sizeBytes: bytes
+                )
             }
-            return CareyRequiredModelStatus(
-                id: row.relativePath,
-                label: row.label,
-                relativePath: row.relativePath,
-                downloaded: exists && bytes > 0,
-                sizeBytes: bytes
-            )
         }
+        let rows = inventoryRows(requiredModelFiles)
+        let optionalRows = inventoryRows(Self.careyOptionalModelFiles)
 
         careyRequiredModels = rows
+        careyOptionalModels = optionalRows
         if !isCareyDownloadInProgress {
             let downloadedCount = rows.filter(\.downloaded).count
+            let optionalReady = optionalRows.allSatisfy(\.downloaded)
             if downloadedCount == rows.count {
-                modelDownloadStatusMessage = "all required carey files are downloaded."
+                modelDownloadStatusMessage = optionalReady
+                    ? "all required carey files are downloaded. ScragVAE is ready too."
+                    : "all required carey files are downloaded. ScragVAE is optional."
             } else {
                 modelDownloadStatusMessage = "\(downloadedCount)/\(rows.count) required carey files are downloaded."
             }
@@ -2181,7 +2448,7 @@ final class ControlCenterViewModel: ObservableObject {
             scriptEnvironment["ACESTEP_SFT_CONFIG_PATH"] = configs.sft
             scriptEnvironment["ACESTEP_TURBO_CONFIG_PATH"] = configs.turbo
             scriptEnvironment["ACESTEP_LEGO_CONFIG_PATH"] = configs.lego
-            scriptEnvironment["ACESTEP_REGULAR_CONFIG_PATH"] = configs.lego
+            scriptEnvironment["ACESTEP_REGULAR_CONFIG_PATH"] = configs.base
             scriptEnvironment["CAREY_DOWNLOAD_TARGETS"] = normalizedTargets.map(\.rawValue).joined(separator: ",")
             let result = await Task.detached(priority: .userInitiated) {
                 Self.runCareyDownloadScript(
@@ -2389,7 +2656,30 @@ final class ControlCenterViewModel: ObservableObject {
         let serviceID = modelDownloadServiceID
         let serviceDisplayName = modelDownloadDisplayName(forServiceID: serviceID)
         guard let baseURL = modelDownloadAPIBaseURL(for: serviceID) else {
-            modelDownloadStatusMessage = "start \(serviceDisplayName) to download models."
+            if serviceID == "audiocraft_mlx", canRunGaryOfflineDownloads {
+                startGaryOfflineModelDownload(modelPath)
+                return
+            }
+            if serviceID == "foundation", canRunFoundationOfflineDownloads {
+                startFoundationOfflineModelDownload(modelPath)
+                return
+            }
+            if serviceID == "melodyflow", canRunMelodyflowOfflineDownloads {
+                startMelodyflowOfflineModelDownload(modelPath)
+                return
+            }
+            modelDownloadStatusMessage = {
+                switch serviceID {
+                case "audiocraft_mlx":
+                    return "build gary before downloading models."
+                case "foundation":
+                    return "build foundation-1 before downloading models."
+                case "melodyflow":
+                    return "build terry (melodyflow) before downloading models."
+                default:
+                    return "start \(serviceDisplayName) to download models."
+                }
+            }()
             return
         }
         guard !isModelDownloadInProgress else {
@@ -3038,6 +3328,823 @@ final class ControlCenterViewModel: ObservableObject {
         downloadableModels[index].statusMessage = statusMessage
     }
 
+    private func refreshFoundationOfflineModelCatalogAndStatuses() {
+        guard let runtime = currentFoundationRuntime(),
+              let helperURL = foundationPredownloadHelperURL(for: runtime)
+        else {
+            downloadableModels = []
+            modelDownloadStatusMessage = "build foundation-1 before managing model downloads."
+            isModelCatalogLoading = false
+            return
+        }
+
+        let executableURL = runtime.service.executable
+        let workingDirectory = runtime.service.workingDirectory
+        let environment = runtime.service.environment
+
+        isModelCatalogLoading = true
+        modelDownloadStatusMessage = "loading model catalog..."
+
+        Task { [weak self] in
+            guard let self else { return }
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.loadLocalPredownloadCatalogOutputs(
+                    executableURL: executableURL,
+                    helperURL: helperURL,
+                    currentDirectory: workingDirectory,
+                    environment: environment
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+            self.applyOfflinePredownloadCatalogResult(
+                result,
+                expectedHelperName: "foundation helper"
+            )
+        }
+    }
+
+    private func refreshGaryOfflineModelCatalogAndStatuses() {
+        guard let runtime = currentGaryRuntime(),
+              let helperURL = garyPredownloadHelperURL(for: runtime)
+        else {
+            downloadableModels = []
+            modelDownloadStatusMessage = "build gary before managing model downloads."
+            isModelCatalogLoading = false
+            return
+        }
+
+        let executableURL = runtime.service.executable
+        let workingDirectory = runtime.service.workingDirectory
+        let environment = garyOfflinePredownloadEnvironment(for: runtime)
+
+        isModelCatalogLoading = true
+        modelDownloadStatusMessage = "loading model catalog..."
+
+        Task { [weak self] in
+            guard let self else { return }
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.loadLocalPredownloadCatalogOutputs(
+                    executableURL: executableURL,
+                    helperURL: helperURL,
+                    currentDirectory: workingDirectory,
+                    environment: environment
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+            self.applyOfflinePredownloadCatalogResult(
+                result,
+                expectedHelperName: "gary helper"
+            )
+        }
+    }
+
+    private func refreshMelodyflowOfflineModelCatalogAndStatuses() {
+        guard let runtime = currentMelodyflowRuntime(),
+              let helperURL = melodyflowPredownloadHelperURL(for: runtime)
+        else {
+            downloadableModels = []
+            modelDownloadStatusMessage = "build terry (melodyflow) before managing model downloads."
+            isModelCatalogLoading = false
+            return
+        }
+
+        let executableURL = runtime.service.executable
+        let workingDirectory = runtime.service.workingDirectory
+        let environment = runtime.service.environment
+
+        isModelCatalogLoading = true
+        modelDownloadStatusMessage = "loading model catalog..."
+
+        Task { [weak self] in
+            guard let self else { return }
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.loadLocalPredownloadCatalogOutputs(
+                    executableURL: executableURL,
+                    helperURL: helperURL,
+                    currentDirectory: workingDirectory,
+                    environment: environment
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+            self.applyOfflinePredownloadCatalogResult(
+                result,
+                expectedHelperName: "melodyflow helper"
+            )
+        }
+    }
+
+    private func fetchStableAudioOfflinePredownloadCheckpoints() {
+        guard let runtime = currentStableAudioRuntime(),
+              let helperURL = stableAudioPredownloadHelperURL(for: runtime)
+        else {
+            modelDownloadStatusMessage = "build jerry before fetching checkpoints."
+            return
+        }
+
+        let repo = stableAudioPredownloadRepoInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !repo.isEmpty else {
+            modelDownloadStatusMessage = "enter a hugging face repo first."
+            return
+        }
+        guard !isStableAudioCheckpointFetchInProgress else { return }
+        guard !isModelDownloadInProgress else {
+            modelDownloadStatusMessage = "a model download is already running."
+            return
+        }
+
+        let executableURL = runtime.service.executable
+        let workingDirectory = runtime.service.workingDirectory
+        let environment = stableAudioOfflinePredownloadEnvironment(for: runtime)
+
+        isStableAudioCheckpointFetchInProgress = true
+        modelDownloadStatusMessage = "fetching checkpoints from \(repo)..."
+
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.isStableAudioCheckpointFetchInProgress = false }
+
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.runLocalProcess(
+                    executableURL: executableURL,
+                    arguments: [
+                        helperURL.path,
+                        "checkpoints",
+                        "--finetune-repo",
+                        repo,
+                    ],
+                    currentDirectory: workingDirectory,
+                    environment: environment
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            do {
+                guard result.exitCode == 0 else {
+                    throw NSError(
+                        domain: "ControlCenterViewModel",
+                        code: 7001,
+                        userInfo: [NSLocalizedDescriptionKey: result.output]
+                    )
+                }
+
+                let payload = try JSONDecoder().decode(
+                    StableAudioCheckpointsResponse.self,
+                    from: Self.jsonDataFromProcessOutput(result.output)
+                )
+                guard payload.success else {
+                    throw NSError(
+                        domain: "ControlCenterViewModel",
+                        code: 7002,
+                        userInfo: [
+                            NSLocalizedDescriptionKey: payload.error ?? "failed to fetch checkpoints."
+                        ]
+                    )
+                }
+
+                let checkpoints = (payload.checkpoints ?? []).sorted {
+                    $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+                }
+                self.stableAudioPredownloadCheckpoints = checkpoints
+                self.stableAudioPredownloadSelectedCheckpoint = checkpoints.first ?? ""
+                self.stableAudioPredownloadCheckpointDownloaded = [:]
+                if checkpoints.isEmpty {
+                    self.modelDownloadStatusMessage = "no .ckpt files found in \(repo)."
+                } else {
+                    self.modelDownloadStatusMessage = "\(checkpoints.count) checkpoint\(checkpoints.count == 1 ? "" : "s") found."
+                }
+                self.refreshStableAudioPredownloadInventory(checkpointsHint: checkpoints)
+            } catch {
+                self.stableAudioPredownloadCheckpoints = []
+                self.stableAudioPredownloadCheckpointDownloaded = [:]
+                self.stableAudioPredownloadSelectedCheckpoint = ""
+                self.modelDownloadStatusMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func refreshStableAudioOfflinePredownloadInventory(checkpointsHint: [String] = []) {
+        guard let runtime = currentStableAudioRuntime(),
+              let helperURL = stableAudioPredownloadHelperURL(for: runtime)
+        else {
+            stableAudioInventoryModels = []
+            stableAudioCachedFinetunes = []
+            stableAudioPredownloadCheckpointDownloaded = [:]
+            return
+        }
+
+        let executableURL = runtime.service.executable
+        let workingDirectory = runtime.service.workingDirectory
+        let environment = stableAudioOfflinePredownloadEnvironment(for: runtime)
+        let repo = stableAudioPredownloadRepoInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hints = checkpointsHint.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+        Task { [weak self] in
+            guard let self else { return }
+            let result = await Task.detached(priority: .userInitiated) {
+                var arguments = [helperURL.path, "inventory"]
+                if !repo.isEmpty {
+                    arguments.append(contentsOf: ["--finetune-repo", repo])
+                }
+                for checkpoint in hints {
+                    arguments.append(contentsOf: ["--checkpoint", checkpoint])
+                }
+                return Self.runLocalProcess(
+                    executableURL: executableURL,
+                    arguments: arguments,
+                    currentDirectory: workingDirectory,
+                    environment: environment
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            do {
+                guard result.exitCode == 0 else {
+                    throw NSError(
+                        domain: "ControlCenterViewModel",
+                        code: 7003,
+                        userInfo: [NSLocalizedDescriptionKey: result.output]
+                    )
+                }
+
+                let payload = try JSONDecoder().decode(
+                    StableAudioPredownloadInventoryResponse.self,
+                    from: Self.jsonDataFromProcessOutput(result.output)
+                )
+                guard payload.success else {
+                    throw NSError(
+                        domain: "ControlCenterViewModel",
+                        code: 7004,
+                        userInfo: [
+                            NSLocalizedDescriptionKey: payload.error ?? "failed to load stable inventory."
+                        ]
+                    )
+                }
+
+                self.stableAudioInventoryModels = payload.knownModels.map { row in
+                    StableAudioInventoryModelStatus(
+                        id: row.repoID,
+                        label: row.label,
+                        downloaded: row.downloaded,
+                        missing: row.missing
+                    )
+                }
+                self.stableAudioCachedFinetunes = payload.cachedFinetunes
+                self.stableAudioPredownloadCheckpointDownloaded = Dictionary(
+                    uniqueKeysWithValues: payload.finetuneCheckpoints.map { ($0.name, $0.downloaded) }
+                )
+            } catch {
+                if self.stableAudioInventoryModels.isEmpty {
+                    self.modelDownloadStatusMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func startFoundationOfflineModelDownload(_ modelPath: String) {
+        guard let runtime = currentFoundationRuntime(),
+              let helperURL = foundationPredownloadHelperURL(for: runtime)
+        else {
+            modelDownloadStatusMessage = "build foundation-1 before downloading models."
+            return
+        }
+        guard !isModelDownloadInProgress else {
+            modelDownloadStatusMessage = "a model download is already running."
+            return
+        }
+
+        modelDownloadPollTask?.cancel()
+        modelDownloadPollTask = nil
+        foundationLocalDownloadTask?.cancel()
+        foundationLocalDownloadTask = nil
+
+        setModelDownloadState(
+            for: modelPath,
+            isDownloading: true,
+            downloaded: false,
+            progress: 0,
+            statusMessage: "starting download..."
+        )
+        isModelDownloadInProgress = true
+        activeModelDownloadPath = modelPath
+        activeModelDownloadSessionID = "local-foundation-predownload"
+        modelDownloadStatusMessage = "starting \(modelPath)..."
+
+        let executableURL = runtime.service.executable
+        let workingDirectory = runtime.service.workingDirectory
+        let environment = runtime.service.environment
+
+        foundationLocalDownloadTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.runStreamingLocalProcess(
+                    executableURL: executableURL,
+                    arguments: [
+                        helperURL.path,
+                        "download",
+                        "--model-name",
+                        modelPath,
+                    ],
+                    currentDirectory: workingDirectory,
+                    environment: environment,
+                    onOutputLine: { line in
+                        Task { @MainActor [weak self] in
+                            self?.handleFoundationOfflineDownloadOutputLine(line, modelPath: modelPath)
+                        }
+                    }
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            if self.isModelDownloadInProgress {
+                self.isModelDownloadInProgress = false
+                self.activeModelDownloadPath = nil
+                self.activeModelDownloadSessionID = nil
+                if result.exitCode == 0 {
+                    self.setModelDownloadState(
+                        for: modelPath,
+                        isDownloading: false,
+                        downloaded: true,
+                        progress: 1,
+                        statusMessage: "downloaded"
+                    )
+                    self.modelDownloadStatusMessage = "foundation-1 model files downloaded."
+                    self.refreshFoundationOfflineModelCatalogAndStatuses()
+                } else {
+                    self.setModelDownloadState(
+                        for: modelPath,
+                        isDownloading: false,
+                        downloaded: false,
+                        progress: 0,
+                        statusMessage: "download failed"
+                    )
+                    self.modelDownloadStatusMessage = result.output.isEmpty
+                        ? "foundation-1 download failed."
+                        : result.output
+                }
+            }
+
+            self.foundationLocalDownloadTask = nil
+        }
+    }
+
+    private func startGaryOfflineModelDownload(_ modelPath: String) {
+        guard let runtime = currentGaryRuntime(),
+              let helperURL = garyPredownloadHelperURL(for: runtime)
+        else {
+            modelDownloadStatusMessage = "build gary before downloading models."
+            return
+        }
+        guard !isModelDownloadInProgress else {
+            modelDownloadStatusMessage = "a model download is already running."
+            return
+        }
+
+        modelDownloadPollTask?.cancel()
+        modelDownloadPollTask = nil
+        garyLocalDownloadTask?.cancel()
+        garyLocalDownloadTask = nil
+
+        setModelDownloadState(
+            for: modelPath,
+            isDownloading: true,
+            downloaded: false,
+            progress: 0,
+            statusMessage: "starting download..."
+        )
+        isModelDownloadInProgress = true
+        activeModelDownloadPath = modelPath
+        activeModelDownloadSessionID = "local-gary-predownload"
+        modelDownloadStatusMessage = "starting \(modelPath)..."
+
+        let executableURL = runtime.service.executable
+        let workingDirectory = runtime.service.workingDirectory
+        let environment = garyOfflinePredownloadEnvironment(for: runtime)
+
+        garyLocalDownloadTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.runStreamingLocalProcess(
+                    executableURL: executableURL,
+                    arguments: [
+                        helperURL.path,
+                        "download",
+                        "--model-name",
+                        modelPath,
+                    ],
+                    currentDirectory: workingDirectory,
+                    environment: environment,
+                    onOutputLine: { line in
+                        Task { @MainActor [weak self] in
+                            self?.handleOfflineHelperDownloadOutputLine(
+                                line,
+                                modelPath: modelPath
+                            )
+                        }
+                    }
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            if self.isModelDownloadInProgress {
+                self.isModelDownloadInProgress = false
+                self.activeModelDownloadPath = nil
+                self.activeModelDownloadSessionID = nil
+                if result.exitCode == 0 {
+                    self.setModelDownloadState(
+                        for: modelPath,
+                        isDownloading: false,
+                        downloaded: true,
+                        progress: 1,
+                        statusMessage: "downloaded"
+                    )
+                    self.modelDownloadStatusMessage = "gary model files downloaded."
+                    self.refreshGaryOfflineModelCatalogAndStatuses()
+                } else {
+                    self.setModelDownloadState(
+                        for: modelPath,
+                        isDownloading: false,
+                        downloaded: false,
+                        progress: 0,
+                        statusMessage: "download failed"
+                    )
+                    self.modelDownloadStatusMessage = result.output.isEmpty
+                        ? "gary download failed."
+                        : result.output
+                }
+            }
+
+            self.garyLocalDownloadTask = nil
+        }
+    }
+
+    private func startMelodyflowOfflineModelDownload(_ modelPath: String) {
+        guard let runtime = currentMelodyflowRuntime(),
+              let helperURL = melodyflowPredownloadHelperURL(for: runtime)
+        else {
+            modelDownloadStatusMessage = "build terry (melodyflow) before downloading models."
+            return
+        }
+        guard !isModelDownloadInProgress else {
+            modelDownloadStatusMessage = "a model download is already running."
+            return
+        }
+
+        modelDownloadPollTask?.cancel()
+        modelDownloadPollTask = nil
+        melodyflowLocalDownloadTask?.cancel()
+        melodyflowLocalDownloadTask = nil
+
+        setModelDownloadState(
+            for: modelPath,
+            isDownloading: true,
+            downloaded: false,
+            progress: 0,
+            statusMessage: "starting download..."
+        )
+        isModelDownloadInProgress = true
+        activeModelDownloadPath = modelPath
+        activeModelDownloadSessionID = "local-melodyflow-predownload"
+        modelDownloadStatusMessage = "starting \(modelPath)..."
+
+        let executableURL = runtime.service.executable
+        let workingDirectory = runtime.service.workingDirectory
+        let environment = runtime.service.environment
+
+        melodyflowLocalDownloadTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.runStreamingLocalProcess(
+                    executableURL: executableURL,
+                    arguments: [
+                        helperURL.path,
+                        "download",
+                        "--model-name",
+                        modelPath,
+                    ],
+                    currentDirectory: workingDirectory,
+                    environment: environment,
+                    onOutputLine: { line in
+                        Task { @MainActor [weak self] in
+                            self?.handleOfflineHelperDownloadOutputLine(
+                                line,
+                                modelPath: modelPath
+                            )
+                        }
+                    }
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            if self.isModelDownloadInProgress {
+                self.isModelDownloadInProgress = false
+                self.activeModelDownloadPath = nil
+                self.activeModelDownloadSessionID = nil
+                if result.exitCode == 0 {
+                    self.setModelDownloadState(
+                        for: modelPath,
+                        isDownloading: false,
+                        downloaded: true,
+                        progress: 1,
+                        statusMessage: "downloaded"
+                    )
+                    self.modelDownloadStatusMessage = "melodyflow model files downloaded."
+                    self.refreshMelodyflowOfflineModelCatalogAndStatuses()
+                } else {
+                    self.setModelDownloadState(
+                        for: modelPath,
+                        isDownloading: false,
+                        downloaded: false,
+                        progress: 0,
+                        statusMessage: "download failed"
+                    )
+                    self.modelDownloadStatusMessage = result.output.isEmpty
+                        ? "melodyflow download failed."
+                        : result.output
+                }
+            }
+
+            self.melodyflowLocalDownloadTask = nil
+        }
+    }
+
+    private func startStableAudioOfflinePredownload(payload: [String: Any], targetLabel: String) {
+        guard let runtime = currentStableAudioRuntime(),
+              let helperURL = stableAudioPredownloadHelperURL(for: runtime)
+        else {
+            modelDownloadStatusMessage = "build jerry before pre-downloading models."
+            return
+        }
+        guard !isModelDownloadInProgress else {
+            modelDownloadStatusMessage = "a model download is already running."
+            return
+        }
+
+        let targetType = (payload["target_type"] as? String ?? "pretrained")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let executableURL = runtime.service.executable
+        let workingDirectory = runtime.service.workingDirectory
+        let environment = stableAudioOfflinePredownloadEnvironment(for: runtime)
+
+        modelDownloadPollTask?.cancel()
+        modelDownloadPollTask = nil
+        stableAudioLocalDownloadTask?.cancel()
+        stableAudioLocalDownloadTask = nil
+
+        activeModelDownloadPath = targetLabel
+        activeModelDownloadSessionID = "local-stable-audio-predownload"
+        stableAudioPredownloadTargetLabel = targetLabel
+        stableAudioPredownloadProgress = 0
+        isModelDownloadInProgress = true
+        modelDownloadStatusMessage = "starting \(targetLabel)..."
+
+        stableAudioLocalDownloadTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await Task.detached(priority: .userInitiated) {
+                var arguments: [String]
+                if targetType == "finetune" {
+                    arguments = [
+                        helperURL.path,
+                        "download-finetune",
+                        "--finetune-repo",
+                        String(describing: payload["finetune_repo"] ?? ""),
+                        "--finetune-checkpoint",
+                        String(describing: payload["finetune_checkpoint"] ?? ""),
+                        "--base-repo",
+                        String(describing: payload["base_repo"] ?? "stabilityai/stable-audio-open-small"),
+                    ]
+                } else {
+                    arguments = [
+                        helperURL.path,
+                        "download-pretrained",
+                        "--repo-id",
+                        String(describing: payload["repo_id"] ?? "stabilityai/stable-audio-open-small"),
+                    ]
+                }
+                if (payload["require_token"] as? Bool) == true {
+                    arguments.append("--require-token")
+                }
+
+                return Self.runStreamingLocalProcess(
+                    executableURL: executableURL,
+                    arguments: arguments,
+                    currentDirectory: workingDirectory,
+                    environment: environment,
+                    onOutputLine: { line in
+                        Task { @MainActor [weak self] in
+                            self?.handleOfflineHelperDownloadOutputLine(line, modelPath: targetLabel)
+                        }
+                    }
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            if self.isModelDownloadInProgress {
+                self.isModelDownloadInProgress = false
+                self.activeModelDownloadPath = nil
+                self.activeModelDownloadSessionID = nil
+                if result.exitCode == 0 {
+                    self.stableAudioPredownloadProgress = 1
+                    self.modelDownloadStatusMessage = "\(targetLabel) is ready for offline use."
+                    self.refreshStableAudioPredownloadInventory(
+                        checkpointsHint: self.stableAudioPredownloadCheckpoints
+                    )
+                } else {
+                    self.stableAudioPredownloadProgress = 0
+                    self.modelDownloadStatusMessage = result.output.isEmpty
+                        ? "stable audio download failed."
+                        : Self.userFacingStableAudioPredownloadFailureMessage(from: result.output)
+                }
+            }
+
+            self.stableAudioLocalDownloadTask = nil
+        }
+    }
+
+    private func handleFoundationOfflineDownloadOutputLine(_ line: String, modelPath: String) {
+        handleOfflineHelperDownloadOutputLine(line, modelPath: modelPath)
+    }
+
+    private func refreshSA3OfflinePredownloadInventory() {
+        guard let runtime = currentSA3Runtime(),
+              let helperURL = sa3PredownloadHelperURL(for: runtime)
+        else {
+            sa3InventoryModels = []
+            return
+        }
+
+        let executableURL = runtime.service.executable
+        let workingDirectory = runtime.service.workingDirectory
+        let environment = sa3OfflinePredownloadEnvironment(for: runtime)
+
+        Task { [weak self] in
+            guard let self else { return }
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.runLocalProcess(
+                    executableURL: executableURL,
+                    arguments: [helperURL.path, "inventory"],
+                    currentDirectory: workingDirectory,
+                    environment: environment
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            guard result.exitCode == 0 else {
+                if self.sa3InventoryModels.isEmpty {
+                    self.modelDownloadStatusMessage = result.output.isEmpty
+                        ? "failed to load sa3 inventory."
+                        : result.output
+                }
+                return
+            }
+
+            do {
+                let payload = try JSONDecoder().decode(
+                    SA3PredownloadInventoryResponse.self,
+                    from: Self.jsonDataFromProcessOutput(result.output)
+                )
+                guard payload.success else {
+                    throw NSError(
+                        domain: "ControlCenterViewModel",
+                        code: 11,
+                        userInfo: [NSLocalizedDescriptionKey: payload.error ?? "failed to load sa3 inventory."]
+                    )
+                }
+
+                self.sa3InventoryModels = payload.knownModels.map { row in
+                    SA3InventoryModelStatus(
+                        repoID: row.repoID,
+                        label: row.label,
+                        downloaded: row.downloaded,
+                        missing: row.missing
+                    )
+                }
+            } catch {
+                if self.sa3InventoryModels.isEmpty {
+                    self.modelDownloadStatusMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func startSA3OfflinePredownloadRequiredModels() {
+        guard let runtime = currentSA3Runtime(),
+              let helperURL = sa3PredownloadHelperURL(for: runtime)
+        else {
+            modelDownloadStatusMessage = "build sa3 before pre-downloading models."
+            return
+        }
+        guard !isModelDownloadInProgress else {
+            modelDownloadStatusMessage = "a model download is already running."
+            return
+        }
+
+        modelDownloadPollTask?.cancel()
+        modelDownloadPollTask = nil
+        sa3LocalDownloadTask?.cancel()
+        sa3LocalDownloadTask = nil
+        activeModelDownloadSessionID = nil
+        activeModelDownloadPath = "required sa3 models"
+        sa3PredownloadTargetLabel = "required sa3 models"
+        sa3PredownloadProgress = 0
+        isModelDownloadInProgress = true
+        modelDownloadStatusMessage = "starting required sa3 models..."
+
+        let executableURL = runtime.service.executable
+        let workingDirectory = runtime.service.workingDirectory
+        let environment = sa3OfflinePredownloadEnvironment(for: runtime)
+
+        sa3LocalDownloadTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.runStreamingLocalProcess(
+                    executableURL: executableURL,
+                    arguments: [helperURL.path, "download-required"],
+                    currentDirectory: workingDirectory,
+                    environment: environment,
+                    onOutputLine: { line in
+                        Task { @MainActor [weak self] in
+                            self?.handleOfflineHelperDownloadOutputLine(
+                                line,
+                                modelPath: "required sa3 models"
+                            )
+                        }
+                    }
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            if self.isModelDownloadInProgress {
+                self.isModelDownloadInProgress = false
+                self.activeModelDownloadPath = nil
+                self.activeModelDownloadSessionID = nil
+                if result.exitCode == 0 {
+                    self.sa3PredownloadProgress = 1
+                    self.modelDownloadStatusMessage = "sa3 required models downloaded."
+                    self.refreshSA3OfflinePredownloadInventory()
+                } else {
+                    self.sa3PredownloadProgress = 0
+                    self.modelDownloadStatusMessage = result.output.isEmpty
+                        ? "sa3 predownload failed."
+                        : result.output
+                }
+            }
+
+            self.sa3LocalDownloadTask = nil
+        }
+    }
+
+    private func handleOfflineHelperDownloadOutputLine(_ line: String, modelPath: String) {
+        guard let data = line.data(using: .utf8),
+              let response = try? JSONDecoder().decode(RemotePredownloadStatusResponse.self, from: data)
+        else {
+            return
+        }
+
+        let normalizedProgress = derivedPredownloadProgress(from: response)
+        let progress = Double(normalizedProgress) / 100.0
+        let queueMessage = response.queueStatus?.message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let fallbackMessage: String
+        switch response.status {
+        case "completed":
+            fallbackMessage = "downloaded"
+        case "failed":
+            fallbackMessage = response.error ?? "download failed"
+        case "warming", "processing":
+            fallbackMessage = "downloading..."
+        default:
+            fallbackMessage = response.status
+        }
+        let statusMessage = queueMessage.isEmpty ? fallbackMessage : queueMessage
+
+        if modelPath == "required sa3 models" {
+            sa3PredownloadTargetLabel = modelPath
+            sa3PredownloadProgress = progress
+            modelDownloadStatusMessage = statusMessage
+            return
+        }
+
+        setModelDownloadState(
+            for: modelPath,
+            isDownloading: response.status == "warming" || response.status == "processing",
+            downloaded: response.status == "completed",
+            progress: progress,
+            statusMessage: statusMessage
+        )
+        modelDownloadStatusMessage = statusMessage
+    }
+
     private func resolveCareyDownloadScriptURL(for runtime: ServiceRuntime) -> URL? {
         let runtimeRoot = runtime.service.workingDirectory
             .deletingLastPathComponent()
@@ -3160,8 +4267,64 @@ final class ControlCenterViewModel: ObservableObject {
         manager?.services.first(where: { $0.id == "carey" })
     }
 
+    private func currentGaryRuntime() -> ServiceRuntime? {
+        manager?.services.first(where: { $0.id == "audiocraft_mlx" })
+    }
+
+    private func currentStableAudioRuntime() -> ServiceRuntime? {
+        manager?.services.first(where: { $0.id == "stable_audio" })
+    }
+
     private func currentSA3Runtime() -> ServiceRuntime? {
         manager?.services.first(where: { $0.id == "sa3" })
+    }
+
+    private func currentFoundationRuntime() -> ServiceRuntime? {
+        manager?.services.first(where: { $0.id == "foundation" })
+    }
+
+    private func currentMelodyflowRuntime() -> ServiceRuntime? {
+        manager?.services.first(where: { $0.id == "melodyflow" })
+    }
+
+    private func garyOfflinePredownloadEnvironment(for runtime: ServiceRuntime) -> [String: String] {
+        var environment = runtime.service.environment
+        environment["HF_HUB_DISABLE_XET"] = "1"
+        environment["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+        environment["G4L_HF_XET_MODE"] = "off"
+        environment["G4L_HF_DOWNLOADER_XET_MODE"] = "off"
+        return environment
+    }
+
+    private func sa3OfflinePredownloadEnvironment(for runtime: ServiceRuntime) -> [String: String] {
+        var environment = runtime.service.environment
+        if let token = sharedHuggingFaceToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty {
+            environment["HF_TOKEN"] = token
+            environment["HUGGING_FACE_HUB_TOKEN"] = token
+        }
+        environment["SA3_PEAK_NORMALIZE_DB"] = sa3PeakNormalizeDb
+        environment["SA3_LIMITER_CEILING_DB"] = sa3LimiterCeilingDb
+        environment["SA3_LATENT_RESCALE"] = sa3LatentRescale
+        environment["SA3_LATENT_SHIFT"] = sa3LatentShift
+        environment["SA3_LATENT_TARGET_STD"] = sa3LatentTargetStd
+        environment["SA3_CONTINUE_TAIL_PAD"] = sa3ContinuationTailPad
+        environment["SA3_MLX_DIT_DTYPE"] = sa3UseFP32DiT ? "float32" : "float16"
+        return environment
+    }
+
+    private func stableAudioOfflinePredownloadEnvironment(for runtime: ServiceRuntime) -> [String: String] {
+        var environment = runtime.service.environment
+        if let token = sharedHuggingFaceToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty {
+            environment["HF_TOKEN"] = token
+            environment["HUGGING_FACE_HUB_TOKEN"] = token
+        }
+        environment["HF_HUB_DISABLE_XET"] = "1"
+        environment["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+        environment["G4L_HF_XET_MODE"] = "off"
+        environment["G4L_HF_DOWNLOADER_XET_MODE"] = "off"
+        return environment
     }
 
     private func restartSA3IfRunning() -> Bool {
@@ -3293,6 +4456,20 @@ final class ControlCenterViewModel: ObservableObject {
             return expandedFileURL(from: configured)
         }
         return defaultCareyStorageDirectory().appendingPathComponent("captions.json")
+    }
+
+    private func careyCheckpointDirectoryURL() -> URL {
+        if let configured = currentCareyRuntime()?.service.environment["ACESTEP_CHECKPOINT_DIR"]?.nilIfEmpty {
+            return expandedFileURL(from: configured)
+        }
+        if let configured = currentCareyRuntime()?.service.environment["CAREY_CHECKPOINT_DIR"]?.nilIfEmpty {
+            return expandedFileURL(from: configured)
+        }
+        return URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent(
+                "Library/Application Support/GaryLocalhost/cache/carey/checkpoints",
+                isDirectory: true
+            )
     }
 
     private func careyLoraCatalogURL() -> URL {
@@ -3777,7 +4954,7 @@ final class ControlCenterViewModel: ObservableObject {
         }
     }
 
-    private static func runLocalProcess(
+    nonisolated private static func runLocalProcess(
         executableURL: URL,
         arguments: [String],
         currentDirectory: URL? = nil,
@@ -3807,6 +4984,252 @@ final class ControlCenterViewModel: ObservableObject {
         } catch {
             return (1, "failed to launch \(executableURL.lastPathComponent): \(error.localizedDescription)")
         }
+    }
+
+    nonisolated private static func loadLocalPredownloadCatalogOutputs(
+        executableURL: URL,
+        helperURL: URL,
+        currentDirectory: URL,
+        environment: [String: String]
+    ) -> Result<(catalogOutput: String, statusOutput: String), Error> {
+        let catalogResult = runLocalProcess(
+            executableURL: executableURL,
+            arguments: [helperURL.path, "catalog"],
+            currentDirectory: currentDirectory,
+            environment: environment
+        )
+        guard catalogResult.exitCode == 0 else {
+            return .failure(
+                NSError(
+                    domain: "ControlCenterViewModel",
+                    code: 5001,
+                    userInfo: [NSLocalizedDescriptionKey: catalogResult.output]
+                )
+            )
+        }
+
+        let statusResult = runLocalProcess(
+            executableURL: executableURL,
+            arguments: [helperURL.path, "status"],
+            currentDirectory: currentDirectory,
+            environment: environment
+        )
+        guard statusResult.exitCode == 0 else {
+            return .failure(
+                NSError(
+                    domain: "ControlCenterViewModel",
+                    code: 5002,
+                    userInfo: [NSLocalizedDescriptionKey: statusResult.output]
+                )
+            )
+        }
+        return .success((catalogOutput: catalogResult.output, statusOutput: statusResult.output))
+    }
+
+    private func applyOfflinePredownloadCatalogResult(
+        _ result: Result<(catalogOutput: String, statusOutput: String), Error>,
+        expectedHelperName: String
+    ) {
+        switch result {
+        case .success(let outputs):
+            do {
+                let decoder = JSONDecoder()
+                let catalog = try decoder.decode(
+                    RemoteModelsResponse.self,
+                    from: Self.jsonDataFromProcessOutput(outputs.catalogOutput)
+                )
+                let statuses = try decoder.decode(
+                    RemoteDownloadStatusResponse.self,
+                    from: Self.jsonDataFromProcessOutput(outputs.statusOutput)
+                )
+
+                var models = flattenRemoteModels(catalog.models)
+                for index in models.indices {
+                    if let status = statuses.models[models[index].path] {
+                        models[index].downloaded = status.downloaded
+                        if status.downloaded {
+                            models[index].statusMessage = "downloaded"
+                        } else if let missing = status.missing, !missing.isEmpty {
+                            models[index].statusMessage = "missing \(missing.count) dependency\(missing.count == 1 ? "" : "ies")"
+                        } else {
+                            models[index].statusMessage = "not downloaded"
+                        }
+                    } else {
+                        models[index].statusMessage = "unknown"
+                    }
+                }
+                downloadableModels = models
+                modelDownloadStatusMessage = "pick a model to pre-download for offline usage."
+            } catch {
+                downloadableModels = []
+                modelDownloadStatusMessage = "failed to parse \(expectedHelperName) output: \(error.localizedDescription)"
+            }
+        case .failure(let error):
+            downloadableModels = []
+            modelDownloadStatusMessage = error.localizedDescription
+        }
+
+        isModelCatalogLoading = false
+    }
+
+    nonisolated private static func runStreamingLocalProcess(
+        executableURL: URL,
+        arguments: [String],
+        currentDirectory: URL? = nil,
+        environment: [String: String] = [:],
+        onOutputLine: (@Sendable (String) -> Void)? = nil
+    ) -> (exitCode: Int32, output: String) {
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = arguments
+        process.currentDirectoryURL = currentDirectory
+
+        var inheritedEnvironment = ProcessInfo.processInfo.environment
+        for (key, value) in environment {
+            inheritedEnvironment[key] = value
+        }
+        process.environment = inheritedEnvironment
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        do {
+            try process.run()
+            let outputReader = pipe.fileHandleForReading
+            var lineBuffer = Data()
+            var outputLines: [String] = []
+
+            func emitLine(_ rawLine: String) {
+                let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !line.isEmpty else { return }
+                outputLines.append(line)
+                if outputLines.count > 200 {
+                    outputLines.removeFirst(outputLines.count - 200)
+                }
+                onOutputLine?(line)
+            }
+
+            while true {
+                let chunk = outputReader.availableData
+                if chunk.isEmpty {
+                    break
+                }
+                lineBuffer.append(chunk)
+
+                while let newlineIndex = lineBuffer.firstIndex(of: 0x0A) {
+                    let lineData = lineBuffer.subdata(in: lineBuffer.startIndex..<newlineIndex)
+                    lineBuffer.removeSubrange(lineBuffer.startIndex...newlineIndex)
+                    emitLine(String(decoding: lineData, as: UTF8.self))
+                }
+            }
+
+            if !lineBuffer.isEmpty {
+                emitLine(String(decoding: lineBuffer, as: UTF8.self))
+            }
+
+            process.waitUntilExit()
+            return (process.terminationStatus, outputLines.suffix(4).joined(separator: " | "))
+        } catch {
+            return (1, "failed to launch \(executableURL.lastPathComponent): \(error.localizedDescription)")
+        }
+    }
+
+    nonisolated private static func jsonDataFromProcessOutput(_ output: String) throws -> Data {
+        let jsonLine = output
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .last { !$0.isEmpty }
+
+        guard let jsonLine, !jsonLine.isEmpty else {
+            throw NSError(
+                domain: "ControlCenterViewModel",
+                code: 5003,
+                userInfo: [NSLocalizedDescriptionKey: "expected JSON output from foundation helper."]
+            )
+        }
+
+        return Data(jsonLine.utf8)
+    }
+
+    nonisolated private static func userFacingStableAudioPredownloadFailureMessage(from output: String) -> String {
+        let filteredLines = output
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { line in
+                !line.isEmpty
+                && !line.localizedCaseInsensitiveContains("Riffs directory not found")
+                && !line.localizedCaseInsensitiveContains("pkg_resources is deprecated as an API")
+            }
+
+        let filteredOutput = filteredLines.joined(separator: "\n")
+        if let response = stableAudioPredownloadStatusFromProcessOutput(filteredOutput) {
+            let queueMessage = response.queueMessage?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let errorMessage = response.error?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let candidate: String
+            if !errorMessage.isEmpty {
+                candidate = errorMessage
+            } else if !queueMessage.isEmpty {
+                candidate = queueMessage
+            } else {
+                candidate = filteredOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return sanitizeStableAudioPredownloadMessage(candidate)
+        }
+
+        return sanitizeStableAudioPredownloadMessage(
+            filteredOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    nonisolated private static func stableAudioPredownloadStatusFromProcessOutput(
+        _ output: String
+    ) -> (error: String?, queueMessage: String?)? {
+        let candidates = output
+            .components(separatedBy: "\n")
+            .flatMap { line in line.components(separatedBy: " | ") }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        for candidate in candidates.reversed() {
+            guard candidate.first == "{", candidate.last == "}" else { continue }
+            guard let data = candidate.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+                continue
+            }
+
+            let error = json["error"] as? String
+            let queueStatus = json["queue_status"] as? [String: Any]
+            let queueMessage = queueStatus?["message"] as? String
+            if error != nil || queueMessage != nil {
+                return (error: error, queueMessage: queueMessage)
+            }
+        }
+        return nil
+    }
+
+    nonisolated private static func sanitizeStableAudioPredownloadMessage(_ message: String?) -> String {
+        let trimmed = message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else {
+            return "stable audio download failed."
+        }
+
+        let lower = trimmed.lowercased()
+        if lower.contains("hf_token is required") {
+            return "save your hugging face token in jerry setup first."
+        }
+        if lower.contains("invalid user token")
+            || lower.contains("token from hf_token environment variable is invalid")
+            || lower.contains("authorization header")
+            || lower.contains("invalid credentials")
+            || (lower.contains("401") && lower.contains("token"))
+            || (lower.contains("hf_token") && lower.contains("invalid"))
+            || (lower.contains("hugging face") && lower.contains("token") && lower.contains("invalid")) {
+            return "saved hugging face token was rejected. Open token settings, paste a fresh token, and try again."
+        }
+
+        return trimmed
     }
 
     private func modelDownloadAPIBaseURL(for serviceID: String) -> URL? {
@@ -3850,6 +5273,41 @@ final class ControlCenterViewModel: ObservableObject {
         }
     }
 
+    private func foundationPredownloadHelperURL(for runtime: ServiceRuntime) -> URL? {
+        let helperURL = runtime.service.workingDirectory
+            .appendingPathComponent("foundation_predownload_cli.py")
+            .standardizedFileURL
+        return FileManager.default.fileExists(atPath: helperURL.path) ? helperURL : nil
+    }
+
+    private func garyPredownloadHelperURL(for runtime: ServiceRuntime) -> URL? {
+        let helperURL = runtime.service.workingDirectory
+            .appendingPathComponent("g4l_predownload_cli.py")
+            .standardizedFileURL
+        return FileManager.default.fileExists(atPath: helperURL.path) ? helperURL : nil
+    }
+
+    private func melodyflowPredownloadHelperURL(for runtime: ServiceRuntime) -> URL? {
+        let helperURL = runtime.service.workingDirectory
+            .appendingPathComponent("melodyflow_predownload_cli.py")
+            .standardizedFileURL
+        return FileManager.default.fileExists(atPath: helperURL.path) ? helperURL : nil
+    }
+
+    private func stableAudioPredownloadHelperURL(for runtime: ServiceRuntime) -> URL? {
+        let helperURL = runtime.service.workingDirectory
+            .appendingPathComponent("stable_predownload_cli.py")
+            .standardizedFileURL
+        return FileManager.default.fileExists(atPath: helperURL.path) ? helperURL : nil
+    }
+
+    private func sa3PredownloadHelperURL(for runtime: ServiceRuntime) -> URL? {
+        let helperURL = runtime.service.workingDirectory
+            .appendingPathComponent("sa3_predownload_cli.py")
+            .standardizedFileURL
+        return FileManager.default.fileExists(atPath: helperURL.path) ? helperURL : nil
+    }
+
     private func ensureHTTP200(response: URLResponse, body: Data) throws {
         guard let http = response as? HTTPURLResponse else {
             throw NSError(
@@ -3888,6 +5346,11 @@ final class ControlCenterViewModel: ObservableObject {
             .sink { [weak self] _ in
                 self?.logRefreshTask?.cancel()
                 self?.modelDownloadPollTask?.cancel()
+                self?.foundationLocalDownloadTask?.cancel()
+                self?.garyLocalDownloadTask?.cancel()
+                self?.melodyflowLocalDownloadTask?.cancel()
+                self?.stableAudioLocalDownloadTask?.cancel()
+                self?.sa3LocalDownloadTask?.cancel()
                 self?.careyDownloadTask?.cancel()
                 self?.manager?.shutdownForApplicationTermination()
             }
