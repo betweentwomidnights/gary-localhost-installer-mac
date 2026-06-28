@@ -1,113 +1,145 @@
 # gary4local (macOS)
 
-This repository combines the local backend environments used by the Gary plugin stack on Apple Silicon macOS.
+this is the macOS control center and localhost stack for running the gary model
+backends directly on Apple Silicon.
 
-It pairs with [gary4juce](https://github.com/betweentwomidnights/gary4juce) and now includes a working macOS Swift app target (`gary4local`) that manages local services from a window + menu bar control center.
+it pairs with [gary4juce](https://github.com/betweentwomidnights/gary4juce)
+and now ships as a signed Swift app target, also called `gary4local`, that
+handles service lifecycle, logs, setup flows, model downloads, and update
+checks from a normal desktop app instead of a pile of terminal tabs.
 
-## Maintainer Note
+if you want the Windows version, that's here:
+[gary-localhost-installer](https://github.com/betweentwomidnights/gary-localhost-installer).
 
-this README is currently somewhat of a placeholder, and mostly maintained by robots. i am currently feeling pretty overwhelmed by the size of this project as a solo developer, and proper human documentation has not been top of mind on this particular repo. apologies.
+## v0.1.11
 
-## Current Note
+`v0.1.11` is the mac release paired with
+[gary4juce v4.0.4-mac](https://github.com/betweentwomidnights/gary4juce/releases/tag/v4.0.4-mac).
 
-- fair warning: i am not super happy with training and generation time for ace-step on the MLX path right now, but the machine we use for testing is a MacBook Air with 32GB of unified memory. my hope is that the experience is better on more powerful Apple Silicon MacBooks, and we will keep looking for sensible optimizations.
-- Auto-updater is now implemented in `gary4local` using Sparkle 2.
-- Recommended companion build for the current SA3 macOS release train: [gary4juce v4.0.4-mac](https://github.com/betweentwomidnights/gary4juce/releases/tag/v4.0.4-mac).
-- `foundation-1` has now been successfully added to `gary4local`, including model download flow, prompt randomization support, text generation, and audio2audio on the macOS MLX path.
-- Carey now includes the regular and XL `ace-step-v15-{base,sft,turbo}` model family toggle in `gary4local`, aligned with the Windows `gary-localhost-installer` flow.
-- Stable Audio 3 now includes local LoRA training on macOS, built as an MLX path with parity to the [Dada Bots `underfit`](https://github.com/dada-bots/underfit) trainer while we work toward upstreaming the implementation.
-- TODO: investigate surfacing runtime generation failures, especially Carey stack traces, through the same popup/reporting UX currently used for build failures.
-- TODO: defer Stable Audio Hugging Face token lookup until the jerry service is actually used, or replace the current launch-time Keychain read with a less intrusive storage/auth flow.
+the main fix in this one is carey parity around `genre_ratio` during ACE-Step
+LoRA training. on the mac path we now pre-encode the relevant tracks twice so
+the per-epoch genre-vs-caption behavior matches the windows flow and the dice
+button logic lines up with what the UI says it's doing.
 
-## Planned Auto-Update Flow
+older Sparkle release notes live under
+[`docs/updates/gary4local/release-notes/`](docs/updates/gary4local/release-notes/).
 
-`gary4local` is distributed outside the Mac App Store, so update hosting and installation will remain developer-managed.
+## what lives here
 
-The target production flow is:
+- `gary4local/`
+  the active macOS Swift app target and Xcode project.
+- `ace-lego/`
+  the Carey / ACE-Step localhost backend, plus the wrapper flow used by the mac
+  app.
+- `audiocraft-mlx/`
+  the MLX path used for local Audiocraft / MusicGen continuation work.
+- `melodyflow/`
+  the MelodyFlow localhost backend.
+- `sa3/`
+  the Stable Audio 3 localhost backend and mac training flow.
+- `stable-audio-tools/`
+  the vendored Stable Audio runtime pieces still used on this stack.
+- `foundation/`
+  the local `foundation-1` runtime path.
+- `control-center/`
+  an older Swift package prototype plus manifest and packaging docs that are
+  still useful as reference material.
 
-- GitHub Releases hosts the notarized `gary4local` DMG asset.
-- GitHub Pages hosts a stable Sparkle appcast URL that installed apps poll.
-- Releasing a new version means:
-  - build/sign/notarize the DMG
-  - upload it to GitHub Releases
-  - update the stable appcast on GitHub Pages
+## what ships right now
 
-Design and maintainer docs live here:
+- a signed + notarized Apple Silicon macOS app with Sparkle-based in-app
+  updates.
+- a local control center that can start, stop, restart, rebuild, and monitor
+  the backend services without dropping straight into shell scripts.
+- carey on the mac path, including the regular and XL
+  `ace-step-v15-{base,sft,turbo}` model family flow.
+- `foundation-1` on the MLX path, including model download flow, prompt
+  randomization support, text generation, and audio2audio.
+- MelodyFlow with backend switching between `mps`,
+  `mlx_native_torch_codec`, and `mlx_native_mlx_codec`.
+- Stable Audio 3 on Apple Silicon, including local LoRA training, prompt-pool
+  building, continuation, adapter registration, and the related UI inside
+  `gary4local`.
 
-- `docs/updates/README.md`
-- `docs/releasing/SPARKLE_RELEASE.md`
-- `docs/sa3/README.md`
+the main localhost endpoints in the production manifest are:
 
-## Monorepo Layout
+- `audiocraft-mlx`: `http://127.0.0.1:8000`
+- `melodyflow`: `http://127.0.0.1:8002`
+- `carey`: `http://127.0.0.1:8003`
+- `sa3`: `http://127.0.0.1:8006`
+- `foundation-1`: `http://127.0.0.1:8015`
 
-- `ace-lego/`: Carey (ACE-Step) localhost backend + wrapper used by `gary4local`
-- `audiocraft-mlx/`: MusicGen continuation localhost backend (MLX path)
-- `melodyflow/`: MelodyFlow localhost backend (custom MPS-enabled AudioCraft fork)
-- `stable-audio-tools/`: Stable Audio localhost backend (custom MPS-enabled fork)
-- `control-center/`: earlier Swift package prototype + manifest/docs
-- `gary4local/`: active macOS app target in Xcode
+## repo layout notes
 
-## Staging Repos
+- development runs directly from this repo.
+- release builds stage the runtime trees into the app bundle under
+  `Contents/Resources/runtime/`.
+- mutable runtime data stays outside the app bundle.
+- app support, venvs, models, and caches live under
+  `~/Library/Application Support/GaryLocalhost/`.
+- logs live under `~/Library/Logs/GaryLocalhost/`.
+- the production service manifest lives at
+  `control-center/manifest/services.production.json` and gets staged into the
+  app resources at build time.
 
-These staging repos are used to validate MLX integrations before promoting minimal runtime code into this repo:
+## rough edges
 
-- [ace-lego](https://github.com/betweentwomidnights/ace-lego) (staging ground for the `ace-lego/` folder vendored in this repository)
-- [stable-audio-mlx](https://github.com/betweentwomidnights/stable-audio-mlx)
-- [melodyflow-mlx](https://github.com/betweentwomidnights/melodyflow-mlx)
+- i am still not especially happy with ACE-Step training and generation speed
+  on the MLX path. most of the testing here has been on a MacBook Air with
+  `32 GB` of unified memory, so some of this may just be "don't expect miracles
+  from the air."
+- some runtime failures, especially Carey-side failures, still explain
+  themselves better in logs than they do in the UI.
+- the SA3 auth and token flow is better than it was, but it still has enough
+  weirdness that i don't consider that part "done."
 
-## Current Status
+## auto-updater
 
-### Shipping Now
+this repo now uses Sparkle 2.
 
-- `gary4local` is now a signed + notarized Apple Silicon macOS app with Sparkle-based in-app updates.
-- The Swift control center and menu bar app handle per-service start/stop/restart/rebuild, bounded live logs, setup flows, and local model/runtime management.
-- Service startup still clears conflicting listeners on the expected ports so restart behavior is a little more forgiving than a bare terminal workflow.
-- The shipped service stack currently includes:
-  - Carey (ACE-Step), including the regular / XL `base`, `sft`, and `turbo` model-family flow now used on the current Gary side.
-  - `foundation-1` on the MLX path, including model download flow, prompt randomization, text generation, and audio2audio.
-  - MelodyFlow with backend switching between `mps`, `mlx_native_torch_codec`, and `mlx_native_mlx_codec`.
-  - Stable Audio 3 on the Apple Silicon MLX path, including gated model download flow, generation/continuation, LoRA registration, prompt-pool building, and user-facing loudness / DiT precision controls.
-- Stable Audio 3 also now includes local LoRA training on macOS, built as an MLX path with parity to the [Dada Bots `underfit`](https://github.com/dada-bots/underfit) workflow. That includes dataset prompt editing, persistent job state, log tailing, cancellation, and automatic `.safetensors` adapter registration for `gary4juce`.
-- The release flow is live now, not theoretical: Developer ID signing, notarization, GitHub Releases, Sparkle appcasts, and release-notes pages are all part of the shipping path.
+the production flow is:
 
-### Near-Term Cleanup
+- GitHub Releases hosts the notarized `gary4local` DMG.
+- GitHub Pages hosts the stable Sparkle appcast.
+- a new mac release becomes visible to installed apps when the stable appcast
+  is updated.
 
-- proper cross-repo README cleanup across `gary-localhost-installer`, `gary-localhost-installer-mac`, and `gary4juce`
-- better surfacing of runtime failures, especially places where backend stack traces still hide in logs instead of showing up in the app
-- continued UX cleanup around SA3-specific quirks like token setup, prompt-pool building, continuation modes, and training expectations
-- continued trimming of bundle-only clutter while preserving the local runtimes we actually need to ship
+maintainer docs for that live in:
 
-### Runtime Packaging
+- [`docs/releasing/SPARKLE_RELEASE.md`](docs/releasing/SPARKLE_RELEASE.md)
+- [`docs/updates/README.md`](docs/updates/README.md)
 
-- Release builds stage the backend runtime trees into app resources during build:
-  - `Contents/Resources/runtime/ace-lego`
-  - `Contents/Resources/runtime/audiocraft-mlx`
-  - `Contents/Resources/runtime/melodyflow`
-  - `Contents/Resources/runtime/sa3`
-  - `Contents/Resources/runtime/stable-audio-tools`
-  - `Contents/Resources/runtime/foundation`
-- The production manifest is staged to:
-  - `Contents/Resources/manifest/services.production.json`
-- Mutable user data remains outside the app bundle:
-  - venvs/caches/models: `~/Library/Application Support/GaryLocalhost/`
-  - logs: `~/Library/Logs/GaryLocalhost/`
-- Build helpers:
-  - trusted Apple Silicon handoff build from an Intel Mac: `./scripts/build_gary4local_adhoc_dmg.sh`
-  - notarized Developer ID DMG: `./scripts/build_gary4local_release_dmg.sh`
-- Maintainer docs for the release/update path live in:
-  - `docs/releasing/SPARKLE_RELEASE.md`
-  - `docs/updates/README.md`
+## useful commands
 
-## Rebuild Python Environments
-
-From a fresh clone, rebuild all three service virtualenvs with:
+rebuild all Python environments from a fresh clone:
 
 ```bash
-cd /path/to/gary-localhost-installer-mac
 ./scripts/rebuild_venvs.sh
 ```
 
-Optional flags:
-- `--python /path/to/python3.11` to pin a specific interpreter (Python `3.11+` required)
-- `--recreate` to delete and recreate existing `.venv` folders
-- `--no-upgrade-tools` to skip `pip/setuptools/wheel` upgrades
+build an ad hoc Apple Silicon DMG for trusted handoff testing:
+
+```bash
+./scripts/build_gary4local_adhoc_dmg.sh
+```
+
+build the signed + notarized release DMG:
+
+```bash
+./scripts/build_gary4local_release_dmg.sh
+```
+
+## staging repos
+
+these repos are where some of the MLX and localhost-specific work gets proven
+out before smaller runtime slices get promoted back into this one:
+
+- [ace-lego](https://github.com/betweentwomidnights/ace-lego)
+- [stable-audio-mlx](https://github.com/betweentwomidnights/stable-audio-mlx)
+- [melodyflow-mlx](https://github.com/betweentwomidnights/melodyflow-mlx)
+
+## related repos
+
+- [gary4juce](https://github.com/betweentwomidnights/gary4juce)
+- [gary-localhost-installer](https://github.com/betweentwomidnights/gary-localhost-installer)
+- [gary-lora-examples](https://github.com/betweentwomidnights/gary-lora-examples)
