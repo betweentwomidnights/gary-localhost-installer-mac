@@ -851,6 +851,48 @@ def load_pipeline(force: bool = False) -> StableAudioMLXPipeline:
             model_loading = False
 
 
+def refresh_loras_in_place() -> bool:
+    """Rebuild adapter sets on the resident pipeline, without reconstructing it.
+
+    Adding, switching, or removing a LoRA does not change any model weights, so
+    there is no reason to rebuild the DiT, T5Gemma, and autoencoder from the
+    PyTorch checkpoint -- that costs roughly 24 seconds and is the dominant
+    latency in the train/audition loop.
+
+    Returns False when nothing is loaded yet, in which case the caller should
+    fall back to a full ``load_pipeline``.
+    """
+
+    global lora_registry, lora_name_to_index
+
+    with model_lock:
+        if pipe is None or not model_loaded:
+            return False
+
+        registry = configured_loras()
+        # Order matters. MLXLoRASet snapshots pristine base weights into
+        # _base_params on its first apply and recomputes from that snapshot
+        # every time. A *new* set snapshots whatever is in the module when it
+        # first applies, so it must not be built while the previous adapters
+        # are still applied -- it would treat base+delta_old as its base and
+        # permanently bake the old LoRA in. clear_lora() restores the pristine
+        # weights from the outgoing set and resets the applied-signature cache
+        # so the incoming set is actually applied at the next generation.
+        pipe.clear_lora()
+        if registry:
+            pipe.load_lora(
+                [path for _, path in registry],
+                names=[name for name, _ in registry],
+            )
+            print(f"[sa3] refreshed {len(registry)} LoRA(s) in place: {[name for name, _ in registry]}")
+        else:
+            print("[sa3] refreshed LoRAs in place: none configured")
+
+        lora_registry = registry
+        lora_name_to_index = {name: i for i, (name, _) in enumerate(registry)}
+        return True
+
+
 def unload_pipeline() -> dict[str, Any]:
     global pipe, model_loaded, model_error
     with model_lock:
@@ -1917,12 +1959,17 @@ def reload_loras():
         return jsonify({"success": False, "error": "generation in progress - retry when idle"}), 409
     try:
         previous = [name for name, _ in lora_registry]
-        load_pipeline(force=True)
+        started = time.time()
+        refreshed_in_place = refresh_loras_in_place()
+        if not refreshed_in_place:
+            load_pipeline(force=True)
         return jsonify(
             {
                 "success": True,
                 "previous": previous,
                 "loras": lora_payload(lora_registry),
+                "in_place": refreshed_in_place,
+                "elapsed_seconds": round(time.time() - started, 2),
             }
         )
     except Exception as exc:
