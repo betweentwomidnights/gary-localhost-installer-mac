@@ -24,7 +24,7 @@ struct SA3LoraTrainingSheet: View {
     @State private var steps = "2000"
     @State private var rank = "16"
     @State private var adapterType = "dora"
-    @State private var layerScope = "all-projections"
+    @State private var layerScope = "attention-feedforward"
     @State private var cropSeconds = "47"
     @State private var learningRate = "1e-4"
     @State private var saveEvery = "500"
@@ -54,8 +54,8 @@ struct SA3LoraTrainingSheet: View {
     /// Upper bound for the UI crop field. See the note in `startTraining()`.
     private static let maxCropSeconds: Double = 95
     private let layerScopeOptions = [
-        ("all-projections", "all projections (228 layers)"),
-        ("attention-feedforward", "attention + feed-forward (168 layers)"),
+        ("attention-feedforward", "smaller and faster (recommended)"),
+        ("all-projections", "train everything"),
     ]
 
     var body: some View {
@@ -100,7 +100,7 @@ struct SA3LoraTrainingSheet: View {
 
             Divider()
             HStack {
-                Text("powered by the vendored underfit-compatible mlx training path.")
+                Text("trains locally on your mac with mlx. nothing leaves your machine.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -128,7 +128,7 @@ struct SA3LoraTrainingSheet: View {
     private var warnings: some View {
         if serviceIsRunning {
             warning(
-                "stop sa3 before training. inference and training both need the model in unified memory.",
+                "stop sa3 before training. generating and training can't both hold the model in memory.",
                 color: .orange
             )
         }
@@ -147,10 +147,10 @@ struct SA3LoraTrainingSheet: View {
         GroupBox("training setup") {
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
                 GridRow(alignment: .top) {
-                    Text("model contract")
+                    Text("model")
                     Text(
-                        "Trains against Stable Audio 3 medium-base. The exported "
-                            + "adapter is applied to Stable Audio 3 medium during inference."
+                        "trains on the stable audio 3 base model. what comes out "
+                            + "plugs straight into the model you already generate with."
                     )
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -158,7 +158,7 @@ struct SA3LoraTrainingSheet: View {
 
                 GridRow {
                     Text("lora name")
-                    TextField("bell-arpeggio", text: $name)
+                    TextField("my-style", text: $name)
                         .textFieldStyle(.roundedBorder)
                 }
 
@@ -183,23 +183,35 @@ struct SA3LoraTrainingSheet: View {
                         TextField("optional — e.g. my-trigger", text: $triggerText)
                             .textFieldStyle(.roundedBorder)
                         Text(
-                            "Prepended to every caption during training (“trigger, caption”). Leave blank to train on captions alone. It is not written to sidecars or dice prompts."
+                            "goes on the front of every caption while training "
+                                + "(“trigger, caption”), so the word comes to mean this "
+                                + "style. leave it blank to just use your captions. "
+                                + "your prompt files aren't changed either way."
                         )
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
 
-                GridRow {
+                GridRow(alignment: .top) {
                     Text("adapter")
-                    Picker("adapter", selection: $adapterType) {
-                        ForEach(adapterOptions, id: \.0) { option in
-                            Text(option.1).tag(option.0)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Picker("adapter", selection: $adapterType) {
+                            ForEach(adapterOptions, id: \.0) { option in
+                                Text(option.1).tag(option.0)
+                            }
                         }
+                        .labelsHidden()
+                        .frame(maxWidth: 240, alignment: .leading)
+                        .garyPickerAccent()
+                        Text(
+                            "dora seems to blend the best when you stack it with "
+                                + "other loras. the rest are here to experiment with — "
+                                + "honestly, they aren't well tested yet."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
-                    .labelsHidden()
-                    .frame(maxWidth: 240, alignment: .leading)
-                    .garyPickerAccent()
                 }
 
                 GridRow(alignment: .top) {
@@ -214,12 +226,11 @@ struct SA3LoraTrainingSheet: View {
                         .frame(maxWidth: 280, alignment: .leading)
                         .garyPickerAccent()
                         Text(
-                            "Which DiT projections get adapters. All projections is "
-                                + "Gary's default. Attention + feed-forward matches the "
-                                + "official trainer's default, dropping the embedding "
-                                + "and local-conditioning projections for a smaller, "
-                                + "faster adapter. The seconds conditioner is adapted "
-                                + "either way."
+                            "how much of the model your lora touches. the smaller "
+                                + "option trains 169 layers instead of 229, so it "
+                                + "finishes faster and makes a smaller file — and in "
+                                + "our testing it sounds just as good. pick "
+                                + "“train everything” if you'd rather have all 229."
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -244,9 +255,10 @@ struct SA3LoraTrainingSheet: View {
                                 width: 96
                             )
                             Text(
-                                "Samples a new offset on every step. Shorter windows train "
-                                    + "faster and use less memory but do not always begin at "
-                                    + "the song's start."
+                                "how much of a track to train on at once. training "
+                                    + "picks a new random spot in the song every step, "
+                                    + "so it still hears the whole thing. shorter is "
+                                    + "faster and easier on memory."
                             )
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -280,8 +292,9 @@ struct SA3LoraTrainingSheet: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("experimental loudness fix")
                                 Text(
-                                    "normalizes each track's encoded latent RMS; "
-                                        + "pre-encoding will take longer."
+                                    "evens out the volume across your tracks so a "
+                                        + "loud one doesn't dominate. preparing the "
+                                        + "dataset takes longer."
                                 )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -292,13 +305,13 @@ struct SA3LoraTrainingSheet: View {
                         if loudnessFixEnabled {
                             HStack(alignment: .top, spacing: 10) {
                                 numericField(
-                                    "target latent RMS",
+                                    "target level",
                                     text: $targetLatentRMS,
                                     width: 92
                                 )
                                 Text(
-                                    "0.90 matches base-model loudness. "
-                                        + "Lower is quieter; higher is hotter."
+                                    "0.90 matches the base model's loudness. "
+                                        + "lower is quieter, higher is hotter."
                                 )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)

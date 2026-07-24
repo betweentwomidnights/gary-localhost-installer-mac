@@ -61,7 +61,7 @@ struct CareyAceTrainingSheet: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("train ace-step lora with mlx")
                             .font(.title2.weight(.semibold))
-                        Text("prepare ACE sidecars, train LoRA or DoRA, then register it in Carey.")
+                        Text("caption your audio, train an adapter, then use it in carey.")
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -97,7 +97,7 @@ struct CareyAceTrainingSheet: View {
 
                 Divider()
                 HStack {
-                    Text("uses Carey's two-pass ACE preprocessor, then the native MLX adapter trainer.")
+                    Text("trains locally on your mac with mlx. nothing leaves your machine.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -126,7 +126,7 @@ struct CareyAceTrainingSheet: View {
     private var warnings: some View {
         if serviceIsRunning {
             warning(
-                "stop carey before captioning or training. inference, the captioner, and training all need ACE models in unified memory.",
+                "stop carey before captioning or training. generating, captioning, and training can't all hold models in memory at once.",
                 color: .orange
             )
         }
@@ -135,7 +135,7 @@ struct CareyAceTrainingSheet: View {
         }
         if model == "xl-base" {
             warning(
-                "XL-base training requires substantially more memory; the runtime preflight will verify measured headroom before the first batch.",
+                "xl-base needs a lot more memory. we'll check you have enough headroom before the first batch runs.",
                 color: .orange
             )
         }
@@ -153,13 +153,13 @@ struct CareyAceTrainingSheet: View {
                 Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
                     GridRow {
                         Text("lora name")
-                        TextField("billie-style", text: $name)
+                        TextField("my-ace-style", text: $name)
                             .textFieldStyle(.roundedBorder)
                     }
                     GridRow {
                         Text("audio folder")
                         HStack {
-                            TextField("choose a folder with audio; caption / prepare writes .txt sidecars", text: $datasetPath)
+                            TextField("choose a folder of audio files", text: $datasetPath)
                                 .textFieldStyle(.roundedBorder)
                             Button("choose...") { chooseDatasetFolder() }
                             Button("edit prompts / sidecars") {
@@ -170,7 +170,7 @@ struct CareyAceTrainingSheet: View {
                     }
                     GridRow {
                         Text("custom trigger")
-                        TextField("optional shared trigger, such as billie", text: $trigger)
+                        TextField("optional — e.g. my-trigger", text: $trigger)
                             .textFieldStyle(.roundedBorder)
                     }
                 }
@@ -202,7 +202,7 @@ struct CareyAceTrainingSheet: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Toggle("overwrite existing sidecars", isOn: $overwriteCaptions)
                                     .garyCheckboxStyle()
-                                Text("use this only when you want to replace human edits.")
+                                Text("only turn this on if you want to throw away captions you edited by hand.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -212,7 +212,7 @@ struct CareyAceTrainingSheet: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Toggle("BPM/key sanity check", isOn: $bpmKeySanityCheck)
                                     .garyCheckboxStyle()
-                                Text("local tempo and chroma estimates correct obvious LM mistakes; ambiguous values stay editable.")
+                                Text("double-checks the tempo and key it guessed. anything it is unsure about stays editable.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -222,7 +222,7 @@ struct CareyAceTrainingSheet: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("caption and prepare dataset")
                                 .font(.subheadline.weight(.semibold))
-                            Text("captions missing sidecars with understand_music, applies optional BPM/key checks, then writes editable dataset metadata for review.")
+                            Text("listens to any track that does not have a caption yet and writes one, then lets you review everything before training.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -265,7 +265,7 @@ struct CareyAceTrainingSheet: View {
                                 .labelsHidden()
                                 .frame(width: 120)
                                 .garyPickerAccent()
-                                Text("DoRA is recommended; LoRA is the lighter, simpler option.")
+                                Text("dora seems to blend the best when you stack it with other loras. lora is the lighter, simpler option.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -276,7 +276,7 @@ struct CareyAceTrainingSheet: View {
                                 TextField("epochs", text: $epochs)
                                     .textFieldStyle(.roundedBorder)
                                     .frame(width: 74)
-                                Text("one epoch is one pass over every track.")
+                                Text("one epoch is one pass through every track in your folder.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -298,7 +298,7 @@ struct CareyAceTrainingSheet: View {
                                 TextField("max track seconds", text: $maxDuration)
                                     .textFieldStyle(.roundedBorder)
                                     .frame(width: 88)
-                                Text("longer tracks require more memory.")
+                                Text("how much of each track to use. longer needs more memory.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -342,7 +342,7 @@ struct CareyAceTrainingSheet: View {
                                     .labelsHidden()
                                     .frame(width: 220)
                                     .garyPickerAccent()
-                                    Text("advanced training schedule only; try 0.0 for datasets with vocals.")
+                                    Text("changes which part of the noise schedule gets the most attention. try 0.0 if your dataset has vocals.")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -357,7 +357,7 @@ struct CareyAceTrainingSheet: View {
                                     .labelsHidden()
                                     .frame(width: 240)
                                     .garyPickerAccent()
-                                    Text("recommended; distributes rank across attention and feed-forward projections.")
+                                    Text("recommended. spreads the adapter across more of the model instead of just the attention layers.")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -429,19 +429,19 @@ struct CareyAceTrainingSheet: View {
                         }
                     }
 
-                    Text("Use caption / prepare first, review the sidecars, then train.")
+                    Text("use caption / prepare first, review the sidecars, then train.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
                     HStack(spacing: 4) {
-                        Text("To learn more about LoRA training or use a more advanced setup, try")
+                        Text("to learn more about lora training or use a more advanced setup, try")
                         Button("Side-Step") {
                             openSideStep()
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(.blue)
                         .underline()
-                        .help("Open the Side-Step repository in your browser")
+                        .help("open the side-step repository in your browser")
                         Text("by koda-dernet")
                         Text(".")
                     }
