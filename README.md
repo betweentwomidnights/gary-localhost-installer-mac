@@ -11,18 +11,10 @@ checks from a normal desktop app instead of a pile of terminal tabs.
 if you want the Windows version, that's here:
 [gary-localhost-installer](https://github.com/betweentwomidnights/gary-localhost-installer).
 
-## v0.1.11
+## version history
 
-`v0.1.11` is the mac release paired with
-[gary4juce v4.0.4-mac](https://github.com/betweentwomidnights/gary4juce/releases/tag/v4.0.4-mac).
-
-the main thing in this one is that you can now train an ACE-Step LoRA directly
-inside `gary4local`, done in MLX.
-
-the smaller follow-up fix in the same release is carey parity around
-`genre_ratio` during training. on the mac path we now pre-encode the relevant
-tracks twice so the per-epoch genre-vs-caption behavior matches the windows
-flow and the dice button logic lines up with what the UI says it's doing.
+version history moved to [`CHANGELOG.md`](CHANGELOG.md) so this file can stay
+focused on what gary4local is right now.
 
 older Sparkle release notes live under
 [`docs/updates/gary4local/release-notes/`](docs/updates/gary4local/release-notes/).
@@ -95,6 +87,21 @@ the main localhost endpoints in the production manifest are:
   themselves better in logs than they do in the UI.
 - the SA3 auth and token flow is better than it was, but it still has enough
   weirdness that i don't consider that part "done."
+- SA3 still converts pytorch weights to MLX itself instead of using the MLX
+  models stability now hosts on hugging face. we compared them and they come out
+  byte-identical, so the hosted ones would mostly buy us a smaller install —
+  around 18 GB of pytorch weights could go away. the reason it hasn't happened
+  yet is that anyone who already downloaded the pytorch models would have to
+  fetch ~9 GB more and then have the old ones cleaned up for them. that needs
+  its own release with a real download UI and a cleanup step you get to approve,
+  not a surprise migration bolted onto a trainer update.
+- training on full tracks works on the windows build, and it's hidden here. MLX
+  is not memory-efficient enough for it yet: a 190-second window peaks around
+  `29 GiB` and runs about `29 s/step` on a 32 GB machine, and gradient
+  checkpointing only claws back ~2 GiB while costing 45% more time per step.
+  crop length is capped in the UI for the same reason. working out where that
+  memory is actually going is the next thing on the list, and the toggle comes
+  back when it's honest to offer it.
 
 ## auto-updater
 
