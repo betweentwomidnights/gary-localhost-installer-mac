@@ -8,6 +8,9 @@ struct SA3LoraTrainingRequest {
     let steps: Int
     let rank: Int
     let adapterType: String
+    let ditEngine: String
+    let layerScope: String
+    let fullTracks: Bool
     let cropSeconds: Double
     let learningRate: Double
     let saveEvery: Int
@@ -29,6 +32,8 @@ struct SA3LoraTrainingState: Decodable, Equatable {
     let currentStep: Int?
     let maxSteps: Int?
     let adapterType: String?
+    let ditEngine: String?
+    let layerScope: String?
 
     enum CodingKeys: String, CodingKey {
         case jobId = "job_id"
@@ -44,6 +49,8 @@ struct SA3LoraTrainingState: Decodable, Equatable {
         case currentStep = "current_step"
         case maxSteps = "max_steps"
         case adapterType = "adapter_type"
+        case ditEngine = "dit_engine"
+        case layerScope = "layer_scope"
     }
 
     var isActive: Bool {
@@ -169,6 +176,8 @@ final class SA3LoraTrainingManager: ObservableObject {
                 "--steps", String(request.steps),
                 "--rank", String(request.rank),
                 "--adapter-type", request.adapterType,
+                "--dit-engine", request.ditEngine,
+                "--layer-scope", request.layerScope,
                 "--crop-seconds", String(request.cropSeconds),
                 "--learning-rate", String(request.learningRate),
                 "--save-every", String(request.saveEvery),
@@ -181,6 +190,9 @@ final class SA3LoraTrainingManager: ObservableObject {
                 "--catalog-path", catalogURL.path,
                 "--prompts-dir", promptsDirectory.path,
             ]
+            if request.fullTracks {
+                arguments.append("--full-tracks")
+            }
             if request.loudnessFixEnabled {
                 arguments.append(contentsOf: [
                     "--per-track-target-latent-rms",
@@ -214,7 +226,9 @@ final class SA3LoraTrainingManager: ObservableObject {
                 finalCheckpointPath: nil,
                 currentStep: 0,
                 maxSteps: request.steps,
-                adapterType: request.adapterType
+                adapterType: request.adapterType,
+                ditEngine: request.ditEngine,
+                layerScope: request.layerScope
             )
             logText = "Launching the MLX training process...\n"
 
