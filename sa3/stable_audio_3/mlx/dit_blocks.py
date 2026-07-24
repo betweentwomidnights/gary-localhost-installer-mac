@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import math
+import os
 import typing as tp
 
 from stable_audio_3.mlx.runtime import import_mlx_core, import_mlx_nn
 
 mx = import_mlx_core(required=True)
 nn = import_mlx_nn(required=True)
+
+_NAIVE_ROPE = os.environ.get("SA3_MLX_NAIVE_ROPE", "").strip() == "1"
 
 _ATTENTION_MASK_CACHE: dict[tuple[int, int, bool, tuple[int, int] | None, str], tp.Any] = {}
 
@@ -207,6 +210,20 @@ def apply_rotary_pos_emb(t, freqs, scale: float | tp.Any = 1.0):
     t_pass = t[..., rot_dim:]
     t_rot = (t_rot * mx.cos(freqs) * scale) + (rotate_half(t_rot) * mx.sin(freqs) * scale)
     return mx.concatenate([t_rot, t_pass], axis=-1)
+
+
+def apply_fast_rotary_pos_emb(t, freqs):
+    """Fused equivalent of the default half-half Stable Audio RoPE."""
+
+    rot_dim = min(int(freqs.shape[-1]), int(t.shape[-1]))
+    return mx.fast.rope(
+        t,
+        rot_dim,
+        traditional=False,
+        base=10000.0,
+        scale=1.0,
+        offset=0,
+    )
 
 
 class GLU(nn.Module):
@@ -476,29 +493,59 @@ class Attention(nn.Module):
 
         if rotary_pos_emb is not None:
             freqs, _ = rotary_pos_emb
-            q_freqs = freqs
-            if rotary_pos_emb_k is not None:
-                k_freqs, _ = rotary_pos_emb_k
+            use_fast_rope = (
+                not _NAIVE_ROPE
+                and rotary_pos_emb_k is None
+                and int(q.shape[-2]) == int(k.shape[-2])
+            )
+            if use_fast_rope:
+                q = apply_fast_rotary_pos_emb(
+                    q.astype(mx.float32),
+                    freqs,
+                ).astype(v.dtype)
+                k = apply_fast_rotary_pos_emb(
+                    k.astype(mx.float32),
+                    freqs,
+                ).astype(v.dtype)
+                if self.differential:
+                    q_diff = apply_fast_rotary_pos_emb(
+                        q_diff.astype(mx.float32),
+                        freqs,
+                    ).astype(v.dtype)
+                    k_diff = apply_fast_rotary_pos_emb(
+                        k_diff.astype(mx.float32),
+                        freqs,
+                    ).astype(v.dtype)
             else:
-                k_freqs = q_freqs
-                if q.shape[-2] >= k.shape[-2]:
-                    ratio = float(q.shape[-2]) / float(k.shape[-2])
-                    q_freqs, k_freqs = freqs, ratio * freqs
+                q_freqs = freqs
+                if rotary_pos_emb_k is not None:
+                    k_freqs, _ = rotary_pos_emb_k
                 else:
-                    ratio = float(k.shape[-2]) / float(q.shape[-2])
-                    q_freqs, k_freqs = ratio * freqs, freqs
+                    k_freqs = q_freqs
+                    if q.shape[-2] >= k.shape[-2]:
+                        ratio = float(q.shape[-2]) / float(k.shape[-2])
+                        q_freqs, k_freqs = freqs, ratio * freqs
+                    else:
+                        ratio = float(k.shape[-2]) / float(q.shape[-2])
+                        q_freqs, k_freqs = ratio * freqs, freqs
 
-            q = apply_rotary_pos_emb(q.astype(mx.float32), q_freqs.astype(mx.float32)).astype(v.dtype)
-            k = apply_rotary_pos_emb(k.astype(mx.float32), k_freqs.astype(mx.float32)).astype(v.dtype)
-            if self.differential:
-                q_diff = apply_rotary_pos_emb(
-                    q_diff.astype(mx.float32),
+                q = apply_rotary_pos_emb(
+                    q.astype(mx.float32),
                     q_freqs.astype(mx.float32),
                 ).astype(v.dtype)
-                k_diff = apply_rotary_pos_emb(
-                    k_diff.astype(mx.float32),
+                k = apply_rotary_pos_emb(
+                    k.astype(mx.float32),
                     k_freqs.astype(mx.float32),
                 ).astype(v.dtype)
+                if self.differential:
+                    q_diff = apply_rotary_pos_emb(
+                        q_diff.astype(mx.float32),
+                        q_freqs.astype(mx.float32),
+                    ).astype(v.dtype)
+                    k_diff = apply_rotary_pos_emb(
+                        k_diff.astype(mx.float32),
+                        k_freqs.astype(mx.float32),
+                    ).astype(v.dtype)
 
         use_causal = self.causal if causal is None else causal
         if int(q.shape[-2]) == 1 and use_causal:

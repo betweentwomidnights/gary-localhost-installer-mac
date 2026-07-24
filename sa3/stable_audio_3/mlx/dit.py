@@ -461,12 +461,16 @@ class StableAudioMLXDiT(nn.Module):
             sigma = t
             alpha = None
 
-        sigma0 = _as_scalar(sigma)
-        should_cfg = (
-            cfg_scale != 1.0
-            and (cross_attn_cond is not None or prepend_cond is not None)
-            and (cfg_interval[0] <= sigma0 <= cfg_interval[1])
-        )
+        # Converting an MLX array to a Python scalar forces an eager evaluation,
+        # which is illegal while the training step is being transformed by
+        # mx.compile/value_and_grad. Training always uses cfg_scale=1, so only
+        # inspect sigma when inference actually requests classifier-free guidance.
+        should_cfg = False
+        if cfg_scale != 1.0 and (
+            cross_attn_cond is not None or prepend_cond is not None
+        ):
+            sigma0 = _as_scalar(sigma)
+            should_cfg = cfg_interval[0] <= sigma0 <= cfg_interval[1]
 
         if should_cfg:
             batch_inputs = mx.concatenate([x, x], axis=0)
@@ -650,6 +654,54 @@ class StableAudioMLXDiT(nn.Module):
         )
 
     @classmethod
+    def from_hosted_medium_npz(
+        cls,
+        model_config: dict[str, tp.Any],
+        weights_path: str,
+        *,
+        param_dtype=mx.float16,
+    ) -> "StableAudioMLXDiT":
+        """Load the official hosted medium weights into Gary's generic DiT.
+
+        The optimized checkpoint has the same 522 DiT tensors as the generic
+        model. Its only naming differences are MLX RMSNorm's ``weight`` versus
+        Gary's ``gamma`` and the official local-embed wrapper's ``seq`` level.
+        """
+
+        model = cls.from_sao_model_config(model_config, param_dtype=param_dtype)
+        hosted = {
+            key: value
+            for key, value in dict(mx.load(str(weights_path))).items()
+            if not key.startswith("cond.")
+        }
+        updates = []
+        missing = []
+        for target_key, _ in tree_flatten(model.parameters()):
+            source_key = _hosted_medium_source_key(target_key)
+            source = hosted.get(source_key)
+            if source is None:
+                missing.append((target_key, source_key))
+                continue
+            updates.append((target_key, source.astype(param_dtype)))
+        if missing:
+            raise RuntimeError(
+                "Hosted medium NPZ is incompatible with Gary's DiT; "
+                f"missing {len(missing)} tensor(s), e.g. {missing[:3]}"
+            )
+        if len(updates) != len(hosted):
+            used = {_hosted_medium_source_key(key) for key, _ in updates}
+            unexpected = sorted(set(hosted) - used)
+            raise RuntimeError(
+                "Hosted medium NPZ has unexpected DiT tensors; "
+                f"expected {len(updates)}, found {len(hosted)}, "
+                f"e.g. {unexpected[:3]}"
+            )
+        model.load_weights(updates, strict=True)
+        del hosted, updates
+        mx.eval(model.parameters())
+        return model
+
+    @classmethod
     def from_torch_dit(
         cls,
         torch_dit_model,
@@ -668,6 +720,18 @@ def _resolve_torch_state_key(key: str, torch_state_dict: dict[str, tp.Any]) -> s
         if candidate in torch_state_dict:
             return candidate
     return None
+
+
+def _hosted_medium_source_key(target_key: str) -> str:
+    source_key = target_key
+    if ".gamma" in source_key:
+        source_key = source_key.replace(".gamma", ".weight")
+    if ".to_local_embed." in source_key:
+        source_key = source_key.replace(
+            ".to_local_embed.",
+            ".to_local_embed.seq.",
+        )
+    return source_key
 
 
 def _convert_weight_to_mlx_shape(arr: np.ndarray, target_shape: tuple[int, ...]) -> tuple[np.ndarray, bool]:

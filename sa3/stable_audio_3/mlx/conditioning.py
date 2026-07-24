@@ -151,7 +151,15 @@ def with_default_inpaint_tensors(
     *,
     latent_length: int,
     dtype_name: str = "float32",
+    default_inpaint_mode: str = "inference",
 ) -> dict[str, tuple[tp.Any, tp.Any | None]]:
+    """Fill missing local inpaint inputs for pure generation.
+
+    Stable Audio 3 mask semantics are 0=generate and 1=provided context, so
+    omitted inpaint conditioning is an all-zero mask plus zero context in both
+    inference and full-generation training. Trainers that mix inpainting modes
+    supply explicit masks instead of relying on this default.
+    """
     requirements = extract_mlx_port_requirements(model_config)
     normalized = dict(conditioning_tensors)
 
@@ -170,10 +178,17 @@ def with_default_inpaint_tensors(
     batch_size = int(first_tensor.shape[0])
     dtype = getattr(mx, dtype_name)
     io_channels = int(model_config["model"]["diffusion"]["config"]["io_channels"])
+    if default_inpaint_mode in {"inference", "training"}:
+        default_mask = mx.zeros((batch_size, 1, latent_length), dtype=dtype)
+    else:
+        raise ValueError(
+            "default_inpaint_mode must be 'inference' or 'training', "
+            f"got {default_inpaint_mode!r}."
+        )
 
     normalized.setdefault(
         "inpaint_mask",
-        (mx.zeros((batch_size, 1, latent_length), dtype=dtype), None),
+        (default_mask, None),
     )
     normalized.setdefault(
         "inpaint_masked_input",
@@ -189,6 +204,7 @@ def assemble_conditioning_inputs_from_tensors(
     negative: bool = False,
     latent_length: int | None = None,
     dtype_name: str = "float32",
+    default_inpaint_mode: str = "inference",
 ) -> dict[str, tp.Any]:
     requirements = extract_mlx_port_requirements(model_config)
     normalized = normalize_conditioning_tensors(conditioning_tensors, dtype_name=dtype_name)
@@ -199,6 +215,7 @@ def assemble_conditioning_inputs_from_tensors(
             normalized,
             latent_length=latent_length,
             dtype_name=dtype_name,
+            default_inpaint_mode=default_inpaint_mode,
         )
 
     cross_attention_input = None
