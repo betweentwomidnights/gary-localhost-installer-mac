@@ -34,7 +34,7 @@ from mlx_training_assets import (  # noqa: E402
 # mlx just to validate a CLI choice. train_mlx_lora.py is the authority and
 # re-validates the value against the same list.
 LORA_LAYER_SCOPE_CHOICES = ("all-projections", "attention-feedforward")
-LORA_LAYER_SCOPE_DEFAULT = "all-projections"
+LORA_LAYER_SCOPE_DEFAULT = "attention-feedforward"
 
 DEFAULT_TRAINER = Path(__file__).with_name("train_mlx_lora.py")
 STEP_PATTERN = re.compile(r"^step=(\d+)/(\d+)\s+loss=([^\s]+)")

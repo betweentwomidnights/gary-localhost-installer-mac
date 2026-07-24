@@ -229,27 +229,8 @@ def test_job_runner_forwards_full_track_policy(tmp_path: Path) -> None:
     assert state["crop_seconds"] == 285.35
 
 
-def test_job_runner_defaults_to_all_projections_layer_scope(tmp_path: Path) -> None:
+def test_job_runner_defaults_to_the_reduced_layer_scope(tmp_path: Path) -> None:
     command = _command(tmp_path, prompt="bright bells")
-
-    result = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-
-    assert result.returncode == 0, result.stderr
-    log_text = (tmp_path / "run" / "training.log").read_text()
-    assert "--layer-scope all-projections" in log_text
-    state = json.loads((tmp_path / "run" / "status.json").read_text())
-    assert state["layer_scope"] == "all-projections"
-
-
-def test_job_runner_forwards_layer_scope(tmp_path: Path) -> None:
-    command = _command(tmp_path, prompt="bright bells")
-    command.extend(["--layer-scope", "attention-feedforward"])
 
     result = subprocess.run(
         command,
@@ -264,6 +245,25 @@ def test_job_runner_forwards_layer_scope(tmp_path: Path) -> None:
     assert "--layer-scope attention-feedforward" in log_text
     state = json.loads((tmp_path / "run" / "status.json").read_text())
     assert state["layer_scope"] == "attention-feedforward"
+
+
+def test_job_runner_forwards_layer_scope(tmp_path: Path) -> None:
+    command = _command(tmp_path, prompt="bright bells")
+    command.extend(["--layer-scope", "all-projections"])
+
+    result = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    log_text = (tmp_path / "run" / "training.log").read_text()
+    assert "--layer-scope all-projections" in log_text
+    state = json.loads((tmp_path / "run" / "status.json").read_text())
+    assert state["layer_scope"] == "all-projections"
 
 
 def test_job_runner_rejects_unknown_layer_scope(tmp_path: Path) -> None:

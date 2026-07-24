@@ -171,21 +171,37 @@ def test_random_crop_window_keeps_existing_alignment() -> None:
     assert aligned_seconds == pytest.approx(47.5545, abs=0.0001)
 
 
-def test_default_lora_filters_adapt_every_eligible_layer() -> None:
+def test_default_lora_filters_use_the_reduced_layer_scope() -> None:
     include, exclude = _resolve_lora_filters(None, None)
+
+    assert include is None
+    # The reduced scope is the default, so its exclusions apply unasked.
+    assert "to_local_embed" in exclude
+    assert "project_in" in exclude
+
+
+def test_all_projections_scope_adapts_every_eligible_layer() -> None:
+    include, exclude = _resolve_lora_filters(None, None, "all-projections")
 
     assert include is None
     assert exclude == []
 
 
-def test_explicit_lora_filters_override_defaults() -> None:
+def test_explicit_lora_filters_compose_with_the_layer_scope() -> None:
     include, exclude = _resolve_lora_filters(
         ["transformer.layers.[0-3]"],
         ["project_out"],
+        "all-projections",
     )
 
     assert include == ["transformer.layers.[0-3]"]
     assert exclude == ["project_out"]
+
+    # Under the reduced scope the user's filters are kept and the scope's
+    # exclusions are added once, without duplicating project_out.
+    _, scoped = _resolve_lora_filters(None, ["project_out"], "attention-feedforward")
+    assert scoped.count("project_out") == 1
+    assert "to_local_embed" in scoped
 
 
 def test_random_crop_conditioning_preserves_full_source_duration() -> None:
