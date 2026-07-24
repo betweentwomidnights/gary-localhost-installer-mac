@@ -47,3 +47,6 @@ foundation/RC-stable-audio-tools/
 # Local reference clones and accidental package manager residue
 reference/
 /package-lock.json
+
+# Local benchmark workspace (harnesses, results, and audio artifacts)
+bench/
