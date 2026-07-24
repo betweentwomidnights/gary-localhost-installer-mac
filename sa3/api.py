@@ -42,7 +42,7 @@ except Exception:  # pragma: no cover - import diagnostics are surfaced at load 
     snapshot_download = None
     try_to_load_from_cache = None
 
-from stable_audio_3.mlx.pipeline import StableAudioMLXPipeline
+from stable_audio_3.mlx.pipeline import StableAudioMLXPipeline, adapt_sample_size
 from stable_audio_3.mlx.runtime import (
     MLXRuntimeUnavailableError,
     import_mlx_core,
@@ -178,6 +178,10 @@ MLX_AUTOENCODER_DTYPE = env_mlx_dtype(
     os.environ.get("SA3_MLX_DTYPE", MLX_DTYPE),
 )
 MLX_ATTENTION = env_mlx_attention("SA3_MLX_ATTENTION", "sliding")
+# Writing the MLX conversion cache costs ~5 GB of disk to avoid ~20 s of torch
+# conversion on every service start. Reads always happen when an entry exists;
+# this only controls whether a miss writes one.
+SA3_MLX_CACHE_ENABLED = env_bool("SA3_MLX_CACHE", True)
 TORCH_DEVICE = (os.environ.get("SA3_TORCH_DEVICE") or "auto").strip().lower() or "auto"
 TORCH_MODEL_HALF = env_bool(
     "SA3_TORCH_MODEL_HALF",
@@ -802,7 +806,7 @@ def load_pipeline(force: bool = False) -> StableAudioMLXPipeline:
                 f"autoencoder_dtype={MLX_AUTOENCODER_DTYPE} "
                 f"torch_device={TORCH_DEVICE} torch_model_half={TORCH_MODEL_HALF}"
             )
-            loaded = StableAudioMLXPipeline.from_torch_pretrained(
+            loaded = StableAudioMLXPipeline.from_pretrained_cached(
                 MODEL_NAME,
                 torch_device=TORCH_DEVICE,
                 dtype=MLX_DTYPE,
@@ -812,6 +816,7 @@ def load_pipeline(force: bool = False) -> StableAudioMLXPipeline:
                 autoencoder_dtype=MLX_AUTOENCODER_DTYPE,
                 attention=MLX_ATTENTION,
                 model_half=TORCH_MODEL_HALF,
+                write_cache=SA3_MLX_CACHE_ENABLED,
             )
 
             registry = configured_loras()
@@ -827,7 +832,7 @@ def load_pipeline(force: bool = False) -> StableAudioMLXPipeline:
             lora_name_to_index = {name: i for i, (name, _) in enumerate(registry)}
             pipe = loaded
             model_loaded = True
-            model_sample_rate = int(getattr(loaded.torch_pipeline.model, "sample_rate", OUTPUT_SAMPLE_RATE))
+            model_sample_rate = int(getattr(loaded, "sample_rate", OUTPUT_SAMPLE_RATE))
             model_device = f"mlx/{MLX_ATTENTION}"
             last_load_seconds = round(time.time() - started, 2)
             print(
@@ -1434,12 +1439,15 @@ def prepare_latent_prefix_inputs(
 ):
     mx = import_mlx_core(required=True)
     conditioning = [{"prompt": params["prompt"], "seconds_total": params["duration"]}]
-    audio_sample_size = local_pipe.torch_pipeline._adapt_sample_size(
+    audio_sample_size = adapt_sample_size(
+        local_pipe.model_config,
         conditioning,
         MAX_SAMPLE_SIZE,
         6.0,
+        sample_rate=local_pipe.sample_rate,
+        downsampling_ratio=local_pipe.downsampling_ratio,
     )
-    downsampling_ratio = int(local_pipe.torch_pipeline.model.pretransform.downsampling_ratio)
+    downsampling_ratio = int(local_pipe.downsampling_ratio)
     latent_sample_size = int(math.ceil(audio_sample_size / downsampling_ratio))
     fixed_prefix_data = local_pipe._encode_audio_input(
         params["inpaint_audio"],
@@ -1449,7 +1457,7 @@ def prepare_latent_prefix_inputs(
         mlx_dtype=getattr(mx, local_pipe.dtype_name),
         autoencoder_dtype=getattr(mx, local_pipe.autoencoder_dtype_name),
     )
-    prefix_samples = round(float(continuation["source_duration"]) * int(local_pipe.torch_pipeline.model.sample_rate))
+    prefix_samples = round(float(continuation["source_duration"]) * int(local_pipe.sample_rate))
     prefix_tokens = min(
         latent_sample_size,
         max(1, int(round(prefix_samples / downsampling_ratio))),
@@ -1476,7 +1484,7 @@ def generation_worker(session_id: str, params: dict[str, Any]) -> None:
 
         with generation_lock:
             local_pipe = load_pipeline()
-            sr = int(getattr(local_pipe.torch_pipeline.model, "sample_rate", OUTPUT_SAMPLE_RATE))
+            sr = int(getattr(local_pipe, "sample_rate", OUTPUT_SAMPLE_RATE))
             loras = resolve_loras(
                 {
                     "loras": params.get("loras_request"),

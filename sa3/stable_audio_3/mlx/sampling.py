@@ -89,6 +89,35 @@ def distribution_shift_spec_from_model_config(model_config: dict[str, tp.Any]) -
     return distribution_shift_spec_from_options(None)
 
 
+def sampling_distribution_shift_spec_from_model_config(
+    model_config: dict[str, tp.Any],
+) -> DistributionShiftSpec | None:
+    """Reproduce the torch model's inference-time ``sampling_dist_shift``.
+
+    ``StableAudioDiffusionCond`` uses ``sampling_distribution_shift_options``
+    when present and otherwise falls back to a sequence-length-invariant LogSNR
+    shift. It deliberately does **not** fall back to
+    ``distribution_shift_options``, which is the *training* schedule.
+
+    ``distribution_shift_spec_from_model_config`` does fall through to the
+    training options, so it is the wrong helper for inference defaults: for
+    SA3 medium, whose ``sampling_distribution_shift_options`` is null, the two
+    disagree ('logsnr' versus 'full').
+    """
+
+    diffusion = model_config.get("model", {}).get("diffusion", {})
+    options = diffusion.get("sampling_distribution_shift_options")
+    if options is not None:
+        return distribution_shift_spec_from_options(options)
+    return make_distribution_shift_spec(
+        "logsnr",
+        anchor_length=2000,
+        anchor_logsnr=-6.2,
+        rate=0,
+        logsnr_end=2.0,
+    )
+
+
 def training_distribution_shift_spec_from_model_config(
     model_config: dict[str, tp.Any],
 ) -> DistributionShiftSpec | None:

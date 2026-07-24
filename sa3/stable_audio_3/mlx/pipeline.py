@@ -50,6 +50,14 @@ class StableAudioMLXPipeline:
     dtype_name: str = "float32"
     autoencoder_dtype_name: str = "float32"
     attention: str = "sliding"
+    # Model geometry, derived from model_config rather than read off the torch
+    # pipeline, so generation does not require torch to be resident. Note that
+    # `latent_channels` (model.io_channels) and `audio_channels`
+    # (pretransform.io_channels) are different values: 256 and 2 for SA3 medium.
+    sample_rate: int = 44100
+    downsampling_ratio: int = 4096
+    latent_channels: int = 256
+    audio_channels: int = 2
     conversion_reports: dict[str, tp.Any] = field(default_factory=dict)
     lora_paths: tuple[Path, ...] = ()
     lora_labels: tuple[str, ...] = ()
@@ -253,6 +261,285 @@ class StableAudioMLXPipeline:
         )
 
     @classmethod
+    def from_pretrained_cached(
+        cls,
+        model_name_or_path: str,
+        *,
+        cache_root=None,
+        torch_device: str | None = "auto",
+        dtype: str = "float32",
+        dit_dtype: str | None = None,
+        text_dtype: str | None = None,
+        number_dtype: str | None = None,
+        autoencoder_dtype: str | None = None,
+        attention: str = "sliding",
+        model_half: bool = False,
+        search_roots=None,
+        write_cache: bool = True,
+        prune_stale: bool = True,
+    ) -> "StableAudioMLXPipeline":
+        """Load from the MLX conversion cache, converting from torch on a miss.
+
+        A hit skips reading the PyTorch checkpoint entirely, which is where
+        almost all of the ~20-25 second load time lives.
+        """
+
+        from stable_audio_3.mlx import conversion_cache as cache_mod
+
+        resolved_dit = dit_dtype or dtype
+        resolved_text = text_dtype or resolved_dit
+        resolved_number = number_dtype or resolved_dit
+        resolved_autoencoder = autoencoder_dtype or dtype
+        root = Path(cache_root) if cache_root is not None else cache_mod.default_cache_root()
+
+        resolved_config_path = None
+        try:
+            resolved_config_path = resolve_pretrained_config_path(
+                model_name_or_path,
+                search_roots=search_roots,
+            )
+        except Exception:
+            resolved_config_path = None
+
+        key = cache_mod.cache_key(
+            source_name=str(model_name_or_path),
+            resolved_config_path=resolved_config_path,
+            dit_dtype=resolved_dit,
+            text_dtype=resolved_text,
+            number_dtype=resolved_number,
+            autoencoder_dtype=resolved_autoencoder,
+            attention=attention,
+        )
+        entry = cache_mod.cache_dir_for(root, key)
+
+        if cache_mod.is_complete(entry):
+            try:
+                pipeline = cls.from_conversion_cache(
+                    entry,
+                    dit_dtype=resolved_dit,
+                    text_dtype=resolved_text,
+                    number_dtype=resolved_number,
+                    autoencoder_dtype=resolved_autoencoder,
+                    attention=attention,
+                )
+                print(f"[sa3] loaded MLX conversion cache {entry.name}")
+                return pipeline
+            except Exception as exc:
+                # A corrupt or incompatible entry must never be fatal: fall back
+                # to the torch path and rewrite it.
+                print(
+                    f"[sa3] MLX conversion cache unusable ({type(exc).__name__}: {exc});"
+                    " reconverting from torch"
+                )
+
+        pipeline = cls.from_torch_pretrained(
+            model_name_or_path,
+            torch_device=torch_device,
+            dtype=dtype,
+            dit_dtype=dit_dtype,
+            text_dtype=text_dtype,
+            number_dtype=number_dtype,
+            autoencoder_dtype=autoencoder_dtype,
+            attention=attention,
+            model_half=model_half,
+            search_roots=search_roots,
+        )
+        if write_cache:
+            try:
+                pipeline.save_conversion_cache(root, key=key)
+                if prune_stale:
+                    removed = cache_mod.purge_other_entries(root, key)
+                    if removed:
+                        print(f"[sa3] pruned stale MLX cache entries: {removed}")
+            except Exception as exc:
+                print(f"[sa3] could not write MLX conversion cache: {exc}")
+        return pipeline
+
+    def save_conversion_cache(self, cache_root, *, key: str | None = None) -> Path:
+        """Persist the converted MLX components for a torch-free warm start."""
+
+        from stable_audio_3.mlx import conversion_cache as cache_mod
+
+        if not self.generation_ready:
+            raise RuntimeError("Cannot cache a pipeline that is not generation ready.")
+
+        if key is None:
+            key = cache_mod.cache_key(
+                source_name=self.source_name,
+                resolved_config_path=self.resolved_config_path,
+                dit_dtype=self.dtype_name,
+                text_dtype=self.dtype_name,
+                number_dtype=self.dtype_name,
+                autoencoder_dtype=self.autoencoder_dtype_name,
+                attention=self.attention,
+            )
+
+        conditioner = self.text_conditioner
+        number = self.number_conditioner
+        with cache_mod.CacheWriter(cache_root, key) as staging:
+            empty_tensors = {
+                "dit": cache_mod.save_module_weights(
+                    self.mlx_dit, staging / cache_mod.DIT_WEIGHTS
+                ),
+                "text": cache_mod.save_text_encoder(
+                    conditioner.encoder,
+                    conditioner.padding_embedding,
+                    staging / cache_mod.TEXT_WEIGHTS,
+                ),
+                "number": cache_mod.save_module_weights(
+                    number, staging / cache_mod.NUMBER_WEIGHTS
+                ),
+                "autoencoder": cache_mod.save_module_weights(
+                    self.autoencoder,
+                    staging / cache_mod.AUTOENCODER_WEIGHTS,
+                ),
+            }
+            conditioner.tokenizer.save_pretrained(str(staging / cache_mod.TOKENIZER_DIR))
+            cache_mod.write_manifest(
+                staging,
+                {
+                    "empty_tensors": empty_tensors,
+                    "source_name": self.source_name,
+                    "attention": self.attention,
+                    "dtype_name": self.dtype_name,
+                    "autoencoder_dtype_name": self.autoencoder_dtype_name,
+                    "model_config": self.model_config,
+                    "text_encoder_config": dict(conditioner.encoder.config),
+                    "text_conditioner": {
+                        "max_length": int(conditioner.max_length),
+                        "padding_mode": str(conditioner.padding_mode),
+                    },
+                    "number_conditioner": {
+                        "output_dim": int(number.output_dim),
+                        "min_val": float(number.min_val),
+                        "max_val": float(number.max_val),
+                        "fourier_features_dim": int(number.features.dim),
+                        "fourier_features_type": str(number.fourier_features_type),
+                    },
+                },
+            )
+
+        entry = cache_mod.cache_dir_for(cache_root, key)
+        size_gib = cache_mod.entry_size_bytes(entry) / (1024**3)
+        print(f"[sa3] wrote MLX conversion cache {entry.name} ({size_gib:.2f} GiB)")
+        return entry
+
+    @classmethod
+    def from_conversion_cache(
+        cls,
+        cache_dir,
+        *,
+        dit_dtype: str = "float16",
+        text_dtype: str | None = None,
+        number_dtype: str | None = None,
+        autoencoder_dtype: str | None = None,
+        attention: str = "sliding",
+    ) -> "StableAudioMLXPipeline":
+        """Rebuild every component from config and cached MLX weights."""
+
+        require_mlx_runtime()
+        from stable_audio_3.mlx import conversion_cache as cache_mod
+        from stable_audio_3.mlx.autoencoder import MLXAudioAutoencoder
+        from stable_audio_3.mlx.conditioning import MLXNumberConditioner
+        from stable_audio_3.mlx.dit import StableAudioMLXDiT
+        from stable_audio_3.mlx.t5gemma import T5GemmaEncoder, T5GemmaTextConditioner
+        from transformers import AutoTokenizer
+
+        mx = import_mlx_core(required=True)
+        directory = Path(cache_dir)
+        manifest = cache_mod.read_manifest(directory)
+        model_config = manifest["model_config"]
+
+        text_dtype = text_dtype or dit_dtype
+        number_dtype = number_dtype or dit_dtype
+        autoencoder_dtype = autoencoder_dtype or dit_dtype
+        geometry = model_geometry_from_config(model_config)
+        empty_tensors = manifest.get("empty_tensors") or {}
+
+        mlx_dit = StableAudioMLXDiT.from_sao_model_config(
+            model_config,
+            param_dtype=getattr(mx, dit_dtype),
+        )
+        cache_mod.load_module_weights(
+            mlx_dit,
+            directory / cache_mod.DIT_WEIGHTS,
+            empty_tensors.get("dit"),
+        )
+
+        encoder = T5GemmaEncoder(
+            manifest["text_encoder_config"],
+            param_dtype=getattr(mx, text_dtype),
+        )
+        padding_embedding = cache_mod.load_text_encoder(
+            encoder,
+            directory / cache_mod.TEXT_WEIGHTS,
+            empty_tensors.get("text"),
+        )
+        text_settings = manifest["text_conditioner"]
+        text_conditioner = T5GemmaTextConditioner(
+            encoder=encoder,
+            tokenizer=AutoTokenizer.from_pretrained(
+                str(directory / cache_mod.TOKENIZER_DIR)
+            ),
+            max_length=int(text_settings["max_length"]),
+            padding_mode=str(text_settings["padding_mode"]),
+            padding_embedding=padding_embedding,
+        )
+
+        number_settings = manifest["number_conditioner"]
+        number_conditioner = MLXNumberConditioner(
+            output_dim=int(number_settings["output_dim"]),
+            min_val=float(number_settings["min_val"]),
+            max_val=float(number_settings["max_val"]),
+            fourier_features_dim=int(number_settings["fourier_features_dim"]),
+            fourier_features_type=str(number_settings["fourier_features_type"]),
+            param_dtype=getattr(mx, number_dtype),
+        )
+        cache_mod.load_module_weights(
+            number_conditioner,
+            directory / cache_mod.NUMBER_WEIGHTS,
+            empty_tensors.get("number"),
+        )
+
+        autoencoder = MLXAudioAutoencoder.from_config(
+            model_config,
+            sample_rate=geometry["sample_rate"],
+            use_sliding_window=attention == "sliding",
+            param_dtype=getattr(mx, autoencoder_dtype),
+        )
+        cache_mod.load_module_weights(
+            autoencoder,
+            directory / cache_mod.AUTOENCODER_WEIGHTS,
+            empty_tensors.get("autoencoder"),
+        )
+        # Match the torch conversion path: no stochastic softnorm noise.
+        autoencoder.bottleneck.noise_regularize = False
+
+        source_name = str(manifest.get("source_name", directory.name))
+        requirements = extract_mlx_port_requirements(model_config, source_name=source_name)
+        compatibility = analyze_mlx_compatibility(
+            requirements,
+            status=MLXImplementationStatus(supports_integrated_generation_api=True),
+        )
+        return cls(
+            source_name=source_name,
+            model_config=model_config,
+            requirements=requirements,
+            compatibility=compatibility,
+            resolved_config_path=None,
+            torch_pipeline=None,
+            mlx_dit=mlx_dit,
+            text_conditioner=text_conditioner,
+            number_conditioner=number_conditioner,
+            autoencoder=autoencoder,
+            dtype_name=dit_dtype,
+            autoencoder_dtype_name=autoencoder_dtype,
+            attention=attention,
+            **geometry,
+            conversion_reports={"source": "mlx-conversion-cache"},
+        )
+
+    @classmethod
     def _from_loaded_torch_pipeline(
         cls,
         torch_pipeline,
@@ -324,6 +611,7 @@ class StableAudioMLXPipeline:
             dtype_name=dit_dtype,
             autoencoder_dtype_name=autoencoder_dtype,
             attention=attention,
+            **model_geometry_from_config(model_config),
             conversion_reports={
                 "dit": dit_conversion,
                 "text": text_conversion,
@@ -385,7 +673,6 @@ class StableAudioMLXPipeline:
         return all(
             component is not None
             for component in (
-                self.torch_pipeline,
                 self.mlx_dit,
                 self.text_conditioner,
                 self.number_conditioner,
@@ -638,13 +925,13 @@ class StableAudioMLXPipeline:
         batch_size = len(conditioning)
         duration_values = _conditioning_durations(conditioning, duration, batch_size)
         audio_sample_size, latent_length = _infer_lengths(
-            self.torch_pipeline,
+            self,
             conditioning,
             sample_size=sample_size,
             duration_padding_sec=duration_padding_sec,
         )
-        sample_rate = int(self.torch_pipeline.model.sample_rate)
-        downsampling_ratio = int(self.torch_pipeline.model.pretransform.downsampling_ratio)
+        sample_rate = int(self.sample_rate)
+        downsampling_ratio = int(self.downsampling_ratio)
         effective_seq_len = effective_latent_lengths_from_durations(
             duration_values,
             sample_rate=sample_rate,
@@ -759,7 +1046,7 @@ class StableAudioMLXPipeline:
                 )
             )
 
-        io_channels = int(self.torch_pipeline.model.io_channels)
+        io_channels = int(self.latent_channels)
         noise = mx.random.normal((batch_size, io_channels, latent_length), dtype=mlx_dtype)
         diffusion_objective = extract_diffusion_objective(self.model_config)
         sampler_type = sampler_type or default_sampler_type_for_objective(diffusion_objective)
@@ -924,15 +1211,15 @@ class StableAudioMLXPipeline:
         prepared_target_length = _input_audio_target_length(
             source_audio,
             in_sr=int(source_sr),
-            target_sr=int(self.torch_pipeline.model.sample_rate),
+            target_sr=int(self.sample_rate),
             max_target_length=int(audio_sample_size),
         )
         prepared = prepare_audio(
             source_audio,
             in_sr=int(source_sr),
-            target_sr=int(self.torch_pipeline.model.sample_rate),
+            target_sr=int(self.sample_rate),
             target_length=prepared_target_length,
-            target_channels=int(self.torch_pipeline.model.pretransform.io_channels),
+            target_channels=int(self.audio_channels),
             device="cpu",
         ).float()
         latents = self.autoencoder.encode(mx.array(prepared.numpy()).astype(autoencoder_dtype))
@@ -1008,20 +1295,84 @@ def _conditioning_durations(
     return [float(value) for value in _broadcast_values(fallback_duration, batch_size, label="duration")]
 
 
+def model_geometry_from_config(model_config: dict[str, tp.Any]) -> dict[str, int]:
+    """Pull the scalars generation needs out of model_config.
+
+    These were previously read off ``torch_pipeline.model``, which forced the
+    whole torch model to stay resident purely to answer questions about sample
+    rate and channel counts.
+    """
+
+    model = model_config.get("model", {})
+    pretransform_config = model.get("pretransform", {}).get("config", {})
+    sample_rate = model_config.get("sample_rate", model.get("sample_rate"))
+    if sample_rate is None:
+        raise KeyError("model_config is missing 'sample_rate'.")
+    return {
+        "sample_rate": int(sample_rate),
+        "downsampling_ratio": int(pretransform_config["downsampling_ratio"]),
+        "latent_channels": int(model["io_channels"]),
+        "audio_channels": int(pretransform_config["io_channels"]),
+    }
+
+
+def adapt_sample_size(
+    model_config: dict[str, tp.Any],
+    conditioning: list[dict[str, tp.Any]],
+    sample_size: int,
+    duration_padding_sec: float,
+    *,
+    sample_rate: int,
+    downsampling_ratio: int,
+) -> int:
+    """Torch-free port of ``StableAudioPipeline._adapt_sample_size``.
+
+    Kept byte-compatible with the upstream implementation, including the
+    encoder chunk alignment, so generated lengths do not shift.
+    """
+
+    max_seconds = 0.0
+    for cond_dict in conditioning:
+        if "seconds_total" in cond_dict:
+            max_seconds = max(max_seconds, cond_dict["seconds_total"])
+
+    if max_seconds <= 0:
+        return int(sample_size)
+
+    target_audio_samples = int((max_seconds + duration_padding_sec) * sample_rate)
+    ds_ratio = int(downsampling_ratio)
+    target_audio_samples = (
+        (target_audio_samples + ds_ratio - 1) // ds_ratio
+    ) * ds_ratio
+    encoder_config = (
+        model_config["model"]["pretransform"]["config"]["encoder"]["config"]
+    )
+    chunk_size = encoder_config.get("chunk_size", 32)
+    stride = encoder_config["strides"][0]
+    latent_align = chunk_size // stride
+    align = ds_ratio * latent_align
+    target_audio_samples = ((target_audio_samples + align - 1) // align) * align
+    return int(min(target_audio_samples, sample_size))
+
+
 def _infer_lengths(
-    torch_pipeline,
+    pipeline: "StableAudioMLXPipeline",
     conditioning: list[dict[str, tp.Any]],
     *,
     sample_size: int,
     duration_padding_sec: float,
 ) -> tuple[int, int]:
-    audio_sample_size = torch_pipeline._adapt_sample_size(
+    audio_sample_size = adapt_sample_size(
+        pipeline.model_config,
         conditioning,
         sample_size,
         duration_padding_sec,
+        sample_rate=pipeline.sample_rate,
+        downsampling_ratio=pipeline.downsampling_ratio,
     )
-    downsampling_ratio = int(torch_pipeline.model.pretransform.downsampling_ratio)
-    latent_sample_size = int(math.ceil(audio_sample_size / downsampling_ratio))
+    latent_sample_size = int(
+        math.ceil(audio_sample_size / pipeline.downsampling_ratio)
+    )
     return int(audio_sample_size), latent_sample_size
 
 
@@ -1035,8 +1386,12 @@ def _resolve_mlx_dist_shift(value, pipeline: StableAudioMLXPipeline):
     if isinstance(value, DistributionShiftSpec):
         return value, value.kind
     if value is None or str(value).lower() == "default":
-        return distribution_shift_spec_from_object(
-            pipeline.torch_pipeline.model.sampling_dist_shift
+        from stable_audio_3.mlx.sampling import (
+            sampling_distribution_shift_spec_from_model_config,
+        )
+
+        return sampling_distribution_shift_spec_from_model_config(
+            pipeline.model_config
         ), "default"
     selection = str(value).lower()
     if selection == "none":
