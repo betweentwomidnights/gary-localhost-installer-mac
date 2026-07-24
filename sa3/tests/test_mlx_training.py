@@ -20,7 +20,11 @@ from stable_audio_3.mlx.sampling import (
     training_distribution_shift_spec_from_model_config,
 )
 from stable_audio_3.mlx.training import (
+    LORA_LAYER_SCOPE_ALL,
+    LORA_LAYER_SCOPE_ATTENTION_FF,
     inject_trainable_lora,
+    layer_scope_exclusions,
+    rectified_flow_loss,
     sample_training_timesteps,
     save_trainable_lora,
 )
@@ -59,6 +63,55 @@ class TinyMLXConv1d(nn.Module):
 
     def __call__(self, x):
         return self.layer(x)
+
+
+class ZeroFlowModel(nn.Module):
+    def __call__(self, x, t, **kwargs):
+        return mx.zeros_like(x)
+
+
+class TinyAttentionTargets(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.to_q = nn.Linear(4, 4, bias=False)
+        self.to_k = nn.Linear(4, 4, bias=False)
+        self.to_v = nn.Linear(4, 4, bias=False)
+        self.to_out = nn.Linear(4, 4, bias=False)
+
+
+class TinyFeedForwardTargets(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.project_up = nn.Linear(4, 8, bias=False)
+        self.project_down = nn.Linear(8, 4, bias=False)
+
+
+class TinyTransformerTargetBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.self_attn = TinyAttentionTargets()
+        self.ff = TinyFeedForwardTargets()
+        self.to_local_embed = [nn.Linear(257, 4), nn.Linear(4, 4)]
+
+
+class TinyTransformerTargets(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.project_in = nn.Linear(4, 4, bias=False)
+        self.project_out = nn.Linear(4, 4, bias=False)
+        self.global_cond_embedder = [nn.Linear(4, 4), nn.Linear(4, 24)]
+        self.layers = [TinyTransformerTargetBlock(), TinyTransformerTargetBlock()]
+
+
+class TinySA3TargetPolicyModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.to_timestep_embed = [nn.Linear(4, 4), nn.Linear(4, 4)]
+        self.to_cond_embed = [nn.Linear(4, 4), nn.Linear(4, 4)]
+        self.to_global_embed = [nn.Linear(4, 4), nn.Linear(4, 4)]
+        self.preprocess_conv = nn.Conv1d(4, 4, kernel_size=1, bias=False)
+        self.postprocess_conv = nn.Conv1d(4, 4, kernel_size=1, bias=False)
+        self.transformer = TinyTransformerTargets()
 
 
 def test_truncated_logit_normal_training_sampler_matches_upstream_shape():
@@ -106,6 +159,89 @@ def test_training_shift_can_be_disabled():
         dist_shift=None,
         effective_seq_len=[256, 4096],
     ) == (0.25, 0.75)
+
+
+def test_rectified_flow_loss_adds_separate_context_reconstruction_mean():
+    clean = mx.zeros((1, 1, 2), dtype=mx.float32)
+    noise = mx.array([[[1.0, 2.0]]], dtype=mx.float32)
+    loss = rectified_flow_loss(
+        ZeroFlowModel(),
+        clean,
+        mx.array([0.5], dtype=mx.float32),
+        noise=noise,
+        loss_mask=mx.array([[True, False]]),
+        context_loss_mask=mx.array([[False, True]]),
+        context_loss_weight=1.0,
+    )
+
+    assert float(loss) == pytest.approx(5.0)
+
+
+def test_default_sa3_target_policy_adapts_every_eligible_dit_layer():
+    model = TinySA3TargetPolicyModel()
+
+    report = inject_trainable_lora(
+        model,
+        rank=1,
+        alpha=1,
+    )
+
+    assert len(report.layer_names) == 28
+    assert "preprocess_conv" in report.layer_names
+    assert "postprocess_conv" in report.layer_names
+    assert "transformer.project_in" in report.layer_names
+    assert "transformer.project_out" in report.layer_names
+    assert any(name.startswith("transformer.layers.0.") for name in report.layer_names)
+    assert any(name.startswith("transformer.layers.1.") for name in report.layer_names)
+    assert any(".to_local_embed." in name for name in report.layer_names)
+
+
+def test_gradient_checkpointing_defaults_off_and_stays_overridable():
+    from train_mlx_lora import _resolve_grad_checkpoint
+
+    # Unspecified means off, including for full-track windows, which used to
+    # turn it on implicitly.
+    assert _resolve_grad_checkpoint(None) is False
+    # --grad-checkpoint / --no-grad-checkpoint still win.
+    assert _resolve_grad_checkpoint(True) is True
+    assert _resolve_grad_checkpoint(False) is False
+
+
+def test_attention_feedforward_scope_drops_embedding_projections():
+    model = TinySA3TargetPolicyModel()
+
+    report = inject_trainable_lora(
+        model,
+        rank=1,
+        alpha=1,
+        exclude=list(layer_scope_exclusions(LORA_LAYER_SCOPE_ATTENTION_FF)),
+    )
+
+    assert "preprocess_conv" not in report.layer_names
+    assert "postprocess_conv" not in report.layer_names
+    assert "transformer.project_in" not in report.layer_names
+    assert "transformer.project_out" not in report.layer_names
+    assert not any(".to_local_embed." in name for name in report.layer_names)
+    assert not any(name.startswith("to_timestep_embed") for name in report.layer_names)
+    # attention and feed-forward projections survive
+    assert any(name.startswith("transformer.layers.0.") for name in report.layer_names)
+
+
+def test_all_projections_scope_excludes_nothing():
+    assert layer_scope_exclusions(LORA_LAYER_SCOPE_ALL) == ()
+    all_scope = inject_trainable_lora(
+        TinySA3TargetPolicyModel(),
+        rank=1,
+        alpha=1,
+        exclude=list(layer_scope_exclusions(LORA_LAYER_SCOPE_ALL)),
+    )
+    default = inject_trainable_lora(TinySA3TargetPolicyModel(), rank=1, alpha=1)
+    assert all_scope.layer_names == default.layer_names
+
+
+def test_unknown_layer_scope_is_rejected():
+    with pytest.raises(ValueError, match="Unknown LoRA layer scope"):
+        layer_scope_exclusions("attention-only")
 
 
 def test_trainable_lora_updates_adapters_without_updating_base_weights():
@@ -174,6 +310,92 @@ def test_trainable_dora_rows_updates_adapters_without_updating_base_weights():
     ]
     assert mx.array_equal(model.layer.base.weight, base_before)
     assert final_loss < initial_loss * 0.1
+
+
+@pytest.mark.parametrize(
+    "adapter_type",
+    ["dora-rows", "dora-rows-xs", "dora-cols-xs"],
+)
+def test_non_materializing_linear_dora_matches_materialized_forward_and_gradients(
+    adapter_type: str,
+):
+    model = TinyMLXLinear()
+    model.layer.weight = model.layer.weight.astype(mx.float16)
+    inject_trainable_lora(
+        model,
+        rank=1,
+        alpha=0.75,
+        adapter_type=adapter_type,
+    )
+    if adapter_type == "dora-rows":
+        model.layer.lora_A = mx.array([[0.2, -0.3, 0.4]], dtype=mx.float32)
+        model.layer.lora_B = mx.array([[0.5], [-0.25]], dtype=mx.float32)
+        model.layer.magnitude = mx.array([2.2, 2.8], dtype=mx.float32)
+    else:
+        model.layer.M_xs = mx.array([[0.35]], dtype=mx.float32)
+        model.layer.magnitude = (
+            mx.array([2.2, 2.8], dtype=mx.float32)
+            if adapter_type == "dora-rows-xs"
+            else mx.array([1.25, 2.0, 2.75], dtype=mx.float32)
+        )
+
+    x = mx.array(
+        [[1.0, -2.0, 0.5], [-1.0, 0.5, 2.0]],
+        dtype=mx.float16,
+    )
+    target = mx.array([[0.4, -0.7], [0.25, 0.8]], dtype=mx.float32)
+
+    def materialized_output(local_model, inputs):
+        layer = local_model.layer
+        if adapter_type == "dora-rows":
+            delta = layer.lora_B @ layer.lora_A
+        else:
+            delta = layer.U @ layer.M_xs @ layer.V.T
+        value = layer.base.weight.astype(mx.float32) + layer.scaling * delta
+        norm_dim = 0 if adapter_type == "dora-cols-xs" else 1
+        norms = mx.sqrt(mx.sum(value**2, axis=norm_dim, keepdims=True))
+        normalized = value / mx.maximum(norms, 1e-12)
+        if norm_dim == 1:
+            adapted = normalized * layer.magnitude[:, None]
+        else:
+            adapted = normalized * layer.magnitude[None, :]
+        return (inputs.astype(mx.float32) @ adapted.T).astype(inputs.dtype)
+
+    def reformulated_loss(local_model, inputs, expected):
+        return mx.mean(
+            (local_model(inputs).astype(mx.float32) - expected) ** 2
+        )
+
+    def materialized_loss(local_model, inputs, expected):
+        return mx.mean(
+            (materialized_output(local_model, inputs).astype(mx.float32) - expected)
+            ** 2
+        )
+
+    expected_output = materialized_output(model, x)
+    actual_output = model(x)
+    reformulated_value_and_grad = nn.value_and_grad(model, reformulated_loss)
+    materialized_value_and_grad = nn.value_and_grad(model, materialized_loss)
+    actual_loss, actual_grads = reformulated_value_and_grad(model, x, target)
+    expected_loss, expected_grads = materialized_value_and_grad(model, x, target)
+    mx.eval(actual_output, expected_output, actual_grads, expected_grads)
+
+    assert mx.allclose(actual_output, expected_output, atol=2e-3, rtol=2e-3)
+    assert float(actual_loss) == pytest.approx(
+        float(expected_loss),
+        abs=2e-3,
+        rel=2e-3,
+    )
+    actual_flat = dict(tree_flatten(actual_grads))
+    expected_flat = dict(tree_flatten(expected_grads))
+    assert actual_flat.keys() == expected_flat.keys()
+    for name in actual_flat:
+        assert mx.allclose(
+            actual_flat[name],
+            expected_flat[name],
+            atol=3e-3,
+            rtol=3e-3,
+        ), name
 
 
 def test_trainable_dora_rows_conv1d_matches_full_adapted_weight():

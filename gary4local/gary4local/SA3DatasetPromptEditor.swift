@@ -15,18 +15,30 @@ private struct SA3DatasetPromptEntry: Identifiable {
 
 struct SA3DatasetPromptEditorSheet: View {
     let datasetPath: String
-    let triggerText: String
+    @ObservedObject var autolabeler: SA3AutolabelManager
+    let sa3EnvironmentReady: Bool
+    let careyServiceIsRunning: Bool
+    let careyEnvironmentReady: Bool
+    let careyTrainingIsActive: Bool
+    let onSuggestMetadata: (String) async throws -> SA3MetadataSuggestion
+    let onStartAutolabel: (String, SA3PromptStyle) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var entries: [SA3DatasetPromptEntry] = []
     @State private var selectedIndex = 0
-    @State private var templateText =
-        "TrackType: Music, VocalType: Instrumental, Genre: technical death metal, Mood: absurd, BPM: 145"
-    @State private var includeTrigger = false
+    @State private var templateText = Self.barePrompt
+    @State private var promptStyle = SA3PromptStyle.bare
+    @State private var showStyleHelp = false
     @State private var isLoading = false
     @State private var isSaving = false
+    @State private var isSuggesting = false
+    @State private var lastAutolabelDone = 0
     @State private var errorMessage: String?
     @State private var statusMessage: String?
+
+    private static let barePrompt = "technical death metal, 145 bpm, C minor"
+    private static let labeledPrompt =
+        "TrackType: Music, VocalType: Instrumental, Genre: technical death metal, Mood: absurd, BPM: 145, Key: C minor"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -43,6 +55,13 @@ struct SA3DatasetPromptEditorSheet: View {
                     }
                     if let statusMessage {
                         notice(statusMessage, color: .green)
+                    }
+                    if let launchError = autolabeler.launchError {
+                        notice(launchError, color: .red)
+                    }
+                    if let state = relevantAutolabelState,
+                       state.isActive || state.isTerminal {
+                        autolabelNotice(state)
                     }
 
                     if isLoading {
@@ -63,7 +82,14 @@ struct SA3DatasetPromptEditorSheet: View {
             footer
         }
         .frame(minWidth: 820, idealWidth: 920, minHeight: 650, idealHeight: 760)
-        .onAppear(perform: loadEntries)
+        .onAppear {
+            loadEntries()
+            autolabeler.refresh()
+            lastAutolabelDone = relevantAutolabelState?.done ?? 0
+        }
+        .onChange(of: autolabeler.state) { _, state in
+            handleAutolabelStateChange(state)
+        }
     }
 
     private var header: some View {
@@ -76,8 +102,8 @@ struct SA3DatasetPromptEditorSheet: View {
                     .font(.title2.weight(.semibold))
             }
             Spacer()
-            Button("refresh", action: loadEntries)
-                .disabled(isLoading || isSaving)
+            Button("refresh") { loadEntries() }
+                .disabled(isLoading || isSaving || autolabelIsActive)
             Button("close") { dismiss() }
                 .keyboardShortcut(.cancelAction)
         }
@@ -90,6 +116,11 @@ struct SA3DatasetPromptEditorSheet: View {
                 "Give each audio file an optional same-name .txt file, such as song.wav and song.txt. Everything in the text file is used as that track's prompt."
             )
             .font(.callout)
+            .foregroundStyle(.secondary)
+            Text(
+                "The shared trigger word is applied separately during training and is never written to these sidecars or exported dice prompts."
+            )
+            .font(.caption)
             .foregroundStyle(.secondary)
 
             HStack(spacing: 14) {
@@ -112,7 +143,40 @@ struct SA3DatasetPromptEditorSheet: View {
     private var templatePanel: some View {
         GroupBox("fill missing prompts") {
             VStack(alignment: .leading, spacing: 10) {
-                Text("editable starter prompt using sa3 tags and underfit example values")
+                HStack(spacing: 10) {
+                    Text("prompt style")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Picker("prompt style", selection: $promptStyle) {
+                        ForEach(SA3PromptStyle.allCases) { style in
+                            Text(style.displayName).tag(style)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 230)
+                    .disabled(autolabelIsActive)
+                    .onChange(of: promptStyle) { oldStyle, newStyle in
+                        updateStarterPrompt(from: oldStyle, to: newStyle)
+                    }
+                    Button {
+                        showStyleHelp.toggle()
+                    } label: {
+                        Image(systemName: "info.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("about prompt styles")
+                }
+
+                if showStyleHelp {
+                    Text(
+                        "Barebones matches the prompt tail Gary adds at inference. The official SA3 style uses labeled fields. Either trains correctly; BPM and key are omitted from the dice pool and supplied separately."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                Text("editable starter prompt — \(promptStyle.displayName) style")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 TextEditor(text: $templateText)
@@ -121,19 +185,22 @@ struct SA3DatasetPromptEditorSheet: View {
                         RoundedRectangle(cornerRadius: 5)
                             .stroke(Color.gray.opacity(0.25))
                     )
-
-                Toggle(
-                    triggerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        ? "prepend custom trigger word"
-                        : "prepend custom trigger word: \(triggerText)",
-                    isOn: $includeTrigger
-                )
-                .tint(GaryTheme.red)
-                .disabled(triggerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(autolabelIsActive)
 
                 HStack {
                     Button("fill missing", action: fillMissing)
-                        .disabled(entries.isEmpty || isLoading)
+                        .disabled(entries.isEmpty || isLoading || autolabelIsActive)
+                    if autolabelIsActive {
+                        Button(
+                            "cancel auto-label (\(relevantAutolabelState?.done ?? 0)/\(relevantAutolabelState?.total ?? entries.count))"
+                        ) {
+                            autolabeler.cancel()
+                        }
+                    } else {
+                        Button("auto-label all", action: startAutolabel)
+                            .disabled(!canStartAutolabel)
+                            .help(autolabelHelp)
+                    }
                     Spacer()
                     Text("\(captionedCount) of \(entries.count) tracks have prompt text")
                         .font(.caption)
@@ -154,6 +221,11 @@ struct SA3DatasetPromptEditorSheet: View {
                             statusMessage = nil
                         } label: {
                             HStack {
+                                if autolabelIsActive,
+                                   index == (relevantAutolabelState?.done ?? -1) {
+                                    ProgressView()
+                                        .controlSize(.mini)
+                                }
                                 Text(entry.relativePath)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
@@ -223,6 +295,29 @@ struct SA3DatasetPromptEditorSheet: View {
                     RoundedRectangle(cornerRadius: 5)
                         .stroke(Color.gray.opacity(0.25))
                 )
+                .disabled(autolabelIsActive)
+
+            HStack(spacing: 10) {
+                Button(isSuggesting ? "analyzing..." : "suggest bpm/key") {
+                    suggestBPMKey()
+                }
+                .disabled(
+                    isSuggesting
+                        || autolabelIsActive
+                        || !sa3EnvironmentReady
+                )
+                if isSuggesting {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Text(
+                    sa3EnvironmentReady
+                        ? "uses the local Carey tempo/key estimators"
+                        : "build the SA3 environment to enable suggestions"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
 
             VStack(alignment: .leading, spacing: 5) {
                 Text("dice button result")
@@ -230,7 +325,7 @@ struct SA3DatasetPromptEditorSheet: View {
                     .foregroundStyle(.secondary)
                 Text(selectedDicePrompt.isEmpty ? "not added to the lora prompt pool" : selectedDicePrompt)
                 if entry.content.trimmingCharacters(in: .whitespacesAndNewlines) != selectedDicePrompt {
-                    Text("a trailing bpm tag is omitted because gary supplies tempo separately.")
+                    Text("trailing BPM/key tags are omitted because Gary supplies them separately.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -245,11 +340,12 @@ struct SA3DatasetPromptEditorSheet: View {
                     entries[selectedIndex].content = ""
                     statusMessage = nil
                 }
+                .disabled(autolabelIsActive)
                 Button("restore") {
                     entries[selectedIndex].content = entries[selectedIndex].originalContent
                     statusMessage = nil
                 }
-                .disabled(!entries[selectedIndex].isDirty)
+                .disabled(!entries[selectedIndex].isDirty || autolabelIsActive)
                 Spacer()
                 Button("previous") {
                     selectedIndex = max(0, selectedIndex - 1)
@@ -276,7 +372,12 @@ struct SA3DatasetPromptEditorSheet: View {
             Spacer()
             Button(isSaving ? "saving..." : "save sidecars", action: saveEntries)
                 .garyPrimaryButtonStyle()
-                .disabled(isSaving || dirtyCount == 0)
+                .disabled(
+                    isSaving
+                        || isSuggesting
+                        || dirtyCount == 0
+                        || autolabelIsActive
+                )
         }
         .padding(14)
     }
@@ -291,15 +392,151 @@ struct SA3DatasetPromptEditorSheet: View {
         }.count
     }
 
+    private var relevantAutolabelState: SA3AutolabelState? {
+        guard let state = autolabeler.state,
+              let statePath = state.datasetPath else {
+            return nil
+        }
+        let expected = URL(fileURLWithPath: datasetPath).standardizedFileURL.path
+        let actual = URL(fileURLWithPath: statePath).standardizedFileURL.path
+        return expected == actual ? state : nil
+    }
+
+    private var autolabelIsActive: Bool {
+        relevantAutolabelState?.isActive == true
+    }
+
+    private var canStartAutolabel: Bool {
+        !entries.isEmpty
+            && dirtyCount == 0
+            && !isLoading
+            && !isSaving
+            && !isSuggesting
+            && careyEnvironmentReady
+            && !careyServiceIsRunning
+            && !careyTrainingIsActive
+            && autolabeler.state?.isActive != true
+    }
+
+    private var autolabelHelp: String {
+        if dirtyCount > 0 {
+            return "Save or discard unsaved sidecar changes before auto-labeling."
+        }
+        if !careyEnvironmentReady {
+            return "Build Carey before auto-labeling."
+        }
+        if careyServiceIsRunning {
+            return "Stop Carey before auto-labeling."
+        }
+        if careyTrainingIsActive {
+            return "Wait for Carey training to finish."
+        }
+        if autolabeler.state?.isActive == true {
+            return "Another SA3 dataset is currently being auto-labeled."
+        }
+        return "Overwrites every text sidecar with captioned genre plus locally reconciled BPM and key."
+    }
+
     private var selectedDicePrompt: String {
         guard entries.indices.contains(selectedIndex) else { return "" }
         return Self.dicePrompt(from: entries[selectedIndex].content)
     }
 
-    private func loadEntries() {
-        isLoading = true
+    private func updateStarterPrompt(
+        from oldStyle: SA3PromptStyle,
+        to newStyle: SA3PromptStyle
+    ) {
+        let current = templateText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let known = [Self.barePrompt, Self.labeledPrompt]
+        guard known.contains(current) else { return }
+        templateText = newStyle == .bare ? Self.barePrompt : Self.labeledPrompt
+    }
+
+    private func startAutolabel() {
+        guard dirtyCount == 0 else {
+            errorMessage =
+                "save or discard unsaved sidecar changes before auto-labeling."
+            return
+        }
         errorMessage = nil
         statusMessage = nil
+        autolabeler.clearError()
+        lastAutolabelDone = 0
+        onStartAutolabel(datasetPath, promptStyle)
+    }
+
+    private func suggestBPMKey() {
+        guard entries.indices.contains(selectedIndex) else { return }
+        let entryID = entries[selectedIndex].id
+        let audioPath = entries[selectedIndex].audioPath
+        isSuggesting = true
+        errorMessage = nil
+        statusMessage = nil
+        Task {
+            do {
+                let result = try await onSuggestMetadata(audioPath)
+                let tag = metadataTag(
+                    bpm: result.bpm,
+                    keyscale: result.keyscale ?? ""
+                )
+                guard !tag.isEmpty else {
+                    statusMessage = "no BPM or key could be detected."
+                    isSuggesting = false
+                    return
+                }
+                if let index = entries.firstIndex(where: { $0.id == entryID }) {
+                    entries[index].content = Self.spliceMetadata(
+                        into: entries[index].content,
+                        tag: tag
+                    )
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            isSuggesting = false
+        }
+    }
+
+    private func metadataTag(bpm: Int?, keyscale: String) -> String {
+        var parts: [String] = []
+        if let bpm {
+            parts.append(promptStyle == .labeled ? "BPM: \(bpm)" : "\(bpm) bpm")
+        }
+        let keyscale = keyscale.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !keyscale.isEmpty {
+            parts.append(promptStyle == .labeled ? "Key: \(keyscale)" : keyscale)
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    private func handleAutolabelStateChange(_ state: SA3AutolabelState?) {
+        guard let state,
+              relevantAutolabelState != nil else {
+            return
+        }
+        let done = state.done ?? 0
+        if done > lastAutolabelDone {
+            lastAutolabelDone = done
+            loadEntries(preservingMessages: true)
+            selectedIndex = min(max(0, done - 1), max(0, entries.count - 1))
+        } else if state.isTerminal {
+            loadEntries(preservingMessages: true)
+        }
+        if state.status == "failed" {
+            errorMessage = state.error ?? state.message ?? "auto-labeling failed."
+        } else if state.status == "completed" {
+            statusMessage = state.message ?? "auto-labeling complete."
+        } else if state.status == "cancelled" {
+            statusMessage = state.message ?? "auto-labeling cancelled."
+        }
+    }
+
+    private func loadEntries(preservingMessages: Bool = false) {
+        isLoading = true
+        if !preservingMessages {
+            errorMessage = nil
+            statusMessage = nil
+        }
         do {
             entries = try Self.scan(datasetPath: datasetPath)
             selectedIndex = min(selectedIndex, max(0, entries.count - 1))
@@ -312,11 +549,8 @@ struct SA3DatasetPromptEditorSheet: View {
 
     private func fillMissing() {
         let template = templateText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let rendered = includeTrigger
-            ? Self.compose(trigger: triggerText, prompt: template)
-            : template
-        guard !rendered.isEmpty else {
-            errorMessage = "enter a template or enable the custom trigger first."
+        guard !template.isEmpty else {
+            errorMessage = "enter a template first."
             return
         }
 
@@ -326,7 +560,7 @@ struct SA3DatasetPromptEditorSheet: View {
                   !entries[index].jsonSidecarExists else {
                 continue
             }
-            entries[index].content = rendered
+            entries[index].content = template
             filled += 1
         }
         errorMessage = nil
@@ -383,6 +617,50 @@ struct SA3DatasetPromptEditorSheet: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(color.opacity(0.09))
             .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func autolabelNotice(_ state: SA3AutolabelState) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                if state.isActive {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Text(state.message ?? "SA3 auto-label")
+                    .font(.callout.weight(.medium))
+                Spacer()
+                if let done = state.done, let total = state.total, total > 0 {
+                    Text("\(done) / \(total)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if state.isActive, let done = state.done, let total = state.total, total > 0 {
+                ProgressView(value: Double(done), total: Double(total))
+            }
+            if let path = state.currentPath, !path.isEmpty {
+                Text(URL(fileURLWithPath: path).lastPathComponent)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            if !autolabeler.logText.isEmpty {
+                DisclosureGroup("auto-label log") {
+                    ScrollView {
+                        Text(autolabeler.logText)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 150)
+                }
+                .font(.caption)
+            }
+        }
+        .padding(9)
+        .background(
+            (state.status == "failed" ? Color.red : Color.blue).opacity(0.09)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     private static func scan(datasetPath: String) throws -> [SA3DatasetPromptEntry] {
@@ -462,28 +740,28 @@ struct SA3DatasetPromptEditorSheet: View {
             && FileManager.default.fileExists(atPath: sibling.path)
     }
 
-    private static func compose(trigger: String, prompt: String) -> String {
-        let trigger = trigger.trimmingCharacters(in: .whitespacesAndNewlines)
-        let prompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trigger.isEmpty else { return prompt }
-        guard !prompt.isEmpty else { return trigger }
-        let lowerPrompt = prompt.lowercased()
-        let lowerTrigger = trigger.lowercased()
-        if lowerPrompt == lowerTrigger
-            || lowerPrompt.hasPrefix("\(lowerTrigger),")
-            || lowerPrompt.hasPrefix("\(lowerTrigger) ") {
-            return prompt
-        }
-        return "\(trigger), \(prompt)"
-    }
-
     private static func dicePrompt(from text: String) -> String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(
-                of: #"(?i)(?:[,;]\s*)?(?:BPM\s*:\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?\s*BPM)\s*$"#,
+        let pattern =
+            #"(?i)(?:[,;]\s*)?(?:BPM\s*[:=]?\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?\s*BPM|(?:Key|Scale)\s*[:=]\s*[A-G][#b♯♭]?\s+(?:maj(?:or)?|min(?:or)?)|[A-G][#b♯♭]?\s+(?:major|minor))\s*$"#
+        var prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        while true {
+            let next = prompt.replacingOccurrences(
+                of: pattern,
                 with: "",
                 options: .regularExpression
             )
             .trimmingCharacters(in: CharacterSet(charactersIn: " ,;"))
+            if next == prompt {
+                return prompt
+            }
+            prompt = next
+        }
+    }
+
+    private static func spliceMetadata(into content: String, tag: String) -> String {
+        let base = dicePrompt(from: content)
+        guard !tag.isEmpty else { return base }
+        guard !base.isEmpty else { return tag }
+        return "\(base), \(tag)"
     }
 }

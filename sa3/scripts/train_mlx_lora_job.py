@@ -25,12 +25,27 @@ from mlx_lora_dataset import (  # noqa: E402
     discover_dataset_examples,
     prompt_pool,
 )
+from mlx_training_assets import (  # noqa: E402
+    TRAINING_MODEL_NAME,
+    TRAINING_MODEL_REPO,
+)
+
+# Mirrored from stable_audio_3.mlx.training so this supervisor does not import
+# mlx just to validate a CLI choice. train_mlx_lora.py is the authority and
+# re-validates the value against the same list.
+LORA_LAYER_SCOPE_CHOICES = ("all-projections", "attention-feedforward")
+LORA_LAYER_SCOPE_DEFAULT = "all-projections"
 
 DEFAULT_TRAINER = Path(__file__).with_name("train_mlx_lora.py")
 STEP_PATTERN = re.compile(r"^step=(\d+)/(\d+)\s+loss=([^\s]+)")
+TRAINING_CHECKPOINT_PATTERN = re.compile(
+    r"^gary-mlx-lora-step-(\d+)\.safetensors$",
+    re.IGNORECASE,
+)
 DEFAULT_APP_SUPPORT = (
     Path.home() / "Library" / "Application Support" / "GaryLocalhost" / "sa3"
 )
+FULL_TRACK_CROP_SECONDS = 285.35
 
 
 def _timestamp() -> str:
@@ -125,7 +140,25 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, required=True)
     parser.add_argument("--rank", type=int, required=True)
     parser.add_argument("--adapter-type", required=True)
+    parser.add_argument(
+        "--dit-engine",
+        choices=("gary-generic", "official-specialized"),
+        default="gary-generic",
+    )
+    parser.add_argument(
+        "--layer-scope",
+        choices=LORA_LAYER_SCOPE_CHOICES,
+        default=LORA_LAYER_SCOPE_DEFAULT,
+    )
     parser.add_argument("--crop-seconds", type=float, required=True)
+    parser.add_argument(
+        "--full-tracks",
+        action="store_true",
+        help=(
+            "Train a fixed window from 0:00 instead of choosing a random crop "
+            "offset on each step."
+        ),
+    )
     parser.add_argument("--learning-rate", type=float, required=True)
     parser.add_argument("--save-every", type=int, required=True)
     parser.add_argument("--per-track-target-latent-rms", type=float, default=0.0)
@@ -221,8 +254,14 @@ def _state_for(args: argparse.Namespace) -> dict[str, Any]:
         "current_step": 0,
         "max_steps": args.steps,
         "adapter_type": args.adapter_type,
+        "dit_engine": args.dit_engine,
+        "layer_scope": args.layer_scope,
+        "training_base_model": TRAINING_MODEL_NAME,
+        "training_base_repo": TRAINING_MODEL_REPO,
         "dataset_path": str(args.dataset_dir or args.audio_path),
         "trigger_text": args.trigger_text,
+        "full_tracks": args.full_tracks,
+        "crop_seconds": args.crop_seconds,
         "per_track_target_latent_rms": args.per_track_target_latent_rms,
         "timestep_sampler": args.timestep_sampler,
         "distribution_shift": args.distribution_shift,
@@ -254,6 +293,18 @@ def _update_from_output(
     state: dict[str, Any],
     status_path: Path,
 ) -> None:
+    if line.startswith("resolving_training_assets="):
+        _update_state(
+            state,
+            status_path,
+            phase="downloading",
+            message=(
+                "Downloading or verifying the Stable Audio 3 medium-base "
+                "training model."
+            ),
+        )
+        return
+
     if line.startswith("Loading torch checkpoint"):
         _update_state(
             state,
@@ -373,6 +424,7 @@ def _install_lora(
     args: argparse.Namespace,
     *,
     source_checkpoint: Path,
+    training_checkpoints: list[dict[str, Any]],
 ) -> Path:
     args.lora_dir.mkdir(parents=True, exist_ok=True)
     installed_path = args.lora_dir / f"{args.name}.safetensors"
@@ -394,6 +446,11 @@ def _install_lora(
         "path": str(installed_path),
         "promptsPath": str(args.dataset_dir) if args.dataset_dir is not None else None,
         "strength": 1.0,
+        "trainingBaseModel": TRAINING_MODEL_NAME,
+        "inferenceModel": "medium",
+        "trainingJobId": args.job_id,
+        "trainingCheckpoints": training_checkpoints,
+        "selectedTrainingStep": args.steps,
     }
     _write_json_atomic(args.catalog_path, catalog)
 
@@ -405,12 +462,46 @@ def _install_lora(
             "lora": args.name,
             "dataset_path": str(args.dataset_dir or args.audio_path),
             "training_job": args.job_id,
+            "training_base_model": TRAINING_MODEL_NAME,
+            "inference_model": "medium",
             "trigger_text": args.trigger_text,
         },
-        "dice": {"instrumental": prompt_pool(args.examples)},
+        "dice": {
+            "instrumental": prompt_pool(
+                args.examples,
+                trigger_text=args.trigger_text,
+            )
+        },
     }
     _write_json_atomic(prompt_path, prompt_payload)
     return installed_path
+
+
+def _training_checkpoints(
+    output_dir: Path,
+    *,
+    final_checkpoint: Path,
+    final_step: int,
+) -> list[dict[str, Any]]:
+    by_step: dict[int, Path] = {}
+    for checkpoint in output_dir.glob("gary-mlx-lora-step-*.safetensors"):
+        match = TRAINING_CHECKPOINT_PATTERN.match(checkpoint.name)
+        if match is None or not checkpoint.is_file():
+            continue
+        by_step[int(match.group(1))] = checkpoint.resolve()
+
+    # The final export is the authoritative representation of the last step.
+    # It may duplicate a periodic step checkpoint when max_steps is divisible by
+    # save_every, so replace that entry instead of presenting the same step twice.
+    by_step[int(final_step)] = final_checkpoint.resolve()
+    return [
+        {
+            "step": step,
+            "epoch": 0,
+            "path": str(checkpoint),
+        }
+        for step, checkpoint in sorted(by_step.items())
+    ]
 
 
 def _resolve_examples(args: argparse.Namespace) -> list[LoraDatasetExample]:
@@ -435,6 +526,8 @@ def _resolve_examples(args: argparse.Namespace) -> list[LoraDatasetExample]:
 
 def main() -> int:
     args = _parse_args()
+    if args.full_tracks:
+        args.crop_seconds = FULL_TRACK_CROP_SECONDS
     args.name = _slugify(args.name)
     args.audio_path = (
         args.audio_path.expanduser().resolve()
@@ -491,12 +584,18 @@ def main() -> int:
         str(args.output_dir),
         "--trigger-text",
         args.trigger_text,
+        "--model-name",
+        TRAINING_MODEL_NAME,
         "--steps",
         str(args.steps),
         "--rank",
         str(args.rank),
         "--adapter-type",
         args.adapter_type,
+        "--dit-engine",
+        args.dit_engine,
+        "--layer-scope",
+        args.layer_scope,
         "--crop-seconds",
         str(args.crop_seconds),
         "--learning-rate",
@@ -512,6 +611,8 @@ def main() -> int:
         "--seed",
         str(args.seed),
     ]
+    if args.full_tracks:
+        command.append("--full-tracks")
     if args.distribution_shift == "full":
         command.extend(
             [
@@ -651,9 +752,15 @@ def main() -> int:
                 phase="installing",
                 message="Installing LoRA and updating the SA3 registry.",
             )
+            training_checkpoints = _training_checkpoints(
+                args.output_dir,
+                final_checkpoint=source_checkpoint,
+                final_step=args.steps,
+            )
             installed_checkpoint = _install_lora(
                 args,
                 source_checkpoint=source_checkpoint,
+                training_checkpoints=training_checkpoints,
             )
             _update_state(
                 state,

@@ -23,6 +23,8 @@ _FULL_WEIGHT_ADAPTER_TYPES = {
     "bora",
     *_XS_ADAPTER_TYPES,
 }
+_DORA_ROW_ADAPTER_TYPES = {"dora-rows", "dora-rows-xs"}
+_DORA_COL_ADAPTER_TYPES = {"dora-cols-xs"}
 _TIMESTEP_SAMPLERS = {
     "uniform",
     "logit_normal",
@@ -166,8 +168,19 @@ class MLXLoRALinear(nn.Module):
         elif self.adapter_type == "bora-xs":
             self.magnitude_r = _row_norms(source_weight)
             self.magnitude_c = _column_norms(source_weight)
+        # Cache the frozen base energy used by the algebraically reformulated
+        # DoRA norm. Leading-underscore attributes are not MLX parameters and
+        # therefore do not alter checkpoint contents.
+        if self.adapter_type in _DORA_ROW_ADAPTER_TYPES:
+            self._w0_sq = mx.sum(source_weight * source_weight, axis=1)
+        elif self.adapter_type in _DORA_COL_ADAPTER_TYPES:
+            self._w0_sq = mx.sum(source_weight * source_weight, axis=0)
 
     def __call__(self, x):
+        if self.adapter_type in (
+            _DORA_ROW_ADAPTER_TYPES | _DORA_COL_ADAPTER_TYPES
+        ):
+            return _reformulated_dora_linear_forward(self, x)
         if self.adapter_type in _FULL_WEIGHT_ADAPTER_TYPES:
             adapted_weight = _adapted_weight_2d(
                 _linear_source_weight_2d(self.base.weight),
@@ -289,6 +302,49 @@ class MLXLoRAConv1d(nn.Module):
 
 
 MLXTrainableLoRALayer = MLXLoRALinear | MLXLoRAConv1d
+
+
+DEFAULT_SA3_TRAINING_LORA_EXCLUDE = (
+    "to_timestep_embed",
+    "to_cond_embed",
+    "to_global_embed",
+    "to_local_embed",
+    "global_cond_embedder",
+    "project_in",
+    "project_out",
+    "preprocess_conv",
+    "postprocess_conv",
+)
+
+
+LORA_LAYER_SCOPE_ALL = "all-projections"
+LORA_LAYER_SCOPE_ATTENTION_FF = "attention-feedforward"
+LORA_LAYER_SCOPE_CHOICES = (
+    LORA_LAYER_SCOPE_ALL,
+    LORA_LAYER_SCOPE_ATTENTION_FF,
+)
+LORA_LAYER_SCOPE_DEFAULT = LORA_LAYER_SCOPE_ALL
+
+
+def layer_scope_exclusions(scope: str) -> tuple[str, ...]:
+    """Return the DiT layer-name exclusions implied by a training layer scope.
+
+    ``all-projections`` is Gary's historical behaviour and adapts every eligible
+    DiT Linear/Conv1d layer (228 on medium-base). ``attention-feedforward``
+    applies the official standalone trainer's product-default exclusions, which
+    drop the embedding/projection layers and leave 168. Both scopes leave the
+    seconds_total conditioner adapter untouched, so the two differ only in DiT
+    layer count.
+    """
+
+    if scope == LORA_LAYER_SCOPE_ALL:
+        return ()
+    if scope == LORA_LAYER_SCOPE_ATTENTION_FF:
+        return DEFAULT_SA3_TRAINING_LORA_EXCLUDE
+    raise ValueError(
+        f"Unknown LoRA layer scope {scope!r}; "
+        f"expected one of {', '.join(LORA_LAYER_SCOPE_CHOICES)}."
+    )
 
 
 def inject_trainable_lora(
@@ -428,6 +484,8 @@ def rectified_flow_loss(
     *,
     noise=None,
     loss_mask=None,
+    context_loss_mask=None,
+    context_loss_weight: float = 1.0,
     model_kwargs: dict[str, tp.Any] | None = None,
 ):
     if noise is None:
@@ -441,9 +499,22 @@ def rectified_flow_loss(
     mse = (prediction.astype(mx.float32) - target.astype(mx.float32)) ** 2
 
     if loss_mask is None:
-        return mx.mean(mse)
-    mask = loss_mask[:, None, :].astype(mx.float32)
-    return mx.sum(mse * mask) / mx.maximum(mx.sum(mask) * mse.shape[1], 1.0)
+        loss = mx.mean(mse)
+    else:
+        mask = loss_mask[:, None, :].astype(mx.float32)
+        loss = mx.sum(mse * mask) / mx.maximum(
+            mx.sum(mask) * mse.shape[1],
+            1.0,
+        )
+
+    if context_loss_mask is not None and context_loss_weight > 0:
+        context_mask = context_loss_mask[:, None, :].astype(mx.float32)
+        context_loss = mx.sum(mse * context_mask) / mx.maximum(
+            mx.sum(context_mask) * mse.shape[1],
+            1.0,
+        )
+        loss = loss + context_loss * float(context_loss_weight)
+    return loss
 
 
 def _name_is_selected(
@@ -552,6 +623,87 @@ def _adapter_delta_2d(layer):
     if layer.adapter_type in _XS_ADAPTER_TYPES:
         return layer.U @ layer.M_xs.astype(mx.float32) @ layer.V.T
     return layer.lora_B @ layer.lora_A
+
+
+def _effective_low_rank_factors(layer):
+    """Return fp32 (A, B) such that the adapter delta is B @ A."""
+
+    if layer.adapter_type in _XS_ADAPTER_TYPES:
+        return layer.V.T, layer.U @ layer.M_xs.astype(mx.float32)
+    return layer.lora_A, layer.lora_B
+
+
+def _reformulated_dora_linear_forward(layer, x):
+    """Apply linear DoRA without materializing its full fp32 adapted weight.
+
+    For V = W0 + scaling * B @ A, row DoRA scales the combined base and
+    low-rank output, while column DoRA scales the input. The expanded norm
+    below is mathematically equivalent to constructing V, but only rank-sized
+    products touch the frozen base projection.
+    """
+
+    a, b = _effective_low_rank_factors(layer)
+    weight = layer.base.weight
+    bias = getattr(layer.base, "bias", None)
+    scaling = float(layer.scaling)
+
+    x32 = x.astype(mx.float32)
+    if layer.adapter_type in _DORA_COL_ADAPTER_TYPES:
+        x32 = x32 * _dora_scale_no_materialize(
+            layer,
+            a,
+            b,
+            weight,
+            norm_dim=0,
+        )
+        base_output = x32.astype(x.dtype) @ weight.T
+    else:
+        base_output = x @ weight.T
+    output = base_output.astype(mx.float32) + ((x32 @ a.T) @ b.T) * scaling
+    if layer.adapter_type in _DORA_ROW_ADAPTER_TYPES:
+        output = output * _dora_scale_no_materialize(
+            layer,
+            a,
+            b,
+            weight,
+            norm_dim=1,
+        )
+    if bias is not None:
+        output = output + bias.astype(mx.float32)
+    return output.astype(x.dtype)
+
+
+def _dora_scale_no_materialize(layer, a, b, weight, *, norm_dim: int):
+    return layer.magnitude.astype(mx.float32) / _v_norm_no_materialize(
+        layer,
+        a,
+        b,
+        weight,
+        norm_dim=norm_dim,
+    )
+
+
+def _v_norm_no_materialize(layer, a, b, weight, *, norm_dim: int):
+    """Compute norm(W0 + scaling * B @ A) from rank-sized products."""
+
+    scaling = float(layer.scaling)
+    if norm_dim == 1:
+        cross_lhs = mx.matmul(weight, a.T.astype(weight.dtype)).astype(
+            mx.float32
+        )
+        cross = mx.sum(cross_lhs * b, axis=1)
+        gram = a @ a.T
+        quad = mx.sum((b @ gram) * b, axis=1)
+    else:
+        cross_lhs = mx.matmul(weight.T, b.astype(weight.dtype)).astype(
+            mx.float32
+        )
+        cross = mx.sum(cross_lhs * a.T, axis=1)
+        gram = b.T @ b
+        quad = mx.sum((gram @ a) * a, axis=0)
+    norm_sq = layer._w0_sq + 2.0 * scaling * cross + scaling * scaling * quad
+    norm = mx.sqrt(mx.maximum(norm_sq, 0.0))
+    return mx.maximum(norm, 1e-12)
 
 
 def _dora_weight_2d(v, *, magnitude, norm_dim: int):

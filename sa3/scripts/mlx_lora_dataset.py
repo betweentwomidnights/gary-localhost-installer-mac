@@ -59,13 +59,27 @@ def compose_trigger_prompt(trigger_text: str, prompt: str) -> str:
     return f"{trigger}, {caption}"
 
 
+_NOTE = r"[A-G][#b♯♭]?"
+_MODE = r"(?:maj(?:or)?|min(?:or)?)"
+_TRAILING_METADATA = re.compile(
+    r"[,;]?\s*(?:"
+    r"bpm\s*[:=]?\s*\d+(?:\.\d+)?"
+    r"|\d+(?:\.\d+)?\s*bpm"
+    rf"|(?:key|scale)\s*[:=]\s*{_NOTE}\s+{_MODE}"
+    rf"|(?<![A-Za-z]){_NOTE}\s+(?:major|minor)"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+
 def dice_prompt_from_caption(text: str) -> str:
-    return re.sub(
-        r"(?:[,;]\s*)?(?:BPM\s*:\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?\s*BPM)\s*$",
-        "",
-        text.strip(),
-        flags=re.IGNORECASE,
-    ).strip(" ,;")
+    """Remove trailing BPM/key metadata that Gary supplies at inference."""
+    prompt = text.strip()
+    while True:
+        stripped = _TRAILING_METADATA.sub("", prompt).strip(" ,;\t\r\n")
+        if stripped == prompt:
+            return prompt
+        prompt = stripped
 
 
 def discover_audio_files(root: Path) -> list[Path]:
@@ -109,11 +123,33 @@ def discover_dataset_examples(
     return examples
 
 
-def prompt_pool(examples: list[LoraDatasetExample]) -> list[str]:
+def _without_trigger(text: str, trigger_text: str) -> str:
+    prompt = text.strip()
+    trigger = trigger_text.strip()
+    if not trigger:
+        return prompt
+    if prompt.casefold() == trigger.casefold():
+        return ""
+    if prompt.casefold().startswith(f"{trigger.casefold()},"):
+        return prompt[len(trigger) + 1 :].lstrip()
+    if prompt.casefold().startswith(f"{trigger.casefold()} "):
+        return prompt[len(trigger) :].lstrip()
+    return prompt
+
+
+def prompt_pool(
+    examples: list[LoraDatasetExample],
+    *,
+    trigger_text: str = "",
+) -> list[str]:
     prompts = []
     seen = set()
     for example in examples:
-        prompt = dice_prompt_from_caption(example.prompt)
+        # The trigger belongs only to the composed training prompt. Dice choices
+        # come from literal sidecar content so a user's magic word is never emitted
+        # unexpectedly by the plugin.
+        source = _without_trigger(example.source_prompt, trigger_text)
+        prompt = dice_prompt_from_caption(source)
         normalized = prompt.casefold()
         if not prompt or normalized in seen:
             continue

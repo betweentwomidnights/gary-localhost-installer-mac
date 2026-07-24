@@ -29,8 +29,11 @@ if args.prompt == "cancel":
 print("conversion_seconds=0.01", flush=True)
 print("trainable_parameters=42", flush=True)
 print("step=1/2 loss=1.25000000 step_seconds=0.01 average_seconds=0.01", flush=True)
-print("step=2/2 loss=0.75000000 step_seconds=0.01 average_seconds=0.01", flush=True)
 args.output_dir.mkdir(parents=True, exist_ok=True)
+intermediate = args.output_dir / "gary-mlx-lora-step-000001.safetensors"
+intermediate.write_bytes(b"fake-checkpoint-step-1")
+print(f"checkpoint={intermediate}", flush=True)
+print("step=2/2 loss=0.75000000 step_seconds=0.01 average_seconds=0.01", flush=True)
 checkpoint = args.output_dir / "gary-mlx-lora-final.safetensors"
 checkpoint.write_bytes(b"fake-checkpoint")
 print(f"final_checkpoint={checkpoint}", flush=True)
@@ -116,6 +119,34 @@ def test_job_runner_installs_completed_lora(tmp_path: Path) -> None:
     assert registry["bell-arpeggio"]["path"] == str(installed)
     catalog = json.loads((tmp_path / "lora_catalog.json").read_text())
     assert catalog["bell-arpeggio"]["path"] == str(installed)
+    assert catalog["bell-arpeggio"]["trainingBaseModel"] == "medium-base"
+    assert catalog["bell-arpeggio"]["inferenceModel"] == "medium"
+    assert catalog["bell-arpeggio"]["trainingJobId"] == "test-job"
+    assert catalog["bell-arpeggio"]["selectedTrainingStep"] == 2
+    assert catalog["bell-arpeggio"]["trainingCheckpoints"] == [
+        {
+            "step": 1,
+            "epoch": 0,
+            "path": str(
+                (
+                    tmp_path
+                    / "run"
+                    / "gary-mlx-lora-step-000001.safetensors"
+                ).resolve()
+            ),
+        },
+        {
+            "step": 2,
+            "epoch": 0,
+            "path": str(
+                (
+                    tmp_path
+                    / "run"
+                    / "gary-mlx-lora-final.safetensors"
+                ).resolve()
+            ),
+        },
+    ]
     prompts = json.loads((tmp_path / "prompts" / "bell-arpeggio.json").read_text())
     assert prompts["dice"]["instrumental"] == ["bright bell arpeggio"]
 
@@ -147,8 +178,8 @@ def test_job_runner_installs_folder_prompt_pool(tmp_path: Path) -> None:
     assert catalog["bell-arpeggio"]["promptsPath"] == str(dataset)
     prompts = json.loads((tmp_path / "prompts" / "bell-arpeggio.json").read_text())
     assert prompts["dice"]["instrumental"] == [
-        "garybell, bright bells",
-        "garybell, soft glass",
+        "bright bells",
+        "soft glass",
     ]
 
 
@@ -166,9 +197,89 @@ def test_job_runner_forwards_loudness_fix(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     log_text = (tmp_path / "run" / "training.log").read_text()
+    assert "--model-name medium-base" in log_text
     assert "--per-track-target-latent-rms 0.9" in log_text
     state = json.loads((tmp_path / "run" / "status.json").read_text())
+    assert state["training_base_model"] == "medium-base"
+    assert (
+        state["training_base_repo"]
+        == "stabilityai/stable-audio-3-medium-base"
+    )
     assert state["per_track_target_latent_rms"] == 0.9
+
+
+def test_job_runner_forwards_full_track_policy(tmp_path: Path) -> None:
+    command = _command(tmp_path, prompt="bright bells")
+    command.append("--full-tracks")
+
+    result = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    log_text = (tmp_path / "run" / "training.log").read_text()
+    assert "--crop-seconds 285.35" in log_text
+    assert "--full-tracks" in log_text
+    state = json.loads((tmp_path / "run" / "status.json").read_text())
+    assert state["full_tracks"] is True
+    assert state["crop_seconds"] == 285.35
+
+
+def test_job_runner_defaults_to_all_projections_layer_scope(tmp_path: Path) -> None:
+    command = _command(tmp_path, prompt="bright bells")
+
+    result = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    log_text = (tmp_path / "run" / "training.log").read_text()
+    assert "--layer-scope all-projections" in log_text
+    state = json.loads((tmp_path / "run" / "status.json").read_text())
+    assert state["layer_scope"] == "all-projections"
+
+
+def test_job_runner_forwards_layer_scope(tmp_path: Path) -> None:
+    command = _command(tmp_path, prompt="bright bells")
+    command.extend(["--layer-scope", "attention-feedforward"])
+
+    result = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    log_text = (tmp_path / "run" / "training.log").read_text()
+    assert "--layer-scope attention-feedforward" in log_text
+    state = json.loads((tmp_path / "run" / "status.json").read_text())
+    assert state["layer_scope"] == "attention-feedforward"
+
+
+def test_job_runner_rejects_unknown_layer_scope(tmp_path: Path) -> None:
+    command = _command(tmp_path, prompt="bright bells")
+    command.extend(["--layer-scope", "attention-only"])
+
+    result = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert "attention-only" in result.stderr
 
 
 def test_job_runner_forwards_advanced_timestep_settings(tmp_path: Path) -> None:
