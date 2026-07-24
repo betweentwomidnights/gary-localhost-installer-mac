@@ -371,6 +371,10 @@ final class CareyAceTrainingManager: ObservableObject {
         launchError = nil
     }
 
+    func reportLaunchError(_ message: String) {
+        launchError = message
+    }
+
     private func refreshFromDisk() {
         if let statusURL,
            let data = try? Data(contentsOf: statusURL),

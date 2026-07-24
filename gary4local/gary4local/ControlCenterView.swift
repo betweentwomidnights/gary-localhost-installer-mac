@@ -110,9 +110,16 @@ struct ControlCenterView: View {
         .sheet(isPresented: $viewModel.isSA3TrainingSheetPresented) {
             SA3LoraTrainingSheet(
                 trainer: viewModel.sa3TrainingManager,
+                autolabeler: viewModel.sa3AutolabelManager,
                 serviceIsRunning: viewModel.isSA3ServiceRunning,
                 environmentReady: viewModel.isSA3EnvironmentReady,
                 tokenConfigured: viewModel.stableAudioTokenConfigured,
+                careyServiceIsRunning: viewModel.isCareyServiceRunning,
+                careyEnvironmentReady: viewModel.isCareyEnvironmentReady,
+                careyTrainingIsActive:
+                    viewModel.careyAceTrainingManager.state?.isActive == true,
+                onSuggestMetadata: viewModel.suggestSA3TrackMetadata,
+                onStartAutolabel: viewModel.startSA3Autolabel,
                 onStart: viewModel.startSA3LoraTraining
             )
         }
@@ -171,7 +178,7 @@ struct ControlCenterView: View {
                     displayName: displayName(for: runtime),
                     isSelected: viewModel.selectedServiceID == runtime.id,
                     onSelect: { viewModel.selectService(runtime.id) },
-                    onStart: { manager.start(serviceID: runtime.id) },
+                    onStart: { viewModel.startManagedService(runtime.id) },
                     onStop: { manager.stop(serviceID: runtime.id) },
                     onRebuildEnv: { manager.rebuildEnvironment(serviceID: runtime.id) },
                     onDownloadModels: (runtime.id == "audiocraft_mlx" || runtime.id == "melodyflow" || runtime.id == "sa3" || runtime.id == "stable_audio" || runtime.id == "carey" || runtime.id == "foundation") ? {
@@ -189,7 +196,12 @@ struct ControlCenterView: View {
                     } : nil),
                     manageLorasButtonTitle: "add lora",
                     canManageDownloads: viewModel.canManageModelDownloads(for: runtime.id),
-                    downloadModelsExtraDisabled: (runtime.id == "stable_audio" || runtime.id == "sa3") && !viewModel.stableAudioTokenConfigured
+                    downloadModelsExtraDisabled:
+                        ((runtime.id == "stable_audio" || runtime.id == "sa3")
+                            && !viewModel.stableAudioTokenConfigured)
+                        || (runtime.id == "carey" && viewModel.isSA3AutolabelActive),
+                    workloadExtraDisabled:
+                        runtime.id == "carey" && viewModel.isSA3AutolabelActive
                 )
             }
             .listStyle(.inset)
@@ -1123,9 +1135,11 @@ private struct SA3LoraManagerSheet: View {
     @State private var formName: String = ""
     @State private var checkpointPath: String = ""
     @State private var promptsPath: String = ""
+    @State private var checkpointSelections: [String: Int] = [:]
 
     private var canSave: Bool {
         !viewModel.isSA3LoraSaving
+            && viewModel.sa3LoraSwitchingName == nil
             && !formName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !checkpointPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -1133,6 +1147,7 @@ private struct SA3LoraManagerSheet: View {
     private var canBuild: Bool {
         viewModel.isSA3EnvironmentReady
             && !viewModel.isSA3LoraBuilding
+            && viewModel.sa3LoraSwitchingName == nil
     }
 
     private var sortedPools: [SA3PromptPoolRow] {
@@ -1167,7 +1182,7 @@ private struct SA3LoraManagerSheet: View {
                     Text("pick the sa3 LoRA checkpoint file. if you still have the training dataset folder with txt sidecars, add that folder too and gary4local can build a prompt dice pool for the plugin.")
                         .font(.subheadline)
 
-                    Text("sa3 loads LoRAs into the model at startup. if the model is already resident, reload or restart sa3 before testing a newly added LoRA.")
+                    Text("new LoRAs and checkpoint switches are registered immediately. if sa3 is already resident, gary4local reloads its adapters automatically.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
@@ -1238,7 +1253,12 @@ private struct SA3LoraManagerSheet: View {
                             Button("refresh") {
                                 Task { await viewModel.refreshSA3LoraState() }
                             }
-                            .disabled(viewModel.isSA3LoraLoading || viewModel.isSA3LoraSaving || viewModel.isSA3LoraBuilding)
+                            .disabled(
+                                viewModel.isSA3LoraLoading
+                                    || viewModel.isSA3LoraSaving
+                                    || viewModel.isSA3LoraBuilding
+                                    || viewModel.sa3LoraSwitchingName != nil
+                            )
 
                             Button(viewModel.isSA3LoraBuilding ? "building..." : "build prompts") {
                                 Task { await viewModel.buildSA3LoraPrompts() }
@@ -1298,12 +1318,18 @@ private struct SA3LoraManagerSheet: View {
                                                 Task { await viewModel.removeSA3Lora(named: entry.name) }
                                             }
                                             .controlSize(.small)
-                                            .disabled(viewModel.isSA3LoraSaving || viewModel.isSA3LoraBuilding)
+                                            .disabled(
+                                                viewModel.isSA3LoraSaving
+                                                    || viewModel.isSA3LoraBuilding
+                                                    || viewModel.sa3LoraSwitchingName != nil
+                                            )
                                         }
 
                                         Text("strength \(entry.strength.formatted())")
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
+
+                                        checkpointSwitcher(for: entry)
 
                                         Text("checkpoint: \(entry.path)")
                                             .font(.caption.monospaced())
@@ -1374,6 +1400,108 @@ private struct SA3LoraManagerSheet: View {
         }
         .padding(16)
         .frame(minWidth: 820, minHeight: 620)
+    }
+
+    private func selectedCheckpointStep(for entry: SA3LoraEntry) -> Int {
+        checkpointSelections[entry.name]
+            ?? entry.selectedTrainingStep
+            ?? entry.trainingCheckpoints.last?.step
+            ?? 0
+    }
+
+    private func checkpointSelectionBinding(
+        for entry: SA3LoraEntry
+    ) -> Binding<Int> {
+        Binding(
+            get: { selectedCheckpointStep(for: entry) },
+            set: { checkpointSelections[entry.name] = $0 }
+        )
+    }
+
+    @ViewBuilder
+    private func checkpointSwitcher(for entry: SA3LoraEntry) -> some View {
+        if !entry.trainingCheckpoints.isEmpty {
+            let selectedStep = selectedCheckpointStep(for: entry)
+            VStack(alignment: .leading, spacing: 7) {
+                Text(trainingCheckpointSummary(for: entry))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.green)
+
+                if entry.trainingCheckpoints.count > 1 {
+                    HStack(alignment: .bottom, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("training checkpoint")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Picker(
+                                "training checkpoint",
+                                selection: checkpointSelectionBinding(for: entry)
+                            ) {
+                                ForEach(entry.trainingCheckpoints) { checkpoint in
+                                    Text(checkpointTitle(checkpoint))
+                                        .tag(checkpoint.step)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 220)
+                            .garyPickerAccent()
+                        }
+
+                        Button(checkpointButtonTitle(for: entry, step: selectedStep)) {
+                            Task {
+                                await viewModel.activateSA3LoraCheckpoint(
+                                    named: entry.name,
+                                    step: selectedStep
+                                )
+                            }
+                        }
+                        .disabled(
+                            viewModel.sa3LoraSwitchingName != nil
+                                || viewModel.isSA3LoraSaving
+                                || viewModel.isSA3LoraBuilding
+                        )
+                    }
+
+                    Text(
+                        "switching keeps this LoRA name and prompt pool unchanged."
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .padding(8)
+            .background(Color.green.opacity(0.07))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+    }
+
+    private func trainingCheckpointSummary(for entry: SA3LoraEntry) -> String {
+        var parts = ["Gary-trained"]
+        if let jobID = entry.trainingJobId {
+            parts.append(jobID)
+        }
+        if let step = entry.selectedTrainingStep {
+            parts.append("active step \(step)")
+        }
+        return parts.joined(separator: " / ")
+    }
+
+    private func checkpointTitle(_ checkpoint: SA3TrainingCheckpoint) -> String {
+        checkpoint.epoch > 0
+            ? "step \(checkpoint.step) / epoch \(checkpoint.epoch)"
+            : "step \(checkpoint.step)"
+    }
+
+    private func checkpointButtonTitle(
+        for entry: SA3LoraEntry,
+        step: Int
+    ) -> String {
+        if viewModel.sa3LoraSwitchingName == entry.name {
+            return "switching..."
+        }
+        return step == entry.selectedTrainingStep
+            ? "reload checkpoint"
+            : "use checkpoint"
     }
 
     private func pickCheckpointFile() {
@@ -2873,12 +3001,14 @@ struct MenuBarContentView: View {
                 ForEach(manager.services) { runtime in
                     MenuBarServiceRow(
                         runtime: runtime,
-                        displayName: displayName(for: runtime)
+                        displayName: displayName(for: runtime),
+                        startExtraDisabled:
+                            runtime.id == "carey" && viewModel.isSA3AutolabelActive
                     ) {
                         if runtime.isRunning {
                             manager.stop(serviceID: runtime.id)
                         } else {
-                            manager.start(serviceID: runtime.id)
+                            viewModel.startManagedService(runtime.id)
                         }
                     }
                 }
@@ -2907,6 +3037,7 @@ struct MenuBarContentView: View {
 private struct MenuBarServiceRow: View {
     let runtime: ServiceRuntime
     let displayName: String
+    let startExtraDisabled: Bool
     let onToggleRunning: () -> Void
 
     private var actionLabel: String {
@@ -2918,7 +3049,10 @@ private struct MenuBarServiceRow: View {
     }
 
     private var actionDisabled: Bool {
-        runtime.isBootstrapping || runtime.processState == .starting || runtime.processState == .stopping
+        runtime.isBootstrapping
+            || runtime.processState == .starting
+            || runtime.processState == .stopping
+            || (!runtime.isRunning && startExtraDisabled)
     }
 
     private var statusMessage: String {
@@ -2989,6 +3123,7 @@ private struct ServiceRow: View {
     let manageLorasButtonTitle: String
     let canManageDownloads: Bool
     let downloadModelsExtraDisabled: Bool
+    let workloadExtraDisabled: Bool
 
     private var downloadModelsDisabled: Bool {
         guard onDownloadModels != nil else { return true }
@@ -3008,7 +3143,10 @@ private struct ServiceRow: View {
     }
 
     private var startStopDisabled: Bool {
-        runtime.isBootstrapping || runtime.processState == .starting || runtime.processState == .stopping
+        runtime.isBootstrapping
+            || runtime.processState == .starting
+            || runtime.processState == .stopping
+            || (!runtime.isRunning && workloadExtraDisabled)
     }
 
     var body: some View {
@@ -3059,7 +3197,12 @@ private struct ServiceRow: View {
                     runtime.isBootstrapping ? "rebuilding..." : "rebuild env",
                     action: onRebuildEnv
                 )
-                .disabled(runtime.isRunning || runtime.isBootstrapping || runtime.bootstrapState == .notConfigured)
+                .disabled(
+                    runtime.isRunning
+                        || runtime.isBootstrapping
+                        || runtime.bootstrapState == .notConfigured
+                        || workloadExtraDisabled
+                )
                 if let onManageLoras {
                     Button(manageLorasButtonTitle) {
                         onManageLoras()

@@ -398,12 +398,15 @@ def read_lora_registry_file() -> list[tuple[str, str]]:
 
 
 def configured_loras() -> list[tuple[str, str]]:
+    registry_exists = os.path.isfile(LORA_REGISTRY_PATH)
     try:
         registry_entries = read_lora_registry_file()
     except Exception as exc:
         print(f"[sa3] could not read LoRA registry {LORA_REGISTRY_PATH}: {exc}")
-        registry_entries = []
-    return registry_entries if registry_entries else scan_lora_dir()
+        return []
+    if registry_exists:
+        return registry_entries
+    return scan_lora_dir()
 
 
 def lora_payload(entries: list[tuple[str, str]]) -> list[dict[str, Any]]:

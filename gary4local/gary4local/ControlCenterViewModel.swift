@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import Combine
 import AppKit
+import Darwin
 
 enum StableAudioBackendEngine: String, CaseIterable, Identifiable {
     case mps
@@ -273,25 +274,72 @@ struct SA3InventoryModelStatus: Identifiable {
     var id: String { "\(repoID)::\(label)" }
 }
 
+struct SA3TrainingCheckpoint: Codable, Identifiable, Equatable {
+    var step: Int
+    var epoch: Int
+    var path: String
+
+    var id: String { "\(step)::\(epoch)::\(path)" }
+
+    enum CodingKeys: String, CodingKey {
+        case step
+        case epoch
+        case path
+    }
+
+    init(step: Int, epoch: Int = 0, path: String) {
+        self.step = step
+        self.epoch = epoch
+        self.path = path
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        step = try container.decode(Int.self, forKey: .step)
+        epoch = try container.decodeIfPresent(Int.self, forKey: .epoch) ?? 0
+        path = try container.decode(String.self, forKey: .path)
+    }
+}
+
 struct SA3LoraCatalogEntry: Codable {
     var path: String
     var promptsPath: String?
     var strength: Double
+    var trainingBaseModel: String?
+    var inferenceModel: String?
+    var trainingJobId: String?
+    var trainingCheckpoints: [SA3TrainingCheckpoint]
+    var selectedTrainingStep: Int?
 
     init(
         path: String,
         promptsPath: String?,
-        strength: Double = 1.0
+        strength: Double = 1.0,
+        trainingBaseModel: String? = nil,
+        inferenceModel: String? = nil,
+        trainingJobId: String? = nil,
+        trainingCheckpoints: [SA3TrainingCheckpoint] = [],
+        selectedTrainingStep: Int? = nil
     ) {
         self.path = path
         self.promptsPath = promptsPath
         self.strength = strength
+        self.trainingBaseModel = trainingBaseModel
+        self.inferenceModel = inferenceModel
+        self.trainingJobId = trainingJobId
+        self.trainingCheckpoints = trainingCheckpoints
+        self.selectedTrainingStep = selectedTrainingStep
     }
 
     enum CodingKeys: String, CodingKey {
         case path
         case promptsPath
         case strength
+        case trainingBaseModel
+        case inferenceModel
+        case trainingJobId
+        case trainingCheckpoints
+        case selectedTrainingStep
     }
 
     init(from decoder: Decoder) throws {
@@ -299,6 +347,26 @@ struct SA3LoraCatalogEntry: Codable {
         path = try container.decode(String.self, forKey: .path)
         promptsPath = try container.decodeIfPresent(String.self, forKey: .promptsPath)
         strength = try container.decodeIfPresent(Double.self, forKey: .strength) ?? 1.0
+        trainingBaseModel = try container.decodeIfPresent(
+            String.self,
+            forKey: .trainingBaseModel
+        )
+        inferenceModel = try container.decodeIfPresent(
+            String.self,
+            forKey: .inferenceModel
+        )
+        trainingJobId = try container.decodeIfPresent(
+            String.self,
+            forKey: .trainingJobId
+        )
+        trainingCheckpoints = try container.decodeIfPresent(
+            [SA3TrainingCheckpoint].self,
+            forKey: .trainingCheckpoints
+        ) ?? []
+        selectedTrainingStep = try container.decodeIfPresent(
+            Int.self,
+            forKey: .selectedTrainingStep
+        )
     }
 }
 
@@ -314,6 +382,9 @@ struct SA3LoraEntry: Identifiable {
     let strength: Double
     let checkpointExists: Bool
     let registered: Bool
+    let trainingJobId: String?
+    let trainingCheckpoints: [SA3TrainingCheckpoint]
+    let selectedTrainingStep: Int?
 
     var id: String { name }
 }
@@ -416,6 +487,7 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var isSA3LoraLoading: Bool = false
     @Published var isSA3LoraSaving: Bool = false
     @Published var isSA3LoraBuilding: Bool = false
+    @Published var sa3LoraSwitchingName: String?
     @Published var sa3LoraStatusMessage: String = ""
     @Published var sa3LoraErrorMessage: String = ""
     @Published var sa3LoraBuildOutput: String = ""
@@ -432,6 +504,7 @@ final class ControlCenterViewModel: ObservableObject {
 
     let sa3TrainingManager = SA3LoraTrainingManager()
     let careyAceTrainingManager = CareyAceTrainingManager()
+    let sa3AutolabelManager = SA3AutolabelManager()
 
     private var logRefreshTask: Task<Void, Never>?
     private var modelDownloadPollTask: Task<Void, Never>?
@@ -454,6 +527,7 @@ final class ControlCenterViewModel: ObservableObject {
     private var careyActiveDownloadTargets: [CareyDownloadTarget] = []
     private var sa3DefaultRuntimeSettings = SA3RuntimeSettings.fallbackDefaults
     private var sharedHuggingFaceToken: String?
+    private var lastHandledSA3TrainingJobID: String?
 
     private static let careyProgressPercentRegex = try! NSRegularExpression(
         pattern: #"^[A-Za-z_]+:\s+([0-9]{1,3})%"#
@@ -701,6 +775,7 @@ final class ControlCenterViewModel: ObservableObject {
         observeApplicationTermination()
         refreshStableAudioTokenState()
         loadManifest()
+        observeSA3TrainingCompletion()
     }
 
     deinit {
@@ -877,6 +952,10 @@ final class ControlCenterViewModel: ObservableObject {
 
     var isSA3EnvironmentReady: Bool {
         sa3PythonExecutableURL() != nil
+    }
+
+    var isSA3AutolabelActive: Bool {
+        sa3AutolabelManager.state?.isActive == true
     }
 
     var careyLoraRequiresMpsBackend: Bool {
@@ -1325,6 +1404,38 @@ final class ControlCenterViewModel: ObservableObject {
         UserDefaults.standard.set(data, forKey: Self.sa3RuntimeSettingsDefaultsKey)
     }
 
+    private func observeSA3TrainingCompletion() {
+        sa3TrainingManager.$state
+            .compactMap { $0 }
+            .filter { $0.status == "completed" && $0.jobId != nil }
+            .sink { [weak self] state in
+                guard let self, let jobID = state.jobId,
+                      self.lastHandledSA3TrainingJobID != jobID else {
+                    return
+                }
+                self.lastHandledSA3TrainingJobID = jobID
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    do {
+                        self.sa3LoraState = try self.buildSA3LoraState()
+                        let reloaded = try await self.reloadSA3AdaptersIfRunning()
+                        if self.isSA3LoraSheetPresented {
+                            self.sa3LoraStatusMessage = reloaded
+                                ? "training completed; registry updated and sa3 reloaded."
+                                : "training completed; registry updated."
+                        }
+                    } catch {
+                        if self.isSA3LoraSheetPresented {
+                            self.sa3LoraErrorMessage =
+                                "training completed, but automatic LoRA registration "
+                                + "failed: \(error.localizedDescription)"
+                        }
+                    }
+                }
+            }
+            .store(in: &cancellables)
+    }
+
     func openSA3LoraSheet() {
         isSA3LoraSheetPresented = true
         Task { await refreshSA3LoraState() }
@@ -1340,6 +1451,16 @@ final class ControlCenterViewModel: ObservableObject {
         isCareyAceTrainingSheetPresented = true
     }
 
+    func startManagedService(_ serviceID: String) {
+        guard !(serviceID == "carey" && isSA3AutolabelActive) else {
+            sa3AutolabelManager.reportLaunchError(
+                "cancel or finish SA3 auto-labeling before starting Carey."
+            )
+            return
+        }
+        manager?.start(serviceID: serviceID)
+    }
+
     func startSA3LoraTraining(_ request: SA3LoraTrainingRequest) {
         guard let service = currentSA3Runtime()?.service else {
             sa3TrainingManager.clearError()
@@ -1353,6 +1474,12 @@ final class ControlCenterViewModel: ObservableObject {
     }
 
     func startCareyAceTraining(_ request: CareyAceTrainingRequest) {
+        guard sa3AutolabelManager.state?.isActive != true else {
+            careyAceTrainingManager.reportLaunchError(
+                "cancel or finish SA3 auto-labeling before starting Carey training."
+            )
+            return
+        }
         guard let service = currentCareyRuntime()?.service,
               let pythonURL = careyPythonExecutableURL() else {
             careyAceTrainingManager.clearError()
@@ -1367,6 +1494,49 @@ final class ControlCenterViewModel: ObservableObject {
             loraRegistryURL: careyLoraRegistryURL(),
             captionsURL: careyCaptionsURL(),
             huggingFaceToken: sharedHuggingFaceToken
+        )
+    }
+
+    func suggestSA3TrackMetadata(
+        audioPath: String
+    ) async throws -> SA3MetadataSuggestion {
+        guard let service = currentSA3Runtime()?.service,
+              let pythonURL = sa3PythonExecutableURL() else {
+            throw NSError(
+                domain: "ControlCenterViewModel",
+                code: 2301,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Build the SA3 environment before suggesting BPM/key."
+                ]
+            )
+        }
+        return try await SA3AudioMetadataAnalyzer.analyze(
+            audioPath: audioPath,
+            service: service,
+            pythonURL: pythonURL
+        )
+    }
+
+    func startSA3Autolabel(
+        datasetPath: String,
+        style: SA3PromptStyle
+    ) {
+        guard let service = currentCareyRuntime()?.service,
+              let pythonURL = careyPythonExecutableURL() else {
+            sa3AutolabelManager.reportLaunchError(
+                "Build the Carey environment before auto-labeling."
+            )
+            return
+        }
+        sa3AutolabelManager.start(
+            datasetPath: datasetPath,
+            style: style,
+            service: service,
+            pythonURL: pythonURL,
+            huggingFaceToken: sharedHuggingFaceToken,
+            careyServiceIsRunning: isCareyServiceRunning,
+            careyTrainingIsActive: careyAceTrainingManager.state?.isActive == true
         )
     }
 
@@ -1430,15 +1600,161 @@ final class ControlCenterViewModel: ObservableObject {
             try saveSA3LoraCatalog(catalog, to: catalogURL)
 
             sa3LoraState = try buildSA3LoraState()
-            let restarted = restartSA3IfRunning()
-            sa3LoraStatusMessage = restarted
-                ? "saved \(normalizedName) and restarted sa3."
+            let reloaded = try await reloadSA3AdaptersIfRunning()
+            sa3LoraStatusMessage = reloaded
+                ? "saved \(normalizedName) and reloaded sa3."
                 : "saved \(normalizedName)."
         } catch {
             sa3LoraErrorMessage = error.localizedDescription
         }
 
         isSA3LoraSaving = false
+    }
+
+    func activateSA3LoraCheckpoint(named name: String, step: Int) async {
+        guard sa3LoraSwitchingName == nil else { return }
+        sa3LoraSwitchingName = name
+        sa3LoraErrorMessage = ""
+        sa3LoraStatusMessage = ""
+        sa3LoraBuildOutput = ""
+
+        do {
+            let normalizedName = try sanitizeSA3LoraName(name)
+            let catalogURL = sa3LoraCatalogURL()
+            let originalCatalog = try readSA3LoraCatalog(at: catalogURL)
+            guard var entry = originalCatalog[normalizedName],
+                  entry.trainingJobId != nil,
+                  !entry.trainingCheckpoints.isEmpty else {
+                throw NSError(
+                    domain: "ControlCenterViewModel",
+                    code: 2208,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "\(normalizedName) was not registered by Gary's SA3 trainer."
+                    ]
+                )
+            }
+            guard let checkpoint = entry.trainingCheckpoints.first(
+                where: { $0.step == step }
+            ) else {
+                throw NSError(
+                    domain: "ControlCenterViewModel",
+                    code: 2209,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Training step \(step) is not registered for \(normalizedName)."
+                    ]
+                )
+            }
+
+            let sourceURL = expandedFileURL(
+                from: checkpoint.path,
+                relativeTo: sa3WorkingDirectoryURL()
+            )
+            guard Self.looksLikeSA3LoraCheckpoint(sourceURL) else {
+                throw NSError(
+                    domain: "ControlCenterViewModel",
+                    code: 2210,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Training checkpoint is missing: \(sourceURL.path)"
+                    ]
+                )
+            }
+
+            let destinationURL = sa3LoraDirectoryURL()
+                .appendingPathComponent("\(normalizedName).safetensors")
+            try FileManager.default.createDirectory(
+                at: destinationURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let nonce = UUID().uuidString.lowercased()
+            let stagedURL = destinationURL.deletingLastPathComponent()
+                .appendingPathComponent(".\(destinationURL.lastPathComponent).\(nonce).tmp")
+            let backupURL = destinationURL.deletingLastPathComponent()
+                .appendingPathComponent(".\(destinationURL.lastPathComponent).\(nonce).bak")
+            let destinationExisted = FileManager.default.fileExists(
+                atPath: destinationURL.path
+            )
+
+            try FileManager.default.copyItem(at: sourceURL, to: stagedURL)
+            let sourceSize = try sourceURL.resourceValues(
+                forKeys: [.fileSizeKey]
+            ).fileSize
+            let stagedSize = try stagedURL.resourceValues(
+                forKeys: [.fileSizeKey]
+            ).fileSize
+            guard sourceSize == stagedSize else {
+                try? FileManager.default.removeItem(at: stagedURL)
+                throw NSError(
+                    domain: "ControlCenterViewModel",
+                    code: 2211,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Checkpoint staging was incomplete for \(normalizedName)."
+                    ]
+                )
+            }
+
+            if destinationExisted {
+                try Self.renameReplacingNothing(
+                    source: destinationURL,
+                    destination: backupURL
+                )
+            }
+            do {
+                try Self.renameReplacingNothing(
+                    source: stagedURL,
+                    destination: destinationURL
+                )
+            } catch {
+                if destinationExisted {
+                    try? Self.renameReplacingNothing(
+                        source: backupURL,
+                        destination: destinationURL
+                    )
+                }
+                try? FileManager.default.removeItem(at: stagedURL)
+                throw error
+            }
+
+            do {
+                var updatedCatalog = originalCatalog
+                entry.path = destinationURL.path
+                entry.selectedTrainingStep = step
+                updatedCatalog[normalizedName] = entry
+                try saveSA3LoraCatalog(updatedCatalog, to: catalogURL)
+                sa3LoraState = try buildSA3LoraState()
+            } catch {
+                try? FileManager.default.removeItem(at: destinationURL)
+                if destinationExisted {
+                    try? Self.renameReplacingNothing(
+                        source: backupURL,
+                        destination: destinationURL
+                    )
+                }
+                try? saveSA3LoraCatalog(originalCatalog, to: catalogURL)
+                sa3LoraState = try? buildSA3LoraState()
+                throw error
+            }
+
+            try? FileManager.default.removeItem(at: backupURL)
+
+            do {
+                let reloaded = try await reloadSA3AdaptersIfRunning()
+                sa3LoraStatusMessage = reloaded
+                    ? "\(normalizedName) now uses training step \(step); sa3 reloaded."
+                    : "\(normalizedName) now uses training step \(step)."
+            } catch {
+                sa3LoraErrorMessage =
+                    "\(normalizedName) now uses training step \(step) on disk, "
+                    + "but sa3 could not reload it: \(error.localizedDescription)"
+            }
+        } catch {
+            sa3LoraErrorMessage = error.localizedDescription
+        }
+
+        sa3LoraSwitchingName = nil
     }
 
     func removeSA3Lora(named name: String) async {
@@ -1453,9 +1769,9 @@ final class ControlCenterViewModel: ObservableObject {
             catalog.removeValue(forKey: normalizedName)
             try saveSA3LoraCatalog(catalog, to: catalogURL)
             sa3LoraState = try buildSA3LoraState()
-            let restarted = restartSA3IfRunning()
-            sa3LoraStatusMessage = restarted
-                ? "removed \(normalizedName) and restarted sa3."
+            let reloaded = try await reloadSA3AdaptersIfRunning()
+            sa3LoraStatusMessage = reloaded
+                ? "removed \(normalizedName) and reloaded sa3."
                 : "removed \(normalizedName)."
         } catch {
             sa3LoraErrorMessage = error.localizedDescription
@@ -4327,12 +4643,114 @@ final class ControlCenterViewModel: ObservableObject {
         return environment
     }
 
-    private func restartSA3IfRunning() -> Bool {
+    private func reloadSA3AdaptersIfRunning() async throws -> Bool {
         guard let runtime = currentSA3Runtime(), runtime.isRunning else {
             return false
         }
-        manager?.restart(serviceID: runtime.id)
-        return true
+
+        var components = URLComponents(
+            url: runtime.service.healthCheck.url,
+            resolvingAgainstBaseURL: false
+        )
+        components?.path = "/reload"
+        components?.query = nil
+        components?.fragment = nil
+        guard let reloadURL = components?.url else {
+            throw NSError(
+                domain: "ControlCenterViewModel",
+                code: 2212,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Could not resolve the SA3 adapter reload endpoint."
+                ]
+            )
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 300
+        configuration.timeoutIntervalForResource = 360
+        let session = URLSession(configuration: configuration)
+        defer { session.finishTasksAndInvalidate() }
+
+        for attempt in 0..<150 {
+            var request = URLRequest(url: reloadURL)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 300
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw NSError(
+                    domain: "ControlCenterViewModel",
+                    code: 2213,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "SA3 returned an invalid adapter reload response."
+                    ]
+                )
+            }
+            if (200..<300).contains(http.statusCode) {
+                return true
+            }
+            if http.statusCode == 409, attempt < 149 {
+                guard currentSA3Runtime()?.isRunning == true else {
+                    throw NSError(
+                        domain: "ControlCenterViewModel",
+                        code: 2214,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "SA3 stopped while waiting to reload its adapters."
+                        ]
+                    )
+                }
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                continue
+            }
+
+            let detail = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let detailSuffix: String
+            if let detail, !detail.isEmpty {
+                detailSuffix = ": \(detail)"
+            } else {
+                detailSuffix = "."
+            }
+            throw NSError(
+                domain: "ControlCenterViewModel",
+                code: 2215,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "SA3 adapter reload failed with HTTP \(http.statusCode)"
+                        + detailSuffix
+                ]
+            )
+        }
+
+        throw NSError(
+            domain: "ControlCenterViewModel",
+            code: 2216,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    "SA3 remained busy for five minutes; adapter reload timed out."
+            ]
+        )
+    }
+
+    nonisolated private static func renameReplacingNothing(
+        source: URL,
+        destination: URL
+    ) throws {
+        guard Darwin.rename(source.path, destination.path) == 0 else {
+            let code = errno
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(code),
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Could not move \(source.lastPathComponent) to "
+                        + "\(destination.lastPathComponent): "
+                        + String(cString: strerror(code))
+                ]
+            )
+        }
     }
 
     private func sanitizeCareyLoraName(_ raw: String) throws -> String {
@@ -4417,6 +4835,16 @@ final class ControlCenterViewModel: ObservableObject {
             return expandedFileURL(from: configured, relativeTo: sa3WorkingDirectoryURL())
         }
         return defaultSA3StorageDirectory().appendingPathComponent("lora_registry.json")
+    }
+
+    private func sa3LoraDirectoryURL() -> URL {
+        if let configured = currentSA3Runtime()?.service.environment["SA3_LORA_DIR"]?.nilIfEmpty {
+            return expandedFileURL(from: configured, relativeTo: sa3WorkingDirectoryURL())
+        }
+        return defaultSA3StorageDirectory().appendingPathComponent(
+            "loras",
+            isDirectory: true
+        )
     }
 
     private func sa3PromptsDirectoryURL() -> URL {
@@ -4602,12 +5030,140 @@ final class ControlCenterViewModel: ObservableObject {
             guard !trimmedPath.isEmpty else { continue }
             entry.path = trimmedPath
             entry.promptsPath = entry.promptsPath?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            entry.trainingBaseModel = entry.trainingBaseModel?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty
+            entry.inferenceModel = entry.inferenceModel?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty
+            entry.trainingJobId = entry.trainingJobId?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty
             if !entry.strength.isFinite {
                 entry.strength = 1.0
             }
+            var checkpointsByStep: [Int: SA3TrainingCheckpoint] = [:]
+            for var checkpoint in entry.trainingCheckpoints where checkpoint.step >= 0 {
+                checkpoint.path = checkpoint.path
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !checkpoint.path.isEmpty else { continue }
+                checkpointsByStep[checkpoint.step] = checkpoint
+            }
+            entry.trainingCheckpoints = checkpointsByStep.values.sorted {
+                if $0.step != $1.step { return $0.step < $1.step }
+                if $0.epoch != $1.epoch { return $0.epoch < $1.epoch }
+                return $0.path < $1.path
+            }
+            if let selectedStep = entry.selectedTrainingStep,
+               !entry.trainingCheckpoints.contains(where: { $0.step == selectedStep }) {
+                entry.selectedTrainingStep = nil
+            }
+            entry = inferSA3TrainingHistory(
+                for: name,
+                catalogEntry: entry
+            )
             normalized[name] = entry
         }
         return normalized
+    }
+
+    private func inferSA3TrainingHistory(
+        for name: String,
+        catalogEntry: SA3LoraCatalogEntry
+    ) -> SA3LoraCatalogEntry {
+        guard catalogEntry.trainingCheckpoints.isEmpty else {
+            return catalogEntry
+        }
+
+        let activeURL = expandedFileURL(
+            from: catalogEntry.path,
+            relativeTo: sa3WorkingDirectoryURL()
+        )
+        let managedURL = sa3LoraDirectoryURL()
+            .appendingPathComponent("\(name).safetensors")
+            .standardizedFileURL
+        guard activeURL.standardizedFileURL.path == managedURL.path else {
+            return catalogEntry
+        }
+
+        let jobsURL = defaultSA3StorageDirectory()
+            .appendingPathComponent("training/jobs", isDirectory: true)
+        guard let jobDirectories = try? FileManager.default.contentsOfDirectory(
+            at: jobsURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return catalogEntry
+        }
+
+        for jobURL in jobDirectories.sorted(
+            by: { $0.lastPathComponent > $1.lastPathComponent }
+        ) {
+            let statusURL = jobURL.appendingPathComponent("status.json")
+            guard let data = try? Data(contentsOf: statusURL),
+                  let status = try? JSONSerialization.jsonObject(with: data)
+                    as? [String: Any],
+                  status["status"] as? String == "completed",
+                  status["name"] as? String == name,
+                  let jobID = status["job_id"] as? String,
+                  let maxSteps = status["max_steps"] as? Int else {
+                continue
+            }
+
+            var checkpointsByStep: [Int: SA3TrainingCheckpoint] = [:]
+            if let files = try? FileManager.default.contentsOfDirectory(
+                at: jobURL,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) {
+                for fileURL in files {
+                    let filename = fileURL.lastPathComponent
+                    let prefix = "gary-mlx-lora-step-"
+                    let suffix = ".safetensors"
+                    guard filename.hasPrefix(prefix),
+                          filename.hasSuffix(suffix) else {
+                        continue
+                    }
+                    let start = filename.index(
+                        filename.startIndex,
+                        offsetBy: prefix.count
+                    )
+                    let end = filename.index(
+                        filename.endIndex,
+                        offsetBy: -suffix.count
+                    )
+                    guard let step = Int(filename[start..<end]),
+                          Self.looksLikeSA3LoraCheckpoint(fileURL) else {
+                        continue
+                    }
+                    checkpointsByStep[step] = SA3TrainingCheckpoint(
+                        step: step,
+                        path: fileURL.path
+                    )
+                }
+            }
+
+            let finalURL = jobURL.appendingPathComponent(
+                "gary-mlx-lora-final.safetensors"
+            )
+            if Self.looksLikeSA3LoraCheckpoint(finalURL) {
+                checkpointsByStep[maxSteps] = SA3TrainingCheckpoint(
+                    step: maxSteps,
+                    path: finalURL.path
+                )
+            }
+            guard !checkpointsByStep.isEmpty else { continue }
+
+            var inferred = catalogEntry
+            inferred.trainingJobId = jobID
+            inferred.trainingCheckpoints = checkpointsByStep.values.sorted {
+                $0.step < $1.step
+            }
+            inferred.selectedTrainingStep = maxSteps
+            return inferred
+        }
+
+        return catalogEntry
     }
 
     private func saveSA3LoraCatalog(_ catalog: [String: SA3LoraCatalogEntry], to url: URL) throws {
@@ -4674,6 +5230,24 @@ final class ControlCenterViewModel: ObservableObject {
             let promptFile = sa3PromptFileURL(for: name)
             let promptFileExists = FileManager.default.fileExists(atPath: promptFile.path)
             let promptCount = readSA3PromptCount(from: promptFile)
+            let trainingCheckpoints = entry.trainingCheckpoints.compactMap {
+                checkpoint -> SA3TrainingCheckpoint? in
+                let checkpointURL = expandedFileURL(
+                    from: checkpoint.path,
+                    relativeTo: sa3WorkingDirectoryURL()
+                )
+                guard Self.looksLikeSA3LoraCheckpoint(checkpointURL) else {
+                    return nil
+                }
+                return SA3TrainingCheckpoint(
+                    step: checkpoint.step,
+                    epoch: checkpoint.epoch,
+                    path: checkpointURL.path
+                )
+            }
+            let selectedTrainingStep = entry.selectedTrainingStep.flatMap { step in
+                trainingCheckpoints.contains(where: { $0.step == step }) ? step : nil
+            }
 
             return SA3LoraEntry(
                 name: name,
@@ -4686,7 +5260,10 @@ final class ControlCenterViewModel: ObservableObject {
                 captionCount: captionCount,
                 strength: entry.strength,
                 checkpointExists: checkpointExists,
-                registered: checkpointExists
+                registered: checkpointExists,
+                trainingJobId: entry.trainingJobId,
+                trainingCheckpoints: trainingCheckpoints,
+                selectedTrainingStep: selectedTrainingStep
             )
         }
     }
