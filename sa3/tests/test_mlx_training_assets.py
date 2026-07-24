@@ -13,6 +13,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from mlx_training_assets import (  # noqa: E402
+    OPTIMIZED_MODEL_REVISION,
     TRAINING_MODEL_REPO,
     validate_medium_base_assets,
 )
@@ -97,3 +98,29 @@ def test_inference_service_remains_on_medium(manifest_name: str) -> None:
     )
 
     assert sa3_service["environment"]["SA3_MODEL"] == "medium"
+
+
+def test_hosted_training_weights_are_pinned_to_a_revision() -> None:
+    """A branch name would let upstream change training weights silently."""
+
+    assert len(OPTIMIZED_MODEL_REVISION) == 40
+    assert all(c in "0123456789abcdef" for c in OPTIMIZED_MODEL_REVISION)
+
+
+def test_hosted_resolver_requests_the_pinned_revision(monkeypatch) -> None:
+    import huggingface_hub
+
+    import mlx_training_assets
+
+    seen = {}
+
+    def fake_download(**kwargs):
+        seen.update(kwargs)
+        path = Path(__file__).resolve()
+        return str(path)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
+    mlx_training_assets.resolve_hosted_medium_base_npz()
+
+    assert seen["revision"] == OPTIMIZED_MODEL_REVISION
+    assert seen["repo_id"] == "stabilityai/stable-audio-3-optimized"

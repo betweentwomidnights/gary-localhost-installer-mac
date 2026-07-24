@@ -10,6 +10,11 @@ TRAINING_CONFIG_FILENAME = "model_config.json"
 TRAINING_CHECKPOINT_FILENAME = "model.safetensors"
 OPTIMIZED_MODEL_REPO = "stabilityai/stable-audio-3-optimized"
 OPTIMIZED_MEDIUM_BASE_FILENAME = "MLX/dit_medium-base_f16.npz"
+# Pinned so an upstream re-upload cannot change training weights silently.
+# Verified byte-identical to Gary's runtime PyTorch->MLX conversion: all 522 DiT
+# tensors match with max abs diff 0.0. Bump deliberately, and re-run that
+# comparison before trusting a new revision.
+OPTIMIZED_MODEL_REVISION = "08c64b96b1e59942aade69759f60fb88c58c90c4"
 _EXPECTED_CACHE_COMPONENT = (
     "models--stabilityai--stable-audio-3-medium-base"
 )
@@ -77,6 +82,7 @@ def resolve_hosted_medium_base_npz() -> Path:
         hf_hub_download(
             repo_id=OPTIMIZED_MODEL_REPO,
             filename=OPTIMIZED_MEDIUM_BASE_FILENAME,
+            revision=OPTIMIZED_MODEL_REVISION,
         )
     )
     if not resolved.is_file():
