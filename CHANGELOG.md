@@ -72,10 +72,16 @@ bolted onto this one.
 want that here too. right now MLX is nowhere near memory-efficient enough for
 it: a 190-second window peaks around 29 GiB and runs ~29 s/step on a 32 GB
 machine, and gradient checkpointing barely helps — it reclaims about 2 GiB of
-that while costing 45% more time per step. so the toggle is hidden for now and
-crop length is capped, rather than shipping something that looks available and
-then thrashes your machine. figuring out where that memory is actually going is
-the next thing we want to dig into.
+that while costing 45% more time per step. that gap against the windows build is
+the thing we need to explain before the toggle comes back, so for now it's
+hidden and crop length is capped rather than shipping something that looks
+available and then thrashes your machine.
+
+the good news is that short crops are not a consolation prize. a 23-second crop
+trains a LoRA that generates several minutes of audio without any trouble, and
+it's what the best mac LoRAs we've made so far were trained on. full tracks are
+something we want for parity and for seamless loops, not something you're
+currently missing out on.
 
 ## v0.1.11
 

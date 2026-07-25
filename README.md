@@ -99,9 +99,11 @@ the main localhost endpoints in the production manifest are:
   is not memory-efficient enough for it yet: a 190-second window peaks around
   `29 GiB` and runs about `29 s/step` on a 32 GB machine, and gradient
   checkpointing only claws back ~2 GiB while costing 45% more time per step.
-  crop length is capped in the UI for the same reason. working out where that
-  memory is actually going is the next thing on the list, and the toggle comes
-  back when it's honest to offer it.
+  crop length is capped in the UI for the same reason. working out why MLX is so
+  much hungrier here than the windows path is the next thing on the list, and the
+  toggle comes back when it's honest to offer it. in the meantime short crops are
+  doing fine — a 23-second crop trains a LoRA that generates several minutes of
+  audio, and that's what the best mac LoRAs so far were trained on.
 
 ## auto-updater
 
