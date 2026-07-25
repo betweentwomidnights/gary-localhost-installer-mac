@@ -87,23 +87,12 @@ the main localhost endpoints in the production manifest are:
   themselves better in logs than they do in the UI.
 - the SA3 auth and token flow is better than it was, but it still has enough
   weirdness that i don't consider that part "done."
-- SA3 still converts pytorch weights to MLX itself instead of using the MLX
-  models stability now hosts on hugging face. we compared them and they come out
-  byte-identical, so the hosted ones would mostly buy us a smaller install —
-  around 18 GB of pytorch weights could go away. the reason it hasn't happened
-  yet is that anyone who already downloaded the pytorch models would have to
-  fetch ~9 GB more and then have the old ones cleaned up for them. that needs
-  its own release with a real download UI and a cleanup step you get to approve,
-  not a surprise migration bolted onto a trainer update.
-- training on full tracks works on the windows build, and it's hidden here. MLX
-  is not memory-efficient enough for it yet: a 190-second window peaks around
-  `29 GiB` and runs about `29 s/step` on a 32 GB machine, and gradient
-  checkpointing only claws back ~2 GiB while costing 45% more time per step.
-  crop length is capped in the UI for the same reason. working out why MLX is so
-  much hungrier here than the windows path is the next thing on the list, and the
-  toggle comes back when it's honest to offer it. in the meantime short crops are
-  doing fine — a 23-second crop trains a LoRA that generates several minutes of
-  audio, and that's what the best mac LoRAs so far were trained on.
+- full-track training is hidden for now. MLX wants far more memory for it than
+  the windows build does, and we want to know why first. short crops still train
+  LoRAs that generate several minutes fine.
+- SA3 converts pytorch weights to MLX at runtime instead of using stability's
+  hosted MLX models. they're byte-identical, so it's an install-size win waiting
+  on its own release.
 
 ## auto-updater
 
