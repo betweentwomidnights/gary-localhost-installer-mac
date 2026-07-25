@@ -6,82 +6,85 @@ to remember how we got here.
 
 ## v0.2.0
 
-`v0.2.0` is the mac release paired with
+paired with
 [gary4juce v4.0.7-mac](https://github.com/betweentwomidnights/gary4juce/releases/tag/v4.0.7-mac).
+the version jumps from `0.1.11` to line up with the windows build's numbering.
 
-the version number jumps from `0.1.11` to `0.2.0` to line up with the windows
-build, which is already on `v0.2.0`. same project, same numbering from here on.
+almost entirely the Stable Audio 3 LoRA trainer.
 
-this one is almost entirely about the Stable Audio 3 LoRA trainer on the mac.
+**the training base model is pinned.** asset resolution fails closed unless both
+`model_config.json` and `model.safetensors` come from
+`stabilityai/stable-audio-3-medium-base`, and rejects ARC/distilled configs.
+hugging face split the base model into its own repository; resolving the wrong
+one is what produced the drone/hum at higher LoRA strength — **retrain any LoRA
+that does that.** inference still applies the adapter to
+`stable-audio-3-medium`. the hosted training NPZ is now pinned to a revision so
+an upstream re-upload can't change weights silently.
 
-**if you have an SA3 LoRA that hums or drones when you turn the strength up,
-retrain it.** training now pins itself to the stable-audio-3 *base* model and
-refuses to start against anything else, including the distilled/ARC checkpoint.
-hugging face moved the base model into its own repository at some point, and
-picking up the wrong one is what produced that drone. the adapter you get out
-still applies to the regular model you generate with — that part hasn't changed.
+**MLX conversion cache.** the converted DiT, T5Gemma, seconds conditioner, and
+autoencoder are written to
+`~/Library/Application Support/GaryLocalhost/sa3/mlx-cache`, keyed on checkpoint
+identity, the four component dtypes, attention mode, and a format version. cold
+start `24.6s` → `3.9s` warm, `4.85 GiB` on disk. writes are atomic, a corrupt
+entry falls back to torch and rewrites, stale entries are pruned.
+`SA3_MLX_CACHE=0` disables writing.
 
-**the trainer got a lot faster to live with.**
+that needed inference decoupled from the torch pipeline first: sample rate,
+downsampling ratio, and channel counts come from `model_config` now, and
+`_adapt_sample_size` plus the LogSNR sampling shift are ported to MLX.
+generation is byte-identical with `torch_pipeline` released.
 
-- starting the SA3 service used to spend about 25 seconds converting pytorch
-  weights to MLX every single time. we now cache the converted weights, so after
-  the first run it's under 4 seconds. the cache lands in
-  `~/Library/Application Support/GaryLocalhost/sa3/mlx-cache` and costs about
-  4.9 GB. set `SA3_MLX_CACHE=0` if you'd rather not spend the disk.
-- switching or adding a LoRA used to rebuild the whole model, which took about
-  20 seconds. it's now under a second in the common case, because swapping an
-  adapter doesn't actually change any model weights.
+**in-place LoRA refresh.** `/reload` rebuilds the adapter sets on the resident
+pipeline instead of reconstructing it — about `20s` down to under a second.
+`clear_lora` runs before `load_lora`, since `MLXLoRASet` snapshots pristine base
+weights on first apply and would otherwise treat `base + delta` as its base.
 
-**there's a new "layer scope" choice, and it defaults to the smaller one.** the
-default now trains 169 layers instead of 229. it finishes faster and gives you a
-smaller file, and in a paired 2,000-step A/B on the same dataset and seed we
-couldn't hear a difference — the loss difference was in the fourth decimal
-place. "train everything" is still right there if you want it. this one is
-mac-only for now; it'll come to the windows build and sa3.cpp later.
+**layer scope.** `attention-feedforward` (169 adapted layers) is the new
+default; `all-projections` (229) stays available. a paired 2,000-step A/B on
+identical data, seed, and adapter initialization measured a mean loss delta of
+`+0.0005` (`+0.00009` over the last 500 steps), ~5% faster steps, and
+`8.38` vs `8.60 GiB` peak. mac-only for now — windows and sa3.cpp later.
 
-**dataset prep is much less tedious.** you can auto-label a whole folder using
-ACE-Step's understand-music path, and have gary suggest BPM and key. the shared
-trigger word also behaves properly now: it's added to the front of every caption
-while training, and it no longer gets written into your sidecar files or your
-dice prompts.
+**trainer parity.** mixed inpainting conditioning restored (10% random segments,
+80% full, 10% causal, context loss weight 1.0), encoded-silence padding,
+`trunc_logit_normal` timesteps, AdamW `(0.9, 0.95)` / eps `1e-8` / weight decay
+`0.01`. adapter `lora_A` matrices are seeded from a stable hash of the layer
+name, so engine and scope comparisons start byte-identical instead of diverging
+on module traversal order.
 
-smaller things:
+**gradient checkpointing defaults off** at every window. on a base M4 Air it
+costs ~45% step time while reclaiming `0.05 GiB` at 256 latents and `2.0 GiB` of
+a `30.2 GiB` peak at 2048.
 
-- an experimental loudness fix that evens out volume across a dataset, so one
-  hot track doesn't dominate.
-- exported checkpoints register themselves — no more opening the **add loras**
-  window just to make a fresh LoRA appear.
-- the DiT engine picker and the full-track toggle are gone from the training
-  form. both are still reachable from the trainer CLI; see below for why.
-- a lot of the copy in the SA3 and Carey trainers got rewritten to be less
-  ML-brained.
+**dataset prep.** auto-label a folder through ACE-Step's understand-music path,
+and get BPM/key suggestions from local analysis. the shared trigger is applied
+only when building the training prompt — never written to sidecars or dice
+prompts.
 
-### two things we're still working on
+smaller:
 
-**moving to hugging face's hosted MLX models.** stability now publishes the same
-MLX weights we produce by converting pytorch at runtime — we checked, and
-they're byte-identical, all 522 tensors. switching to them would let us drop
-about 18 GB of pytorch weights and a big chunk of the dependency tree. we're
-*not* doing it in this release, because it would mean asking everyone who
-already downloaded the pytorch models to pull down ~9 GB more, and then cleaning
-up the old files on their behalf. that deserves its own release with a proper
-download UI and a cleanup step you actually get to approve, rather than being
-bolted onto this one.
+- experimental loudness fix, normalizing per-track encoded latent RMS.
+- exported checkpoints self-register; no need to open **add loras** first.
+- DiT engine picker and full-track toggle removed from the form, both still on
+  the trainer CLI.
+- SA3 and Carey trainer copy rewritten.
 
-**training on full tracks.** the windows build trains on whole songs, and we
-want that here too. right now MLX is nowhere near memory-efficient enough for
-it: a 190-second window peaks around 29 GiB and runs ~29 s/step on a 32 GB
-machine, and gradient checkpointing barely helps — it reclaims about 2 GiB of
-that while costing 45% more time per step. that gap against the windows build is
-the thing we need to explain before the toggle comes back, so for now it's
-hidden and crop length is capped rather than shipping something that looks
-available and then thrashes your machine.
+### deferred
 
-the good news is that short crops are not a consolation prize. a 23-second crop
-trains a LoRA that generates several minutes of audio without any trouble, and
-it's what the best mac LoRAs we've made so far were trained on. full tracks are
-something we want for parity and for seamless loops, not something you're
-currently missing out on.
+**hosted MLX weights.** `MLX/dit_medium_f16.npz` loads into gary's generic DiT
+with all 522 tensors bitwise identical and no measurable forward-speed
+difference, so the win is install size — roughly 18 GB of pytorch could go, and
+torch leaves the inference path. not shipping here: existing installs would need
+a ~9 GB download plus a cleanup we should be asking permission for. wants its
+own release with a component-level download screen.
+
+**full-track training.** 190s (2048 latents) peaks ~`29 GiB` at ~`29 s/step` on
+a 32 GB machine; 285s (3072) peaks ~`40 GiB` at ~`83 s/step` and swaps.
+checkpointing reclaims ~`2 GiB` for +45% step time, which points at activations
+not being released the way they are on the windows path. explaining that gap is
+the prerequisite for the toggle coming back. meanwhile 23-second crops produce
+LoRAs that generate several minutes cleanly, and are what the best mac LoRAs so
+far were trained on.
 
 ## v0.1.11
 
