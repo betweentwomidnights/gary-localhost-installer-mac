@@ -20,8 +20,18 @@
         margin-bottom: 0.25rem;
       }
 
+      h2 {
+        font-size: 1.05rem;
+        margin-bottom: 0.3rem;
+      }
+
       p {
         margin-top: 0;
+        color: #444;
+      }
+
+      ul {
+        padding-left: 1.2rem;
         color: #444;
       }
 
@@ -33,56 +43,41 @@
   </head>
   <body>
     <h1>gary4local v0.2.0</h1>
+    <p>version jumps from <code>0.1.11</code> to line up with the windows build.
+    this one is all about the stable audio 3 LoRA trainer.</p>
 
-    <p>the version number jumps from <code>0.1.11</code> to <code>0.2.0</code> to
-    line up with the windows build. same project, same numbering from here on.
-    this one is almost entirely about the stable audio 3 LoRA trainer.</p>
+    <h2>new</h2>
+    <ul>
+      <li>auto-label a whole folder with ace-step's captioner, plus bpm and key
+      suggestions from our own analysis helpers.</li>
+      <li><strong>layer scope</strong> defaults to 169 layers instead of 229.
+      faster, smaller file, no difference we could hear. "train everything" is
+      still there.</li>
+      <li>sa3 starts in under 4 seconds instead of ~25. converted weights are
+      cached now.</li>
+      <li>switching or adding a lora takes under a second instead of ~20.</li>
+      <li>the shared trigger word stays out of your sidecar files and dice
+      prompts.</li>
+      <li>experimental loudness fix for datasets with uneven volume.</li>
+    </ul>
 
-    <p>dataset prep got a lot less tedious. you can auto-label a whole folder
-    using ace-step's captioner model, and have gary suggest bpm and key using our
-    own analysis helpers, so you're editing captions instead of writing all of
-    them from scratch.</p>
+    <h2>heads up</h2>
+    <p>if you have an sa3 lora that hums or drones at higher strength, retrain
+    it. training pins to the stable audio 3 base model now and refuses anything
+    else — the wrong one is what caused that.</p>
 
-    <p>training is faster. there's a new <strong>layer scope</strong> choice that
-    defaults to the upstream default of 169 layers instead of all 229. it
-    finishes quicker and gives you a smaller file, and in a paired 2,000-step A/B
-    on the same dataset and seed we couldn't hear a difference — the loss gap was
-    in the fourth decimal place. basically pure upside, but "train everything" is
-    still there if you want all 229.</p>
-
-    <p>the app also spends a lot less time waiting on itself. starting the SA3
-    service used to burn about 25 seconds converting weights every single time;
-    those are cached now, so it's under 4 seconds after the first run. switching
-    or adding a LoRA used to rebuild the whole model at around 20 seconds, and
-    it's under a second now.</p>
-
-    <p><strong>if you have an SA3 LoRA that hums or drones when you turn the
-    strength up, retrain it.</strong> training now pins itself to the stable
-    audio 3 base model and refuses to start against anything else. picking up the
-    wrong one is what produced that drone.</p>
-
-    <p>the shared trigger word behaves properly too — it goes on the front of
-    every caption while training, and it no longer gets written into your sidecar
-    files or your dice prompts. there's also an experimental loudness fix that
-    evens out volume across a dataset, and a lot of the copy in the SA3 and carey
-    trainers got rewritten to be less ML-brained.</p>
-
-    <p>full-track training is still held back while we work out why MLX is so
-    much hungrier for memory than the windows build is. the good news is you
-    aren't really missing out: a 23-second crop trains a LoRA that happily
-    generates several minutes of audio, and that's what our best mac LoRAs so far
-    were trained on.</p>
-
-    <p>we also held off on moving to hugging face's hosted MLX models. the
-    weights are byte-identical to what we convert locally, so the only real win
-    is a smaller install — not worth asking everyone to re-download ~9 GB and
-    then cleaning up the old files for them. that gets its own release with a
-    proper download screen and a cleanup step you actually approve.</p>
+    <h2>not yet</h2>
+    <ul>
+      <li>full-track training. mlx wants way more memory than the windows build
+      does and we want to know why first. 23-second crops still make loras that
+      generate several minutes fine.</li>
+      <li>hugging face's hosted mlx models. byte-identical to what we convert
+      locally, so it's only a smaller install — not worth a ~9 gb re-download
+      until we can clean up after ourselves properly.</li>
+    </ul>
 
     <p>compatible with
-    <a href="https://github.com/betweentwomidnights/gary4juce/releases/tag/v4.0.7-mac">gary4juce v4.0.7-mac</a>.</p>
-
-    <p>distributed outside the mac app store as a notarized DMG, with sparkle
-    signatures for the in-app updater.</p>
+    <a href="https://github.com/betweentwomidnights/gary4juce/releases/tag/v4.0.7-mac">gary4juce v4.0.7-mac</a>.
+    notarized DMG with sparkle signatures for the in-app updater.</p>
   </body>
 </html>
