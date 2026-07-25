@@ -6,6 +6,9 @@ to remember how we got here.
 
 ## v0.2.0
 
+`v0.2.0` is the mac release paired with
+[gary4juce v4.0.7-mac](https://github.com/betweentwomidnights/gary4juce/releases/tag/v4.0.7-mac).
+
 the version number jumps from `0.1.11` to `0.2.0` to line up with the windows
 build, which is already on `v0.2.0`. same project, same numbering from here on.
 
