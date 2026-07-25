@@ -96,9 +96,15 @@ Expected result:
 Recommended sanity checks:
 
 ```bash
-spctl -a -vv build-artifacts/gary4local-v<version>-mac-arm64.dmg
+spctl -a -t open --context context:primary-signature -v build-artifacts/gary4local-v<version>-mac-arm64.dmg
 shasum -a 256 build-artifacts/gary4local-v<version>-mac-arm64.dmg
 ```
+
+Note: plain `spctl -a -vv <dmg>` reports `rejected (the code is valid but
+does not seem to be an app)` for a perfectly good notarized DMG — `spctl -a`
+defaults to an app-execute assessment, which doesn't apply to a disk image.
+Use the `-t open --context context:primary-signature` form above, or trust
+the build script's own `stapler validate` output, which is authoritative.
 
 ### 2. Create the GitHub Release
 
@@ -136,13 +142,12 @@ Companion-version rule:
 
 ### 4. Sign the update archive for Sparkle
 
-Using the Sparkle tooling on the release DMG:
+Using the Sparkle tooling on the release DMG (after stapling — signing before
+stapling signs the wrong bytes, since stapling modifies the DMG):
 
 ```bash
-sign_update /path/to/gary4local-v<version>-mac-arm64.dmg
+sign_update /path/to/gary4local-v<version>-mac-arm64.dmg --account gary4local
 ```
-
-Or use Sparkle's `generate_appcast` helper if that becomes the standard local tool.
 
 Expected output includes:
 
@@ -151,12 +156,58 @@ Expected output includes:
 
 Those values are required in the appcast item.
 
+If any of the Sparkle CLI tools (`sign_update`, `generate_appcast`,
+`generate_keys`) were just rebuilt via `scripts/build_sparkle_tool.sh`, the
+first invocation against the Keychain-stored private key will pop a macOS
+"wants to use your confidential information" prompt that needs an interactive
+click (Always Allow) — a freshly-built binary has a new code signature, so it
+doesn't inherit the trust decision from a previous build. If a call to one of
+these tools hangs with no output, this is almost certainly why; it is not
+hanging on network or notarization work.
+
 ### 5. Update the appcast
 
 Update either:
 
 - `docs/updates/gary4local/stable.xml`
 - or `docs/updates/gary4local/preview.xml`
+
+Recommended way to build the new item — use `generate_appcast` for the fields
+it computes correctly from the actual archive, then hand-add the fields it
+doesn't manage, then re-sign with `sign_update`:
+
+1. Stage the notarized DMG and a copy of the current appcast in one directory:
+   ```bash
+   mkdir -p /tmp/appcast-stage
+   cp build-artifacts/gary4local-v<version>-mac-arm64.dmg /tmp/appcast-stage/
+   cp docs/updates/gary4local/stable.xml /tmp/appcast-stage/
+   ```
+2. Run `generate_appcast` pointed at that directory with `--account gary4local`
+   and `--download-url-prefix` set to the GitHub Release download URL for that
+   tag. This computes `sparkle:version`, `sparkle:shortVersionString`,
+   `sparkle:minimumSystemVersion`, `sparkle:hardwareRequirements` (correctly
+   inferred as `arm64` from the binary — worth keeping, since it stops an
+   Intel Mac from ever being offered an arm64-only build), and the enclosure's
+   `edSignature`/`length`, by actually inspecting the DMG rather than by hand.
+3. Copy the result into `docs/updates/gary4local/stable.xml`, then hand-add:
+   - `<sparkle:releaseNotesLink>` pointing at the versioned HTML page.
+     **Do not use `--full-release-notes-url`** — it produces
+     `<sparkle:fullReleaseNotesLink>`, and the vendored Sparkle 2.9.1 client
+     only parses `<sparkle:releaseNotesLink>` (see `SUAppcastItem.m`). Notes
+     would silently never show in the update dialog.
+   - `<description><![CDATA[...]]></description>` — a one-line fallback blurb,
+     matching the style of existing items.
+   - `sparkle:os="macos"` and `type="application/x-apple-diskimage"` on the
+     `<enclosure>`, matching existing items (`generate_appcast` alone leaves
+     these off).
+4. Re-sign the file **with `sign_update <file> --account gary4local` run
+   directly on the appcast XML**, not by re-running `generate_appcast`.
+   `sign_update` detects the `sparkle-sign-warning` marker and updates just
+   the trailing signature comment in place. Re-running `generate_appcast`
+   instead will recompute every managed field from the current CLI flags and
+   silently strip the `releaseNotesLink`/`description`/`os`/`type` fields you
+   just hand-added back out — it is not a safe no-op re-sign for a file with
+   manual edits.
 
 The release item should point to:
 
@@ -170,6 +221,14 @@ Important rule:
 - only its contents change from release to release
 
 That is what lets installed apps "notice" the update without any per-release app reconfiguration.
+
+Aside: the whole-file trailer signature (the `<!-- sparkle-signatures: -->`
+comment) is currently cosmetic for this app — `SURequireSignedFeed` isn't set
+in `gary4local/Info.plist`, so the client never validates it, only the
+per-item `enclosure` `edSignature` matters at runtime. Still worth keeping
+correct in case that ever gets turned on, but a slightly-stale trailer
+signature is not a shipping blocker the way a wrong enclosure signature
+would be.
 
 ### 6. Publish GitHub Pages changes
 
