@@ -4,7 +4,10 @@ this is where the version history lives that used to sit at the top of the main
 README. the README should stay focused on what gary4local is now; this file gets
 to remember how we got here.
 
-## unreleased
+## v0.2.0
+
+the version number jumps from `0.1.11` to `0.2.0` to line up with the windows
+build, which is already on `v0.2.0`. same project, same numbering from here on.
 
 this one is almost entirely about the Stable Audio 3 LoRA trainer on the mac.
 
