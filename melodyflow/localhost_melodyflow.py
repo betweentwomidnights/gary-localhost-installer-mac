@@ -1265,7 +1265,7 @@ def _queue_transform_job(
             )
 
             output_path = _shared_audio_file("output", session_id)
-            torchaudio.save(output_path, processed_waveform.cpu(), 32000)
+            torchaudio.save(output_path, processed_waveform.cpu(), MODEL_SAMPLE_RATE)
             with open(output_path, "rb") as f:
                 result_audio = base64.b64encode(f.read()).decode("utf-8")
 
@@ -1441,6 +1441,16 @@ def _pick_device() -> str:
 device = _pick_device()
 DEVICE = device
 
+# MelodyFlow's VAE is a 48kHz model, and its encoder takes raw samples without
+# resampling anything itself -- so audio handed to it at another rate is heard
+# shifted. We used to resample input to 32k, which made the model hear
+# everything a fifth high, then write its 48kHz output back out labelled 32k,
+# which shifted it down again and cancelled for the listener. Staying at the
+# model's own rate keeps it inside the distribution it was trained on. It also
+# costs the extra length that mismatch bought us: the 750-latent window is now
+# exactly the 30 seconds it was meant to be, rather than 45.
+MODEL_SAMPLE_RATE = 48000
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('melodyflow')
@@ -1528,9 +1538,15 @@ def load_model():
             model = MelodyFlow.get_pretrained(
                 "facebook/melodyflow-t24-30secs", device=DEVICE
             )
+        if model.sample_rate != MODEL_SAMPLE_RATE:
+            raise RuntimeError(
+                f"MelodyFlow checkpoint is {model.sample_rate}Hz but this service "
+                f"resamples to {MODEL_SAMPLE_RATE}Hz. Feeding the encoder another "
+                f"rate pitch-shifts everything it hears. Update MODEL_SAMPLE_RATE."
+            )
     return model
 
-def load_audio_from_file(file_path: str, target_sr: int = 32000) -> torch.Tensor:
+def load_audio_from_file(file_path: str, target_sr: int = MODEL_SAMPLE_RATE) -> torch.Tensor:
     """Load and preprocess audio from file path."""
     try:
         if not os.path.exists(file_path):
@@ -1555,47 +1571,35 @@ def load_audio_from_file(file_path: str, target_sr: int = 32000) -> torch.Tensor
     except Exception as e:
         raise AudioProcessingError(f"Failed to load audio from file: {str(e)}")
 
-def find_max_duration(model: MelodyFlow, waveform: torch.Tensor, sr: int = 32000, max_token_length: int = 750) -> tuple:
-    """Binary search to find maximum duration that produces tokens under the limit."""
-    min_seconds = 1.0
-    max_seconds = waveform.shape[-1] / sr
-    best_duration = min_seconds
-    best_tokens = None
+def encode_within_latent_window(
+    model: MelodyFlow,
+    waveform: torch.Tensor,
+    encode_audio_fn=None,
+    sr: int = MODEL_SAMPLE_RATE,
+) -> tuple:
+    """Trim the waveform to the model's latent window and encode it once.
 
-    if max_seconds <= min_seconds:
-        tokens = model.encode_audio(waveform)
-        return max_seconds, tokens
+    MelodyFlow's window is fixed: max_duration (30s) at the VAE's 25Hz frame
+    rate, which _generate_tokens asserts against. The VAE hop is fixed too, so
+    the token count is exactly linear in the sample count -- there is nothing to
+    search for. This used to be a binary search that re-derived that closed
+    form with a GPU (or MLX) encode per iteration, and swallowed every exception
+    it hit while doing so, which turned an encoder failure into a silent
+    one-second result instead of an error.
 
-    while max_seconds - min_seconds > 0.1:
-        mid_seconds = (min_seconds + max_seconds) / 2
-        samples = max(1, int(mid_seconds * sr))
-        test_waveform = waveform[..., :samples]
+    It also computed its duration against whatever `sr` it was handed, which on
+    the MLX paths was the model's 48kHz while the waveform was still resampled
+    to 32k -- so the duration handed to set_generation_params was understated by
+    1.5x. Everything runs at MODEL_SAMPLE_RATE now, so there is one rate.
 
-        try:
-            tokens = model.encode_audio(test_waveform)
-            token_length = tokens.shape[-1]
-
-            if token_length <= max_token_length:
-                best_duration = mid_seconds
-                best_tokens = tokens
-                min_seconds = mid_seconds
-            else:
-                max_seconds = mid_seconds
-
-        except Exception as e:
-            max_seconds = mid_seconds
-
-    if best_tokens is None:
-        fallback_samples = max(1, int(min_seconds * sr))
-        best_tokens = model.encode_audio(waveform[..., :fallback_samples])
-        best_duration = min_seconds
-
-    if int(best_tokens.shape[-1]) > max_token_length:
-        raise RuntimeError(
-            f"Prompt token length {int(best_tokens.shape[-1])} exceeds max_token_length={max_token_length}"
-        )
-
-    return best_duration, best_tokens
+    `encode_audio_fn` lets the MLX backends supply their own encoder; the
+    default goes through the torch model.
+    """
+    encode = encode_audio_fn if encode_audio_fn is not None else model.encode_audio
+    samples_per_latent = round(model.sample_rate / model.frame_rate)
+    max_latents = int(model.max_duration * model.frame_rate)
+    trimmed = waveform[..., :max_latents * samples_per_latent]
+    return trimmed.shape[-1] / sr, encode(trimmed)
 
 
 def _normalize_waveform_for_save(tensor: torch.Tensor) -> torch.Tensor:
@@ -1637,7 +1641,7 @@ def process_audio(
             codec_mode = "native" if backend == BACKEND_MLX_NATIVE_MLX_CODEC else "torch"
 
             if backend == BACKEND_MPS:
-                max_valid_duration, tokens = find_max_duration(current_model, waveform)
+                max_valid_duration, tokens = encode_within_latent_window(current_model, waveform)
             else:
                 need_native_codec = codec_mode == "native"
                 mlx_runtime, mlx_module = _get_mlx_runtime(
@@ -1645,22 +1649,20 @@ def process_audio(
                     need_native_codec=need_native_codec,
                 )
                 if codec_mode == "native":
-                    max_valid_duration, tokens = mlx_module.find_max_duration_with_encoder(
+                    max_valid_duration, tokens = encode_within_latent_window(
+                        current_model,
                         waveform,
                         encode_audio_fn=lambda w: mlx_module.encode_audio_with_mlx_codec(
                             mlx_runtime,
                             w,
                             current_model.device,
                         ),
-                        sr=current_model.sample_rate,
-                        max_token_length=750,
                     )
                 else:
-                    max_valid_duration, tokens = mlx_module.find_max_duration_with_encoder(
+                    max_valid_duration, tokens = encode_within_latent_window(
+                        current_model,
                         waveform,
                         encode_audio_fn=lambda w: current_model.encode_audio(w.to(current_model.device)),
-                        sr=current_model.sample_rate,
-                        max_token_length=750,
                     )
 
             config['duration'] = max_valid_duration
@@ -1831,7 +1833,7 @@ def transform_audio():
         output_filename = f"output_{session_id}_{uuid.uuid4().hex[:8]}.wav"
         output_file_path = os.path.join(SHARED_TEMP_DIR, output_filename)
 
-        torchaudio.save(output_file_path, processed_waveform.cpu(), 32000)
+        torchaudio.save(output_file_path, processed_waveform.cpu(), MODEL_SAMPLE_RATE)
 
         # Explicit tensor cleanup (before model unload)
         del input_waveform
