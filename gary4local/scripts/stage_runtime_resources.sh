@@ -59,6 +59,8 @@ rm -f "${RUNTIME_DST}/sa3/scripts/validate_mlx_lora.py" || true
 mkdir -p "${RUNTIME_DST}/scripts"
 cp "${REPO_ROOT}/scripts/download_carey_models.sh" "${RUNTIME_DST}/scripts/download_carey_models.sh"
 chmod +x "${RUNTIME_DST}/scripts/download_carey_models.sh"
+cp "${REPO_ROOT}/scripts/reclaim_duplicate_models.py" "${RUNTIME_DST}/scripts/reclaim_duplicate_models.py"
+chmod +x "${RUNTIME_DST}/scripts/reclaim_duplicate_models.py"
 
 # Keep app bundle lean; checkpoints will be managed in cache/runtime.
 rm -rf "${RUNTIME_DST}/ace-lego/ACE-Step-1.5/checkpoints" || true

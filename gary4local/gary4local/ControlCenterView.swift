@@ -109,6 +109,9 @@ struct ControlCenterView: View {
         .sheet(isPresented: $viewModel.isSA3LoraSheetPresented) {
             SA3LoraManagerSheet(viewModel: viewModel)
         }
+        .sheet(isPresented: $viewModel.isStorageSheetPresented) {
+            StorageSettingsSheet(viewModel: viewModel)
+        }
         .sheet(isPresented: $viewModel.isSA3TrainingSheetPresented) {
             SA3LoraTrainingSheet(
                 trainer: viewModel.sa3TrainingManager,
@@ -243,6 +246,8 @@ struct ControlCenterView: View {
                     .font(.subheadline.monospaced())
                     .foregroundStyle(.secondary)
                 Spacer()
+                Button("storage") { viewModel.isStorageSheetPresented = true }
+                    .help("see what gary4local is using on disk, and reclaim duplicated model files.")
             }
 
             Text("recommended companion: gary4juce \(GaryAppReleaseInfo.recommendedGary4JuceVersion)")

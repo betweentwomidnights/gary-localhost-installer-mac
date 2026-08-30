@@ -500,6 +500,8 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var isCareyAceTrainingSheetPresented: Bool = false
     @Published var isSA3LoraSheetPresented: Bool = false
     @Published var isSA3TrainingSheetPresented: Bool = false
+    @Published var isStorageSheetPresented: Bool = false
+    let storageMaintenanceManager = StorageMaintenanceManager()
     @Published var sa3LoraState: SA3LoraState?
     @Published var isSA3LoraLoading: Bool = false
     @Published var isSA3LoraSaving: Bool = false
@@ -1573,6 +1575,79 @@ final class ControlCenterViewModel: ObservableObject {
     var downloadedCareyTrainingModels: [CareyTrainingModel] {
         guard let directory = careyCheckpointDirectory else { return [] }
         return CareyModelInventory.downloadedTrainingModels(in: directory)
+    }
+
+    // MARK: - Storage maintenance
+
+    private var appSupportDirectory: URL {
+        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent("Library/Application Support/GaryLocalhost", isDirectory: true)
+    }
+
+    private var huggingFaceHubDirectory: URL {
+        appSupportDirectory.appendingPathComponent("cache/huggingface/hub", isDirectory: true)
+    }
+
+    private func reclaimScriptURL() -> URL? {
+        guard let runtime = manager?.services.first(where: { $0.id == "carey" }) else { return nil }
+        // Staged beside download_carey_models.sh in the bundle, and in
+        // scripts/ when running from a checkout.
+        let candidates = [
+            runtime.service.workingDirectory
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("scripts/reclaim_duplicate_models.py"),
+            appSupportDirectory.appendingPathComponent("scripts/reclaim_duplicate_models.py"),
+        ]
+        return candidates.first { FileManager.default.isReadableFile(atPath: $0.path) }
+    }
+
+    /// Reclaiming rewrites files the services read, so nothing may be running.
+    var canReclaimDuplicateModels: Bool {
+        careyCheckpointDirectory != nil
+            && reclaimScriptURL() != nil
+            && !isModelDownloadInProgress
+            && !isCareyDownloadInProgress
+            && !isCareyServiceRunning
+            && careyAceTrainingManager.state?.isActive != true
+            && sa3AutolabelManager.state?.isActive != true
+    }
+
+    var reclaimBlockedReason: String {
+        if isModelDownloadInProgress || isCareyDownloadInProgress {
+            return "wait for the running download to finish."
+        }
+        if isCareyServiceRunning {
+            return "stop carey first — this rewrites files it has open."
+        }
+        if careyAceTrainingManager.state?.isActive == true {
+            return "wait for carey training to finish."
+        }
+        if sa3AutolabelManager.state?.isActive == true {
+            return "wait for auto-labelling to finish."
+        }
+        if reclaimScriptURL() == nil {
+            return "the reclaim helper is missing from the runtime."
+        }
+        return "carey is not available in the loaded manifest."
+    }
+
+    func scanStorageUsage() {
+        storageMaintenanceManager.scan(
+            appSupportDirectory: appSupportDirectory,
+            checkpointsDirectory: careyCheckpointDirectory
+        )
+    }
+
+    func reclaimDuplicateModels(dryRun: Bool) {
+        guard let script = reclaimScriptURL(),
+              let checkpoints = careyCheckpointDirectory else { return }
+        storageMaintenanceManager.reclaim(
+            scriptURL: script,
+            checkpointsDirectory: checkpoints,
+            huggingFaceHubDirectory: huggingFaceHubDirectory,
+            dryRun: dryRun
+        )
     }
 
     func startSA3Autolabel(
