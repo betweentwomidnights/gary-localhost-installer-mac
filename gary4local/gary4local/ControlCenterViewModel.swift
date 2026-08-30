@@ -472,6 +472,10 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var careyRequiredModels: [CareyRequiredModelStatus] = []
     @Published var careyOptionalModels: [CareyRequiredModelStatus] = []
     @Published var careyCaptionerModels: [CareyRequiredModelStatus] = []
+    /// Which Carey models are complete on disk. Refreshed by
+    /// refreshCareyModelAvailability(), never computed on read -- see there.
+    @Published private(set) var downloadedCareyCaptioners: [CareyCaptionerModel] = []
+    @Published private(set) var downloadedCareyTrainingModels: [CareyTrainingModel] = []
     @Published var isCareyDownloadInProgress: Bool = false
     @Published var isCareyLifecycleActionInProgress: Bool = false
     @Published var careyPredownloadProgress: Double = 0
@@ -1481,11 +1485,13 @@ final class ControlCenterViewModel: ObservableObject {
 
     func openSA3TrainingSheet() {
         sa3TrainingManager.refresh()
+        refreshCareyModelAvailability()
         isSA3TrainingSheetPresented = true
     }
 
     func openCareyAceTrainingSheet() {
         careyAceTrainingManager.refresh()
+        refreshCareyModelAvailability()
         isCareyAceTrainingSheetPresented = true
     }
 
@@ -1565,16 +1571,19 @@ final class ControlCenterViewModel: ObservableObject {
         return resolveCareyCheckpointDirectory(for: runtime)
     }
 
-    /// Which captioners are on disk right now. Read by the pickers so a model
-    /// you don't have isn't offered as if you did.
-    var downloadedCareyCaptioners: [CareyCaptionerModel] {
-        guard let directory = careyCheckpointDirectory else { return [] }
-        return CareyModelInventory.downloadedCaptioners(in: directory)
-    }
-
-    var downloadedCareyTrainingModels: [CareyTrainingModel] {
-        guard let directory = careyCheckpointDirectory else { return [] }
-        return CareyModelInventory.downloadedTrainingModels(in: directory)
+    /// Refreshes the two lists above. Deliberately cached rather than computed
+    /// on read: the pickers are constructed from the root view body, and a
+    /// download republishes progress constantly, so computing these on every
+    /// body evaluation put ~40 synchronous stat() calls on the main thread per
+    /// frame and made the app stop responding mid-download.
+    func refreshCareyModelAvailability() {
+        guard let directory = careyCheckpointDirectory else {
+            downloadedCareyCaptioners = []
+            downloadedCareyTrainingModels = []
+            return
+        }
+        downloadedCareyCaptioners = CareyModelInventory.downloadedCaptioners(in: directory)
+        downloadedCareyTrainingModels = CareyModelInventory.downloadedTrainingModels(in: directory)
     }
 
     // MARK: - Storage maintenance
@@ -2854,6 +2863,7 @@ final class ControlCenterViewModel: ObservableObject {
         careyRequiredModels = rows
         careyOptionalModels = optionalRows
         careyCaptionerModels = captionerRows
+        refreshCareyModelAvailability()
         if !isCareyDownloadInProgress {
             let downloadedCount = rows.filter(\.downloaded).count
             let optionalReady = optionalRows.allSatisfy(\.downloaded)

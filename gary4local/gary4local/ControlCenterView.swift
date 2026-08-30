@@ -1949,26 +1949,36 @@ private struct ModelDownloadSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
+        // The header stays outside the scroll view and the sheet is capped
+        // below the smallest screen we support, so however long a service's
+        // panel grows, "close" is always on screen. The Carey panel outgrew the
+        // display once and left the sheet with no way out.
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("download models: \(viewModel.modelDownloadServiceDisplayName)")
                     .font(.title3.weight(.semibold))
                 Spacer()
                 Button("close") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
             }
 
-            if viewModel.modelDownloadServiceID == "stable_audio" {
-                stableAudioPredownloadContent
-            } else if viewModel.modelDownloadServiceID == "sa3" {
-                sa3SetupContent
-            } else if viewModel.modelDownloadServiceID == "carey" {
-                careyPredownloadContent
-            } else {
-                standardPredownloadContent
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if viewModel.modelDownloadServiceID == "stable_audio" {
+                        stableAudioPredownloadContent
+                    } else if viewModel.modelDownloadServiceID == "sa3" {
+                        sa3SetupContent
+                    } else if viewModel.modelDownloadServiceID == "carey" {
+                        careyPredownloadContent
+                    } else {
+                        standardPredownloadContent
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(16)
-        .frame(minWidth: 760, minHeight: 520)
+        .frame(minWidth: 760, minHeight: 520, maxHeight: 760)
         .onAppear {
             if viewModel.modelDownloadServiceID != "stable_audio",
                viewModel.modelDownloadServiceID != "sa3",

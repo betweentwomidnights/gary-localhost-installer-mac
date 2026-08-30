@@ -13,6 +13,7 @@ struct StorageSettingsSheet: View {
                     .font(.title3.weight(.semibold))
                 Spacer()
                 Button("close") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
             }
 
             usageSection
