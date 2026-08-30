@@ -1952,22 +1952,18 @@ private struct ModelDownloadSheet: View {
     @ObservedObject var removal: ModelRemovalManager
     @Environment(\.dismiss) private var dismiss
 
-    /// Say what removing this actually gives back, not what the folder weighs.
-    /// A Carey checkpoint cloned from a cache blob frees nothing on its own,
-    /// and someone deleting 20GB expecting 20GB back deserves to know first.
+    /// Say what removing this frees, in the terms someone deleting a model
+    /// cares about. Where the bytes live -- a checkpoint, a cache blob, or both
+    /// -- is our problem, not theirs; removal takes the whole model either way.
     static func removalMessage(for preview: ModelRemovalPreview) -> String {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
-        let logical = formatter.string(fromByteCount: preview.logicalBytes)
         let freeable = formatter.string(fromByteCount: preview.freeableBytes)
 
         if preview.freesNothing {
-            return "\(preview.displayName) holds \(logical) across \(preview.files) files, but all of it is shared with the model cache — removing it will not free any space. it would have to be downloaded again to use."
+            return "\(preview.displayName) is on disk but its files are shared with another model, so removing it will not free space. it would have to be downloaded again to use."
         }
-        if preview.sharedBytes > 0 {
-            return "\(preview.displayName) holds \(logical) across \(preview.files) files. removing it frees \(freeable); the rest is shared with the model cache. it would have to be downloaded again to use."
-        }
-        return "\(preview.displayName) holds \(logical) across \(preview.files) files, all of which will be freed. it would have to be downloaded again to use."
+        return "frees \(freeable). \(preview.displayName) would have to be downloaded again to use."
     }
 
     @ViewBuilder

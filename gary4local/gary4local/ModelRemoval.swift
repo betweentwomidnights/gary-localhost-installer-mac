@@ -19,11 +19,13 @@ struct ModelRemovalPreview: Equatable {
     var displayName: String
     /// What the directory holds.
     var logicalBytes: Int64
-    /// What removing it would actually give back. Lower than logicalBytes when
-    /// the files are clones of something that will remain -- a Carey checkpoint
-    /// cloned from a cache blob frees nothing on its own.
+    /// What removing it would actually give back.
     var freeableBytes: Int64
     var files: Int
+    /// Cache entries going with it. A Carey checkpoint is a clone of a cache
+    /// blob, so removing the checkpoint alone would free nothing; the blobs
+    /// that serve only this model are taken too.
+    var cacheBlobs: Int
 
     var sharedBytes: Int64 { max(0, logicalBytes - freeableBytes) }
     var freesNothing: Bool { freeableBytes == 0 && logicalBytes > 0 }
@@ -60,14 +62,18 @@ final class ModelRemovalManager: ObservableObject {
         scriptURL: URL,
         target: URL,
         displayName: String,
-        roots: [URL]
+        roots: [URL],
+        hubDirectory: URL
     ) {
         guard !isBusy else { return }
         isMeasuring = true
         errorMessage = nil
         preview = nil
 
-        let arguments = Self.arguments(scriptURL: scriptURL, target: target, roots: roots, dryRun: true)
+        let arguments = Self.arguments(
+            scriptURL: scriptURL, target: target, roots: roots,
+            hubDirectory: hubDirectory, dryRun: true
+        )
         Task.detached(priority: .userInitiated) {
             let events = Self.run(arguments)
             await MainActor.run {
@@ -85,19 +91,26 @@ final class ModelRemovalManager: ObservableObject {
                     displayName: displayName,
                     logicalBytes: Int64(measured["logical_bytes"] as? Int ?? 0),
                     freeableBytes: Int64(measured["freeable_bytes"] as? Int ?? 0),
-                    files: measured["files"] as? Int ?? 0
+                    files: measured["files"] as? Int ?? 0,
+                    cacheBlobs: measured["cache_blobs"] as? Int ?? 0
                 )
             }
         }
     }
 
-    func remove(scriptURL: URL, preview: ModelRemovalPreview, roots: [URL]) {
+    func remove(
+        scriptURL: URL,
+        preview: ModelRemovalPreview,
+        roots: [URL],
+        hubDirectory: URL
+    ) {
         guard !isBusy else { return }
         isRemoving = true
         errorMessage = nil
 
         let arguments = Self.arguments(
-            scriptURL: scriptURL, target: preview.target, roots: roots, dryRun: false
+            scriptURL: scriptURL, target: preview.target, roots: roots,
+            hubDirectory: hubDirectory, dryRun: false
         )
         Task.detached(priority: .userInitiated) {
             let events = Self.run(arguments)
@@ -125,12 +138,13 @@ final class ModelRemovalManager: ObservableObject {
     // MARK: - Process
 
     nonisolated private static func arguments(
-        scriptURL: URL, target: URL, roots: [URL], dryRun: Bool
+        scriptURL: URL, target: URL, roots: [URL], hubDirectory: URL, dryRun: Bool
     ) -> [String] {
         var arguments = ["python3", scriptURL.path]
         for root in roots {
             arguments.append(contentsOf: ["--root", root.path])
         }
+        arguments.append(contentsOf: ["--hub", hubDirectory.path])
         arguments.append(contentsOf: ["--target", target.path])
         if dryRun { arguments.append("--dry-run") }
         return arguments

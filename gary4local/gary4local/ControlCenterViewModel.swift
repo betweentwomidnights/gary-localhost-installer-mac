@@ -1721,7 +1721,8 @@ final class ControlCenterViewModel: ObservableObject {
             scriptURL: script,
             target: target,
             displayName: displayName,
-            roots: modelRemovalRoots
+            roots: modelRemovalRoots,
+            hubDirectory: huggingFaceHubDirectory
         )
     }
 
@@ -1731,7 +1732,8 @@ final class ControlCenterViewModel: ObservableObject {
         modelRemovalManager.remove(
             scriptURL: script,
             preview: preview,
-            roots: modelRemovalRoots
+            roots: modelRemovalRoots,
+            hubDirectory: huggingFaceHubDirectory
         )
     }
 

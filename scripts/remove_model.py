@@ -38,7 +38,121 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from apfs_extents import first_extent_offset  # noqa: E402
 
+import hashlib
+
 LARGE_FILE_BYTES = 1 * 1024 * 1024
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def snapshot_references(hub: Path) -> dict:
+    """blob path -> the snapshot symlinks pointing at it, keyed by repo.
+
+    macOS symlinks its snapshots into blobs/, so following each link is how you
+    learn which logical file a blob actually serves.
+    """
+    refs = {}
+    if not hub.is_dir():
+        return refs
+    for repo in hub.iterdir():
+        snapshots = repo / "snapshots"
+        if not snapshots.is_dir():
+            continue
+        for dirpath, _dirnames, filenames in os.walk(snapshots):
+            for name in filenames:
+                link = Path(dirpath) / name
+                if not link.is_symlink():
+                    continue
+                try:
+                    target = link.resolve()
+                except OSError:
+                    continue
+                refs.setdefault(str(target), []).append(link)
+    return refs
+
+
+def backing_cache_entries(model_dir: Path, hub: Path) -> tuple:
+    """Cache blobs that exist only to serve this model, and their symlinks.
+
+    A blob is claimed only when every snapshot link pointing at it names a file
+    this model owns -- either at the repo root (a dedicated repo) or under a
+    folder named after the model (a repo shared with other models, which is how
+    ACE-Step/Ace-Step1.5 carries Qwen, the VAE and v15-turbo together). Anything
+    else is left alone, because removing it would take another model's files
+    with it.
+    """
+    model_name = model_dir.name
+    owned = set()
+    by_extent = {}
+    by_hash = {}
+    for path, size in iter_files(model_dir):
+        rel = str(path.relative_to(model_dir))
+        owned.add(rel)
+        if size >= LARGE_FILE_BYTES:
+            offset = first_extent_offset(str(path))
+            if offset is not None:
+                by_extent.setdefault(offset, []).append(rel)
+        else:
+            try:
+                by_hash.setdefault(sha256_file(path), []).append(rel)
+            except OSError:
+                continue
+
+    refs = snapshot_references(hub)
+    blobs = []
+    links = []
+    for repo in (hub.iterdir() if hub.is_dir() else []):
+        blob_dir = repo / "blobs"
+        if not blob_dir.is_dir():
+            continue
+        for blob in blob_dir.iterdir():
+            if blob.is_symlink() or not blob.is_file():
+                continue
+            try:
+                size = blob.stat().st_size
+            except OSError:
+                continue
+
+            claimed = False
+            if size >= LARGE_FILE_BYTES:
+                offset = first_extent_offset(str(blob))
+                claimed = offset is not None and offset in by_extent
+            else:
+                claimed = blob.name in by_hash
+
+            if not claimed:
+                continue
+
+            # Every link to it must name a file this model owns.
+            blob_links = refs.get(str(blob.resolve()), [])
+            exclusive = True
+            for link in blob_links:
+                parts = link.parts
+                try:
+                    snap_index = len(parts) - 1 - parts[::-1].index("snapshots")
+                except ValueError:
+                    exclusive = False
+                    break
+                logical = Path(*parts[snap_index + 2:])
+                as_str = str(logical)
+                if as_str in owned:
+                    continue
+                if logical.parts and logical.parts[0] == model_name \
+                        and str(Path(*logical.parts[1:])) in owned:
+                    continue
+                exclusive = False
+                break
+
+            if exclusive:
+                blobs.append(blob)
+                links.extend(blob_links)
+    return blobs, links
 
 
 def emit(event: dict) -> None:
@@ -121,6 +235,29 @@ def resolve_target(target: str, roots: list) -> Path:
     raise ValueError(f"target is not inside an allowed root: {resolved}")
 
 
+def prune_empty_dirs(paths: list) -> None:
+    """Drop directories left empty by the files we just removed.
+
+    Stops at blobs/ and snapshots/ so a repo that still holds other models
+    keeps its shape.
+    """
+    stops = {"blobs", "snapshots"}
+    seen = set()
+    for path in paths:
+        parent = path.parent
+        while parent not in seen:
+            seen.add(parent)
+            if parent.name in stops or not parent.is_dir():
+                break
+            try:
+                if any(parent.iterdir()):
+                    break
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+
+
 def free_bytes(path: Path) -> int:
     stat = os.statvfs(str(path))
     return stat.f_bavail * stat.f_frsize
@@ -132,6 +269,15 @@ def main() -> int:
                         help="An allowed root. Repeatable.")
     parser.add_argument("--target", required=True, help="Directory to remove.")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--hub",
+        default=None,
+        help=(
+            "Hugging Face cache. When given, cache files that exist only to "
+            "serve this model are removed with it -- otherwise deleting a "
+            "checkpoint that was cloned from the cache frees nothing."
+        ),
+    )
     args = parser.parse_args()
 
     roots = [Path(r).expanduser() for r in args.root]
@@ -157,19 +303,41 @@ def main() -> int:
     keep_roots = [r for r in existing_roots if r.resolve() != target]
 
     emit({"event": "measuring", "target": str(target)})
+
+    # Cache copies that serve only this model go with it. Without this, removing
+    # a Carey checkpoint frees nothing at all: it is a clone, and the bytes stay
+    # behind held by the blob it was cloned from.
+    hub = Path(args.hub).expanduser() if args.hub else None
+    cache_blobs, cache_links = ([], [])
+    if hub is not None and hub.is_dir() and target != hub and hub not in target.parents:
+        cache_blobs, cache_links = backing_cache_entries(target, hub)
+
     logical, freeable, files = measure_target(target, keep_roots)
+    cache_bytes = 0
+    for blob in cache_blobs:
+        try:
+            cache_bytes += blob.stat().st_size
+        except OSError:
+            continue
+
+    # Once the cache copy goes too, the shared bytes are genuinely recoverable.
+    total_logical = logical + cache_bytes
+    total_freeable = min(total_logical, freeable + cache_bytes)
+
     emit({
         "event": "measured",
         "target": str(target),
-        "logical_bytes": logical,
-        "freeable_bytes": freeable,
-        "shared_bytes": max(0, logical - freeable),
-        "files": files,
+        "logical_bytes": total_logical,
+        "freeable_bytes": total_freeable,
+        "shared_bytes": max(0, total_logical - total_freeable),
+        "files": files + len(cache_blobs),
+        "cache_blobs": len(cache_blobs),
+        "cache_bytes": cache_bytes,
     })
 
     if args.dry_run:
         emit({"event": "done", "dry_run": True, "removed": False,
-              "logical_bytes": logical, "freeable_bytes": freeable,
+              "logical_bytes": total_logical, "freeable_bytes": total_freeable,
               "freed_bytes": 0})
         return 0
 
@@ -179,14 +347,31 @@ def main() -> int:
     except OSError as exc:
         emit({"event": "error", "message": f"could not remove {target}: {exc}"})
         return 1
+
+    # Symlinks first: a blob removed while a link still points at it leaves a
+    # dangling entry that the hub reads as a corrupt cache rather than a missing
+    # model.
+    for link in cache_links:
+        try:
+            link.unlink()
+        except OSError:
+            continue
+    for blob in cache_blobs:
+        try:
+            blob.unlink()
+        except OSError:
+            continue
+    prune_empty_dirs(cache_links + cache_blobs)
+
     freed = free_bytes(target.parent) - before
 
     emit({
         "event": "done",
         "dry_run": False,
         "removed": True,
-        "logical_bytes": logical,
-        "freeable_bytes": freeable,
+        "logical_bytes": total_logical,
+        "freeable_bytes": total_freeable,
+        "cache_blobs": len(cache_blobs),
         # What the volume actually gave back. Differs from freeable_bytes when
         # something else wrote to the disk while this ran.
         "freed_bytes": freed,
