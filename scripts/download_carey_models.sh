@@ -423,6 +423,51 @@ def resolve_cached_file() -> str:
 
 
 cached_path = resolve_cached_file()
+def place_file(cached_path, out_path):
+    """Put the cached file at out_path, cloning it when the filesystem can.
+
+    The Hugging Face cache and the checkpoints tree are both under Application
+    Support, so on APFS they are the same volume and clonefile(2) gives us a
+    copy-on-write clone: instant, no additional space, and still two
+    independent files -- removing either one leaves the other whole. A plain
+    copy here is what made every Carey model cost twice its size on disk, once
+    as a cache blob and again as a checkpoint.
+
+    Falls back to a real copy on anything that will not clone (a different
+    volume, or a filesystem without COW support).
+
+    Returns "cloned" or "copied" so the log says which happened.
+    """
+    tmp_path = out_path + ".clone.tmp"
+    for stale in (tmp_path,):
+        try:
+            os.unlink(stale)
+        except FileNotFoundError:
+            pass
+    try:
+        import ctypes
+        import ctypes.util
+
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        clonefile = libc.clonefile
+        clonefile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+        clonefile.restype = ctypes.c_int
+        if clonefile(os.fsencode(cached_path), os.fsencode(tmp_path), 0) == 0:
+            shutil.copystat(cached_path, tmp_path)
+            os.replace(tmp_path, out_path)
+            return "cloned"
+    except Exception:
+        pass
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+
+    shutil.copy2(cached_path, out_path)
+    return "copied"
+
+
 os.makedirs(os.path.dirname(out_path), exist_ok=True)
 cached_size = os.path.getsize(cached_path)
 if os.path.exists(out_path):
@@ -430,11 +475,11 @@ if os.path.exists(out_path):
     if existing_size == cached_size and existing_size > 0:
         print(f"[{label}] already complete: {out_path} ({existing_size} bytes)", flush=True)
     else:
-        shutil.copy2(cached_path, out_path)
-        print(f"[{label}] refreshed: {out_path} ({cached_size} bytes)", flush=True)
+        how = place_file(cached_path, out_path)
+        print(f"[{label}] refreshed ({how}): {out_path} ({cached_size} bytes)", flush=True)
 else:
-    shutil.copy2(cached_path, out_path)
-    print(f"[{label}] complete: {out_path} ({cached_size} bytes)", flush=True)
+    how = place_file(cached_path, out_path)
+    print(f"[{label}] complete ({how}): {out_path} ({cached_size} bytes)", flush=True)
 PY
 }
 
