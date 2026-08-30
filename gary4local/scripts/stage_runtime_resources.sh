@@ -64,6 +64,8 @@ chmod +x "${RUNTIME_DST}/scripts/reclaim_duplicate_models.py"
 cp "${REPO_ROOT}/scripts/measure_storage.py" "${RUNTIME_DST}/scripts/measure_storage.py"
 chmod +x "${RUNTIME_DST}/scripts/measure_storage.py"
 cp "${REPO_ROOT}/scripts/apfs_extents.py" "${RUNTIME_DST}/scripts/apfs_extents.py"
+cp "${REPO_ROOT}/scripts/remove_model.py" "${RUNTIME_DST}/scripts/remove_model.py"
+chmod +x "${RUNTIME_DST}/scripts/remove_model.py"
 
 # Keep app bundle lean; checkpoints will be managed in cache/runtime.
 rm -rf "${RUNTIME_DST}/ace-lego/ACE-Step-1.5/checkpoints" || true

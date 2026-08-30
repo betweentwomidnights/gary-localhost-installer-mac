@@ -91,7 +91,7 @@ struct ControlCenterView: View {
             }
         }
         .sheet(isPresented: $viewModel.isModelDownloadSheetPresented) {
-            ModelDownloadSheet(viewModel: viewModel)
+            ModelDownloadSheet(viewModel: viewModel, removal: viewModel.modelRemovalManager)
         }
         .sheet(isPresented: $viewModel.isCareyLoraSheetPresented) {
             CareyLoraManagerSheet(viewModel: viewModel)
@@ -1949,7 +1949,55 @@ private struct CareyLoraManagerSheet: View {
 
 private struct ModelDownloadSheet: View {
     @ObservedObject var viewModel: ControlCenterViewModel
+    @ObservedObject var removal: ModelRemovalManager
     @Environment(\.dismiss) private var dismiss
+
+    /// Say what removing this actually gives back, not what the folder weighs.
+    /// A Carey checkpoint cloned from a cache blob frees nothing on its own,
+    /// and someone deleting 20GB expecting 20GB back deserves to know first.
+    static func removalMessage(for preview: ModelRemovalPreview) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        let logical = formatter.string(fromByteCount: preview.logicalBytes)
+        let freeable = formatter.string(fromByteCount: preview.freeableBytes)
+
+        if preview.freesNothing {
+            return "\(preview.displayName) holds \(logical) across \(preview.files) files, but all of it is shared with the model cache — removing it will not free any space. it would have to be downloaded again to use."
+        }
+        if preview.sharedBytes > 0 {
+            return "\(preview.displayName) holds \(logical) across \(preview.files) files. removing it frees \(freeable); the rest is shared with the model cache. it would have to be downloaded again to use."
+        }
+        return "\(preview.displayName) holds \(logical) across \(preview.files) files, all of which will be freed. it would have to be downloaded again to use."
+    }
+
+    @ViewBuilder
+    private var modelRemovalStatus: some View {
+        if removal.isMeasuring || removal.isRemoving || removal.errorMessage != nil
+            || removal.lastResult != nil {
+            HStack(spacing: 8) {
+                if removal.isMeasuring || removal.isRemoving {
+                    ProgressView().controlSize(.small)
+                    Text(removal.isMeasuring
+                         ? "checking what removing that would free..."
+                         : "removing...")
+                        .font(.caption)
+                } else if let error = removal.errorMessage {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                    Button("dismiss") { removal.clearError() }
+                } else if let result = removal.lastResult {
+                    let formatter = ByteCountFormatter()
+                    Text("removed \(result.displayName) — freed \(formatter.string(fromByteCount: result.freedBytes)).")
+                        .font(.caption)
+                    Button("dismiss") { removal.clear() }
+                }
+                Spacer()
+            }
+            .padding(8)
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 6))
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+        }
+    }
 
     var body: some View {
         // The header stays outside the scroll view and the sheet is capped
@@ -1982,6 +2030,27 @@ private struct ModelDownloadSheet: View {
         }
         .padding(16)
         .frame(minWidth: 760, minHeight: 520, maxHeight: 760)
+        .overlay(alignment: .bottom) { modelRemovalStatus }
+        .onChange(of: removal.lastResult) { _, result in
+            // The row that was just removed is stale until the panel rescans.
+            guard result != nil else { return }
+            viewModel.refreshCareyPredownloadInventory()
+            viewModel.refreshModelCatalogAndStatuses()
+            viewModel.scanStorageUsage()
+        }
+        .alert(
+            "remove \(viewModel.modelRemovalManager.preview?.displayName ?? "")?",
+            isPresented: Binding(
+                get: { viewModel.modelRemovalManager.preview != nil },
+                set: { if !$0 { viewModel.modelRemovalManager.clear() } }
+            ),
+            presenting: viewModel.modelRemovalManager.preview
+        ) { preview in
+            Button("remove", role: .destructive) { viewModel.confirmModelRemoval() }
+            Button("cancel", role: .cancel) { viewModel.modelRemovalManager.clear() }
+        } message: { preview in
+            Text(Self.removalMessage(for: preview))
+        }
         .onAppear {
             if viewModel.modelDownloadServiceID != "stable_audio",
                viewModel.modelDownloadServiceID != "sa3",
@@ -2010,6 +2079,30 @@ private struct ModelDownloadSheet: View {
             || normalized.contains("save your hugging face token")
             || normalized.contains("token is required")
             || (normalized.contains("token") && normalized.contains("failed"))
+    }
+
+    /// Remove control for an SA3 inventory row.
+    ///
+    /// Rows are not one-to-one with cache repos: the t5gemma row names a
+    /// subfolder of the inference model's repo, so both rows carry the same
+    /// repo id. Removing "t5gemma" by repo would delete the inference model
+    /// too, under a label that says otherwise. Any repo id appearing on more
+    /// than one row is therefore not removable from here.
+    @ViewBuilder
+    private func sa3RemoveButton(for row: SA3InventoryModelStatus) -> some View {
+        let sharesRepo = viewModel.sa3InventoryModels
+            .filter { $0.repoID == row.repoID }.count > 1
+        if row.downloaded, !sharesRepo {
+            let blocked = viewModel.modelRemovalBlockedReason(ownedBy: "sa3")
+            Button("remove") {
+                viewModel.measureModelRemoval(
+                    target: viewModel.huggingFaceRepoDirectory(for: row.repoID),
+                    displayName: row.label
+                )
+            }
+            .disabled(blocked != nil || viewModel.modelRemovalManager.isBusy)
+            .help(blocked ?? "remove \(row.repoID) from the model cache.")
+        }
     }
 
     @ViewBuilder
@@ -2075,6 +2168,7 @@ private struct ModelDownloadSheet: View {
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
+                        sa3RemoveButton(for: row)
                     }
                 }
             }
@@ -2097,6 +2191,27 @@ private struct ModelDownloadSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
 
         Spacer(minLength: 0)
+    }
+
+    /// Remove control for a model kept in the shared Hugging Face cache.
+    ///
+    /// Skipped for "repo::file" entries: those name a single file inside a
+    /// repo, so treating one as a repo directory would resolve to a path that
+    /// does not exist and report success having removed nothing.
+    @ViewBuilder
+    private func hfRemoveButton(for model: DownloadableModel) -> some View {
+        if model.downloaded, !model.path.contains("::") {
+            let serviceID = viewModel.modelDownloadServiceID
+            let blocked = viewModel.modelRemovalBlockedReason(ownedBy: serviceID)
+            Button("remove") {
+                viewModel.measureModelRemoval(
+                    target: viewModel.huggingFaceRepoDirectory(for: model.path),
+                    displayName: model.displayName
+                )
+            }
+            .disabled(blocked != nil || viewModel.modelRemovalManager.isBusy)
+            .help(blocked ?? "remove \(model.displayName) from the model cache.")
+        }
     }
 
     @ViewBuilder
@@ -2158,6 +2273,7 @@ private struct ModelDownloadSheet: View {
                                         || viewModel.isModelDownloadInProgress
                                         || !viewModel.canManageModelDownloads
                                     )
+                                    hfRemoveButton(for: model)
                                 }
 
                                 Text(model.path)
@@ -2437,6 +2553,7 @@ private struct ModelDownloadSheet: View {
                                 || viewModel.isCareyLifecycleActionInProgress
                             )
                         }
+                        careyRemoveButton(for: row)
                     }
                     Text(row.relativePrefix)
                         .font(.caption2.monospaced())
@@ -2488,6 +2605,7 @@ private struct ModelDownloadSheet: View {
                                 || viewModel.isCareyLifecycleActionInProgress
                             )
                         }
+                        careyRemoveButton(for: row)
                     }
                     Text(row.relativePrefix)
                         .font(.caption2.monospaced())
@@ -2541,6 +2659,7 @@ private struct ModelDownloadSheet: View {
                                 || viewModel.isCareyLifecycleActionInProgress
                             )
                         }
+                        careyRemoveButton(for: row)
                     }
                     .padding(.vertical, 2)
                 }
@@ -2621,6 +2740,22 @@ private struct ModelDownloadSheet: View {
         ]
 
         return careyGroupStatuses(groups: groups, rows: rows)
+    }
+
+    /// Remove control for one Carey model directory. Only offered for a model
+    /// that is actually there, and only when nothing is holding it open.
+    @ViewBuilder
+    private func careyRemoveButton(for row: CareyRequiredGroupStatus) -> some View {
+        if row.downloadedFileCount > 0,
+           let name = row.modelDirectoryName,
+           let target = viewModel.careyModelDirectory(named: name) {
+            let blocked = viewModel.modelRemovalBlockedReason(ownedBy: "carey")
+            Button("remove") {
+                viewModel.measureModelRemoval(target: target, displayName: name)
+            }
+            .disabled(blocked != nil || viewModel.modelRemovalManager.isBusy)
+            .help(blocked ?? "remove \(name) from disk.")
+        }
     }
 
     /// Fold per-file rows into one status per model directory.
@@ -2715,6 +2850,16 @@ private struct CareyRequiredGroupStatus: Identifiable {
 
     var isComplete: Bool {
         totalFileCount > 0 && downloadedFileCount == totalFileCount
+    }
+
+    /// "checkpoints/acestep-v15-xl-base/" -> "acestep-v15-xl-base".
+    var modelDirectoryName: String? {
+        let trimmed = relativePrefix.hasSuffix("/")
+            ? String(relativePrefix.dropLast())
+            : relativePrefix
+        let parts = trimmed.split(separator: "/")
+        guard parts.count == 2, parts[0] == "checkpoints" else { return nil }
+        return String(parts[1])
     }
 }
 

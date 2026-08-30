@@ -1,0 +1,162 @@
+import Combine
+import Foundation
+
+/// Removing a downloaded model, with the checks that make it safe to offer.
+///
+/// The dangerous part is not the delete itself -- it is deleting out from under
+/// something. macOS keeps an unlinked file alive until every handle closes, so
+/// a running service will not crash outright; it will keep working from a file
+/// that no longer has a name, hold the space we promised to free, and then fail
+/// confusingly the next time it tries to load. A download writing into the same
+/// directory is worse, because it races.
+///
+/// So removal is only offered when the owning service is stopped and nothing is
+/// downloading or training. Those checks live in the view model, which is what
+/// can see service state; this type runs the operation and reports it.
+
+struct ModelRemovalPreview: Equatable {
+    var target: URL
+    var displayName: String
+    /// What the directory holds.
+    var logicalBytes: Int64
+    /// What removing it would actually give back. Lower than logicalBytes when
+    /// the files are clones of something that will remain -- a Carey checkpoint
+    /// cloned from a cache blob frees nothing on its own.
+    var freeableBytes: Int64
+    var files: Int
+
+    var sharedBytes: Int64 { max(0, logicalBytes - freeableBytes) }
+    var freesNothing: Bool { freeableBytes == 0 && logicalBytes > 0 }
+}
+
+struct ModelRemovalResult: Equatable {
+    var displayName: String
+    var freedBytes: Int64
+    var logicalBytes: Int64
+}
+
+@MainActor
+final class ModelRemovalManager: ObservableObject {
+    @Published private(set) var preview: ModelRemovalPreview?
+    @Published private(set) var isMeasuring = false
+    @Published private(set) var isRemoving = false
+    @Published private(set) var lastResult: ModelRemovalResult?
+    @Published private(set) var errorMessage: String?
+
+    var isBusy: Bool { isMeasuring || isRemoving }
+
+    func clear() {
+        preview = nil
+        lastResult = nil
+        errorMessage = nil
+    }
+
+    func clearError() { errorMessage = nil }
+
+    /// Measure first, always. The number shown in the confirmation is the one
+    /// the user decides on, so it has to be the honest one rather than the
+    /// directory size.
+    func measure(
+        scriptURL: URL,
+        target: URL,
+        displayName: String,
+        roots: [URL]
+    ) {
+        guard !isBusy else { return }
+        isMeasuring = true
+        errorMessage = nil
+        preview = nil
+
+        let arguments = Self.arguments(scriptURL: scriptURL, target: target, roots: roots, dryRun: true)
+        Task.detached(priority: .userInitiated) {
+            let events = Self.run(arguments)
+            await MainActor.run {
+                self.isMeasuring = false
+                if let failure = Self.firstError(in: events) {
+                    self.errorMessage = failure
+                    return
+                }
+                guard let measured = events.first(where: { $0["event"] as? String == "measured" }) else {
+                    self.errorMessage = "could not measure \(displayName)."
+                    return
+                }
+                self.preview = ModelRemovalPreview(
+                    target: target,
+                    displayName: displayName,
+                    logicalBytes: Int64(measured["logical_bytes"] as? Int ?? 0),
+                    freeableBytes: Int64(measured["freeable_bytes"] as? Int ?? 0),
+                    files: measured["files"] as? Int ?? 0
+                )
+            }
+        }
+    }
+
+    func remove(scriptURL: URL, preview: ModelRemovalPreview, roots: [URL]) {
+        guard !isBusy else { return }
+        isRemoving = true
+        errorMessage = nil
+
+        let arguments = Self.arguments(
+            scriptURL: scriptURL, target: preview.target, roots: roots, dryRun: false
+        )
+        Task.detached(priority: .userInitiated) {
+            let events = Self.run(arguments)
+            await MainActor.run {
+                self.isRemoving = false
+                if let failure = Self.firstError(in: events) {
+                    self.errorMessage = failure
+                    return
+                }
+                guard let done = events.last(where: { $0["event"] as? String == "done" }),
+                      done["removed"] as? Bool == true else {
+                    self.errorMessage = "\(preview.displayName) was not removed."
+                    return
+                }
+                self.lastResult = ModelRemovalResult(
+                    displayName: preview.displayName,
+                    freedBytes: Int64(done["freed_bytes"] as? Int ?? 0),
+                    logicalBytes: Int64(done["logical_bytes"] as? Int ?? 0)
+                )
+                self.preview = nil
+            }
+        }
+    }
+
+    // MARK: - Process
+
+    nonisolated private static func arguments(
+        scriptURL: URL, target: URL, roots: [URL], dryRun: Bool
+    ) -> [String] {
+        var arguments = ["python3", scriptURL.path]
+        for root in roots {
+            arguments.append(contentsOf: ["--root", root.path])
+        }
+        arguments.append(contentsOf: ["--target", target.path])
+        if dryRun { arguments.append("--dry-run") }
+        return arguments
+    }
+
+    nonisolated private static func run(_ arguments: [String]) -> [[String: Any]] {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        task.arguments = arguments
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        do { try task.run() } catch { return [] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+
+        return String(data: data, encoding: .utf8)?
+            .split(separator: "\n")
+            .compactMap { line in
+                (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any]
+            } ?? []
+    }
+
+    nonisolated private static func firstError(in events: [[String: Any]]) -> String? {
+        events
+            .first { $0["event"] as? String == "error" }
+            .flatMap { $0["message"] as? String }
+    }
+}

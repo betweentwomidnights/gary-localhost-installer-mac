@@ -506,6 +506,7 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var isSA3TrainingSheetPresented: Bool = false
     @Published var isStorageSheetPresented: Bool = false
     let storageMaintenanceManager = StorageMaintenanceManager()
+    let modelRemovalManager = ModelRemovalManager()
     @Published var sa3LoraState: SA3LoraState?
     @Published var isSA3LoraLoading: Bool = false
     @Published var isSA3LoraSaving: Bool = false
@@ -1643,6 +1644,105 @@ final class ControlCenterViewModel: ObservableObject {
             return "the reclaim helper is missing from the runtime."
         }
         return "carey is not available in the loaded manifest."
+    }
+
+    // MARK: - Model removal
+
+    /// Roots a removal is allowed to touch. Anything outside these is refused
+    /// by the helper, so this list is the whole blast radius.
+    var modelRemovalRoots: [URL] {
+        var roots = [huggingFaceHubDirectory]
+        if let checkpoints = careyCheckpointDirectory { roots.append(checkpoints) }
+        roots.append(appSupportDirectory.appendingPathComponent("cache/foundation-1", isDirectory: true))
+        return roots
+    }
+
+    private func isServiceRunning(_ serviceID: String) -> Bool {
+        manager?.services.first(where: { $0.id == serviceID })?.processState == .running
+    }
+
+    /// Services that keep their weights in the shared Hugging Face cache. A
+    /// model removed from there may be in use by any of them, not just the one
+    /// whose panel you are looking at.
+    private static let huggingFaceCacheServices = [
+        "audiocraft_mlx", "melodyflow", "sa3", "stable_audio", "foundation",
+    ]
+
+    /// Whether a model may be removed right now.
+    ///
+    /// Unlinking a file a running service holds open does not fail on macOS --
+    /// the inode survives until the handle closes -- which is exactly why this
+    /// has to be checked rather than left to error out. The service keeps
+    /// working from a file with no name, the space does not come back, and the
+    /// next load fails with something unhelpful.
+    func canRemoveModel(ownedBy serviceID: String) -> Bool {
+        modelRemovalBlockedReason(ownedBy: serviceID) == nil
+    }
+
+    func modelRemovalBlockedReason(ownedBy serviceID: String) -> String? {
+        if runtimeScriptURL("remove_model.py") == nil {
+            return "the removal helper is missing from the runtime."
+        }
+        if isModelDownloadInProgress || isCareyDownloadInProgress {
+            return "wait for the running download to finish."
+        }
+        if careyAceTrainingManager.state?.isActive == true {
+            return "wait for carey training to finish."
+        }
+        if sa3TrainingManager.state?.isActive == true {
+            return "wait for sa3 training to finish."
+        }
+        if sa3AutolabelManager.state?.isActive == true {
+            return "wait for auto-labelling to finish."
+        }
+        if storageMaintenanceManager.isReclaiming {
+            return "wait for the duplicate reclaim to finish."
+        }
+        if isServiceRunning(serviceID) {
+            return "stop \(serviceID == "audiocraft_mlx" ? "gary" : serviceID) before removing its models."
+        }
+        // Carey keeps its own checkpoints; everything else shares the HF cache,
+        // so any of those running could be holding the model open.
+        if serviceID != "carey" {
+            let others = Self.huggingFaceCacheServices
+                .filter { $0 != serviceID && isServiceRunning($0) }
+            if !others.isEmpty {
+                return "stop \(others.joined(separator: ", ")) too — they share the same model cache."
+            }
+        }
+        return nil
+    }
+
+    func measureModelRemoval(target: URL, displayName: String) {
+        guard let script = runtimeScriptURL("remove_model.py") else {
+            return
+        }
+        modelRemovalManager.measure(
+            scriptURL: script,
+            target: target,
+            displayName: displayName,
+            roots: modelRemovalRoots
+        )
+    }
+
+    func confirmModelRemoval() {
+        guard let script = runtimeScriptURL("remove_model.py"),
+              let preview = modelRemovalManager.preview else { return }
+        modelRemovalManager.remove(
+            scriptURL: script,
+            preview: preview,
+            roots: modelRemovalRoots
+        )
+    }
+
+    /// Directory holding a Hugging Face repo's cached files.
+    func huggingFaceRepoDirectory(for repoID: String) -> URL {
+        let folder = "models--" + repoID.replacingOccurrences(of: "/", with: "--")
+        return huggingFaceHubDirectory.appendingPathComponent(folder, isDirectory: true)
+    }
+
+    func careyModelDirectory(named name: String) -> URL? {
+        careyCheckpointDirectory?.appendingPathComponent(name, isDirectory: true)
     }
 
     func scanStorageUsage() {
