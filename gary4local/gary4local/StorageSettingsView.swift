@@ -58,6 +58,10 @@ struct StorageSettingsSheet: View {
                 row("service environments", usage.environmentsBytes)
                 row("everything else", usage.otherBytes)
                 row("gary4local total", usage.totalBytes, emphasised: true)
+                Text("files that share storage are counted in full on both sides, so these can add up to more than the disk actually gives back.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 2)
             } else if storage.isScanning {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
@@ -89,7 +93,7 @@ struct StorageSettingsSheet: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("duplicated model files")
                 .font(.caption.weight(.semibold))
-            Text("carey models used to be stored twice — once in the hugging face cache, once in the checkpoints folder. this replaces the second copy with a clone sharing the same storage. nothing is deleted and both copies stay readable, so the folder sizes above will not change — the free space will.")
+            Text("carey models used to be stored twice — once in the hugging face cache, once in the checkpoints folder. this replaces the second copy with a clone that shares the same storage, so the space comes back without deleting anything. watch free space, not the folder sizes.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
