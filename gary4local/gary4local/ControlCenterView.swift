@@ -2476,6 +2476,57 @@ private struct ModelDownloadSheet: View {
             .padding(.vertical, 2)
         }
 
+        if !viewModel.careyCaptionerModels.isEmpty {
+            Divider()
+
+            let captionerRows = careyGroupedCaptionerModels(from: viewModel.careyCaptionerModels)
+            let readyCount = captionerRows.filter(\.isComplete).count
+            VStack(alignment: .leading, spacing: 6) {
+                Text("captioner models (\(readyCount)/\(captionerRows.count) available)")
+                    .font(.caption.weight(.semibold))
+                Text("used to auto-label a dataset and to caption training clips. generation never loads these — download only the one you want to caption with.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(captionerRows) { row in
+                    HStack(spacing: 8) {
+                        let indicatorColor: Color = row.isComplete
+                            ? .green
+                            : (row.downloadedFileCount > 0 ? .orange : Color.gray.opacity(0.5))
+                        Circle()
+                            .fill(indicatorColor)
+                            .frame(width: 8, height: 8)
+                        Text(row.label)
+                            .font(.caption.monospaced())
+                        Spacer()
+                        Text(
+                            row.isComplete
+                            ? formatByteCount(row.downloadedBytes)
+                            : "\(row.downloadedFileCount)/\(row.totalFileCount) files"
+                        )
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        if let downloadTarget = row.downloadTarget {
+                            Button(
+                                viewModel.isCareyDownloadTargetActive(downloadTarget)
+                                    ? "downloading..."
+                                    : (row.isComplete ? "downloaded" : "download")
+                            ) {
+                                viewModel.startCareyFocusedDownload(for: downloadTarget)
+                            }
+                            .disabled(
+                                row.isComplete
+                                || !viewModel.canRunCareyFocusedDownload
+                                || viewModel.isModelDownloadInProgress
+                                || viewModel.isCareyLifecycleActionInProgress
+                            )
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+
         Divider()
 
         VStack(alignment: .leading, spacing: 8) {
@@ -2540,7 +2591,7 @@ private struct ModelDownloadSheet: View {
         let baseConfig = useXlModels ? "acestep-v15-xl-base" : "acestep-v15-base"
         let sftConfig = useXlModels ? "acestep-v15-xl-sft" : "acestep-v15-sft"
         let turboConfig = useXlModels ? "acestep-v15-xl-turbo" : "acestep-v15-turbo"
-        var groups: [(id: String, label: String, prefix: String, downloadTarget: CareyDownloadTarget?)] = [
+        let groups: [(id: String, label: String, prefix: String, downloadTarget: CareyDownloadTarget?)] = [
             ("dit_base", "DiT Base / Lego Base (\(baseConfig))", "checkpoints/\(baseConfig)/", CareyDownloadTarget.base),
             ("dit_sft", "DiT SFT (\(sftConfig))", "checkpoints/\(sftConfig)/", CareyDownloadTarget.sft),
             ("dit_turbo", "DiT Turbo (\(turboConfig))", "checkpoints/\(turboConfig)/", CareyDownloadTarget.turbo),
@@ -2548,7 +2599,15 @@ private struct ModelDownloadSheet: View {
             ("vae", "VAE", "checkpoints/vae/", nil),
         ]
 
-        return groups.compactMap { group in
+        return careyGroupStatuses(groups: groups, rows: rows)
+    }
+
+    /// Fold per-file rows into one status per model directory.
+    private func careyGroupStatuses(
+        groups: [(id: String, label: String, prefix: String, downloadTarget: CareyDownloadTarget?)],
+        rows: [CareyRequiredModelStatus]
+    ) -> [CareyRequiredGroupStatus] {
+        groups.compactMap { group in
             let matched = rows.filter { $0.relativePath.hasPrefix(group.prefix) }
             guard !matched.isEmpty else { return nil }
 
@@ -2571,6 +2630,22 @@ private struct ModelDownloadSheet: View {
         }
     }
 
+    private func careyGroupedCaptionerModels(
+        from rows: [CareyRequiredModelStatus]
+    ) -> [CareyRequiredGroupStatus] {
+        // Sizes are worth showing: these are opt-in and 4B is the largest single
+        // download in the app.
+        let groups: [(id: String, label: String, prefix: String, downloadTarget: CareyDownloadTarget?)] = [
+            ("captioner_06b", "5Hz LM 0.6B — fastest, lowest quality (1.4 GB)",
+             "checkpoints/acestep-5Hz-lm-0.6B/", CareyDownloadTarget.captionerSmall),
+            ("captioner_17b", "5Hz LM 1.7B — default (3.8 GB)",
+             "checkpoints/acestep-5Hz-lm-1.7B/", CareyDownloadTarget.captionerMedium),
+            ("captioner_4b", "5Hz LM 4B — best quality, large memory (8.4 GB)",
+             "checkpoints/acestep-5Hz-lm-4B/", CareyDownloadTarget.captionerLarge),
+        ]
+        return careyGroupStatuses(groups: groups, rows: rows)
+    }
+
     private func careyGroupedOptionalModels(
         from rows: [CareyRequiredModelStatus]
     ) -> [CareyRequiredGroupStatus] {
@@ -2578,27 +2653,7 @@ private struct ModelDownloadSheet: View {
             ("scrag_vae", "ScragVAE (alternate decoder)", "checkpoints/scrag-vae/", CareyDownloadTarget.scragVae),
         ]
 
-        return groups.compactMap { group in
-            let matched = rows.filter { $0.relativePath.hasPrefix(group.prefix) }
-            guard !matched.isEmpty else { return nil }
-
-            let downloadedFileCount = matched.filter(\.downloaded).count
-            let downloadedBytes = matched.reduce(into: Int64(0)) { partial, row in
-                if row.downloaded {
-                    partial += row.sizeBytes
-                }
-            }
-
-            return CareyRequiredGroupStatus(
-                id: group.id,
-                label: group.label,
-                relativePrefix: group.prefix,
-                downloadTarget: group.downloadTarget,
-                downloadedFileCount: downloadedFileCount,
-                totalFileCount: matched.count,
-                downloadedBytes: downloadedBytes
-            )
-        }
+        return careyGroupStatuses(groups: groups, rows: rows)
     }
 
     @ViewBuilder

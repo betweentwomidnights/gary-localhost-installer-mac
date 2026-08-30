@@ -177,6 +177,12 @@ enum CareyDownloadTarget: String, CaseIterable, Identifiable {
     case turbo
     case shared
     case scragVae = "scrag-vae"
+    // The 5Hz captioner LMs. Opt-in rather than part of "all": only
+    // auto-labelling and training captions load them, and all three together
+    // are ~13.5GB.
+    case captionerSmall = "lm-0.6b"
+    case captionerMedium = "lm-1.7b"
+    case captionerLarge = "lm-4b"
 
     var id: String { rawValue }
 
@@ -192,8 +198,32 @@ enum CareyDownloadTarget: String, CaseIterable, Identifiable {
             return "shared"
         case .scragVae:
             return "scrag vae"
+        case .captionerSmall:
+            return "captioner 0.6b"
+        case .captionerMedium:
+            return "captioner 1.7b"
+        case .captionerLarge:
+            return "captioner 4b"
         }
     }
+
+    /// Checkpoint subdirectory this target populates, for the captioners.
+    var captionerModelName: String? {
+        switch self {
+        case .captionerSmall:
+            return "acestep-5Hz-lm-0.6B"
+        case .captionerMedium:
+            return "acestep-5Hz-lm-1.7B"
+        case .captionerLarge:
+            return "acestep-5Hz-lm-4B"
+        default:
+            return nil
+        }
+    }
+
+    static let captioners: [CareyDownloadTarget] = [
+        .captionerSmall, .captionerMedium, .captionerLarge,
+    ]
 }
 
 enum CareyLoraModelFamily: String, CaseIterable, Identifiable, Codable {
@@ -455,6 +485,7 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var sa3PredownloadTargetLabel: String = ""
     @Published var careyRequiredModels: [CareyRequiredModelStatus] = []
     @Published var careyOptionalModels: [CareyRequiredModelStatus] = []
+    @Published var careyCaptionerModels: [CareyRequiredModelStatus] = []
     @Published var isCareyDownloadInProgress: Bool = false
     @Published var isCareyLifecycleActionInProgress: Bool = false
     @Published var careyPredownloadProgress: Double = 0
@@ -562,6 +593,35 @@ final class ControlCenterViewModel: ObservableObject {
         ("ScragVAE Weights", "checkpoints/scrag-vae/diffusion_pytorch_model.safetensors"),
         ("ScragVAE Config", "checkpoints/scrag-vae/config.json"),
     ]
+
+    /// Files download_carey_models.sh writes for a captioner. 4B is sharded
+    /// into two safetensors plus an index; the other two are a single file.
+    /// Keep this in step with `download_captioner_model` in that script.
+    static func careyCaptionerRequiredFiles(
+        for target: CareyDownloadTarget
+    ) -> [(label: String, relativePath: String)] {
+        guard let model = target.captionerModelName else { return [] }
+        let weights: [String] = target == .captionerLarge
+            ? [
+                "model.safetensors.index.json",
+                "model-00001-of-00002.safetensors",
+                "model-00002-of-00002.safetensors",
+            ]
+            : ["model.safetensors"]
+        let common = [
+            "config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "vocab.json",
+            "merges.txt",
+            "added_tokens.json",
+            "special_tokens_map.json",
+            "chat_template.jinja",
+        ]
+        return (common + weights).map { file in
+            ("\(model) \(file)", "checkpoints/\(model)/\(file)")
+        }
+    }
 
     private static func careyDiTRequiredFiles(
         labelPrefix: String,
@@ -1002,6 +1062,9 @@ final class ControlCenterViewModel: ObservableObject {
         if targetSet.contains(.scragVae) {
             files += Self.careyOptionalModelFiles
         }
+        for captioner in CareyDownloadTarget.captioners where targetSet.contains(captioner) {
+            files += Self.careyCaptionerRequiredFiles(for: captioner)
+        }
         return files
     }
 
@@ -1043,6 +1106,7 @@ final class ControlCenterViewModel: ObservableObject {
         careyActiveDownloadTargets = []
         careyRequiredModels = []
         careyOptionalModels = []
+        careyCaptionerModels = []
         rebuildFailureReport = nil
         rebuildDiagnosticsStatusMessage = ""
         managerCancellables.removeAll()
@@ -1084,6 +1148,7 @@ final class ControlCenterViewModel: ObservableObject {
             downloadableModels = []
             careyRequiredModels = []
             careyOptionalModels = []
+            careyCaptionerModels = []
             modelDownloadStatusMessage = ""
             isModelCatalogLoading = false
         }
@@ -2665,6 +2730,7 @@ final class ControlCenterViewModel: ObservableObject {
         guard let runtime = manager?.services.first(where: { $0.id == "carey" }) else {
             careyRequiredModels = []
             careyOptionalModels = []
+            careyCaptionerModels = []
             return
         }
 
@@ -2698,9 +2764,20 @@ final class ControlCenterViewModel: ObservableObject {
         }
         let rows = inventoryRows(requiredModelFiles)
         let optionalRows = inventoryRows(Self.careyOptionalModelFiles)
+        // Captioners are tracked in their own list rather than folded into the
+        // optional one: isCareyScragVaeDownloaded and the panel's optional
+        // counts both read careyOptionalModels as "ScragVAE", and three opt-in
+        // multi-GB models would make that permanently incomplete. Scanned
+        // unconditionally so a trainer can say which captioner you already have.
+        let captionerRows = inventoryRows(
+            CareyDownloadTarget.captioners.flatMap {
+                Self.careyCaptionerRequiredFiles(for: $0)
+            }
+        )
 
         careyRequiredModels = rows
         careyOptionalModels = optionalRows
+        careyCaptionerModels = captionerRows
         if !isCareyDownloadInProgress {
             let downloadedCount = rows.filter(\.downloaded).count
             let optionalReady = optionalRows.allSatisfy(\.downloaded)

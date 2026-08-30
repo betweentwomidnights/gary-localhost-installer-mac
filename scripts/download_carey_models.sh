@@ -30,6 +30,9 @@ DOWNLOAD_SFT=0
 DOWNLOAD_TURBO=0
 DOWNLOAD_SHARED=0
 DOWNLOAD_SCRAG_VAE=0
+DOWNLOAD_LM_06B=0
+DOWNLOAD_LM_17B=0
+DOWNLOAD_LM_4B=0
 
 if [[ ! -d "${ACE_ROOT}" ]]; then
   echo "ACE-Step repo not found at: ${ACE_ROOT}"
@@ -42,6 +45,10 @@ normalize_carey_download_targets() {
   raw_targets="$(printf '%s' "${CAREY_DOWNLOAD_TARGETS}" | tr '[:upper:]' '[:lower:]')"
   raw_targets="${raw_targets// /}"
 
+  # "all" deliberately leaves the 5Hz captioner LMs out. They are only needed
+  # for auto-labelling and training captions -- generation never loads them
+  # (ACESTEP_INIT_LLM=false) -- and pulling all three would add ~13.5GB to a
+  # default install. They are opt-in, one target each.
   if [[ -z "${raw_targets}" || "${raw_targets}" == "all" ]]; then
     DOWNLOAD_BASE=1
     DOWNLOAD_SFT=1
@@ -70,6 +77,15 @@ normalize_carey_download_targets() {
       scrag|scrag-vae|scragvae)
         DOWNLOAD_SCRAG_VAE=1
         ;;
+      lm-0.6b|acestep-5hz-lm-0.6b)
+        DOWNLOAD_LM_06B=1
+        ;;
+      lm-1.7b|acestep-5hz-lm-1.7b)
+        DOWNLOAD_LM_17B=1
+        ;;
+      lm-4b|acestep-5hz-lm-4b)
+        DOWNLOAD_LM_4B=1
+        ;;
       "")
         ;;
       *)
@@ -79,7 +95,9 @@ normalize_carey_download_targets() {
     esac
   done
 
-  if (( DOWNLOAD_BASE == 0 && DOWNLOAD_SFT == 0 && DOWNLOAD_TURBO == 0 && DOWNLOAD_SHARED == 0 && DOWNLOAD_SCRAG_VAE == 0 )); then
+  if (( DOWNLOAD_BASE == 0 && DOWNLOAD_SFT == 0 && DOWNLOAD_TURBO == 0 && DOWNLOAD_SHARED == 0 \
+        && DOWNLOAD_SCRAG_VAE == 0 && DOWNLOAD_LM_06B == 0 && DOWNLOAD_LM_17B == 0 \
+        && DOWNLOAD_LM_4B == 0 )); then
     echo "CAREY_DOWNLOAD_TARGETS did not select any downloads." >&2
     return 1
   fi
@@ -439,6 +457,44 @@ download_required_file() {
     "${out_name}"
 }
 
+# The three 5Hz captioner LMs do not share a layout:
+#
+#   0.6B  own repo, files at the root, single model.safetensors
+#   1.7B  NO standalone repo -- it lives inside ACE-Step/Ace-Step1.5 under
+#         acestep-5Hz-lm-1.7B/, the same way Qwen3-Embedding-0.6B does
+#   4B    own repo, root, sharded into two safetensors plus an index
+#
+# So the repo and the in-repo prefix are both per-model, and the weight files
+# are passed in. Everything lands in checkpoints/<model>/ either way, which is
+# what ACESTEP_LM_MODEL_PATH and the MLX loader expect.
+download_captioner_model() {
+  local model="$1"
+  local repo="$2"
+  local prefix="$3"
+  shift 3
+  local weight_files=("$@")
+
+  local common_files=(
+    config.json
+    tokenizer.json
+    tokenizer_config.json
+    vocab.json
+    merges.txt
+    added_tokens.json
+    special_tokens_map.json
+    chat_template.jinja
+  )
+
+  local file=""
+  for file in "${common_files[@]}" "${weight_files[@]}"; do
+    download_required_file \
+      "${model} ${file}" \
+      "${repo}" \
+      "${prefix}${file}" \
+      "${model}/${file}"
+  done
+}
+
 dit_repo_for_config() {
   local config_name="$1"
   if [[ "${config_name}" == "acestep-v15-turbo" ]]; then
@@ -561,6 +617,32 @@ if (( DOWNLOAD_SCRAG_VAE == 1 )); then
   download_required_file "ScragVAE Config" "scragnog/Ace-Step-1.5-ScragVAE" "config.json" "scrag-vae/config.json"
 fi
 
+if (( DOWNLOAD_LM_06B == 1 )); then
+  download_captioner_model \
+    "acestep-5Hz-lm-0.6B" \
+    "ACE-Step/acestep-5Hz-lm-0.6B" \
+    "" \
+    "model.safetensors"
+fi
+
+if (( DOWNLOAD_LM_17B == 1 )); then
+  download_captioner_model \
+    "acestep-5Hz-lm-1.7B" \
+    "ACE-Step/Ace-Step1.5" \
+    "acestep-5Hz-lm-1.7B/" \
+    "model.safetensors"
+fi
+
+if (( DOWNLOAD_LM_4B == 1 )); then
+  download_captioner_model \
+    "acestep-5Hz-lm-4B" \
+    "ACE-Step/acestep-5Hz-lm-4B" \
+    "" \
+    "model.safetensors.index.json" \
+    "model-00001-of-00002.safetensors" \
+    "model-00002-of-00002.safetensors"
+fi
+
 echo
 echo "Requested Carey model files are present."
 echo "Quick check:"
@@ -589,6 +671,18 @@ if (( DOWNLOAD_SCRAG_VAE == 1 )); then
   quick_check_paths+=(
     "${CHECKPOINTS_DIR}/scrag-vae/config.json"
     "${CHECKPOINTS_DIR}/scrag-vae/diffusion_pytorch_model.safetensors"
+  )
+fi
+if (( DOWNLOAD_LM_06B == 1 )); then
+  quick_check_paths+=("${CHECKPOINTS_DIR}/acestep-5Hz-lm-0.6B/model.safetensors")
+fi
+if (( DOWNLOAD_LM_17B == 1 )); then
+  quick_check_paths+=("${CHECKPOINTS_DIR}/acestep-5Hz-lm-1.7B/model.safetensors")
+fi
+if (( DOWNLOAD_LM_4B == 1 )); then
+  quick_check_paths+=(
+    "${CHECKPOINTS_DIR}/acestep-5Hz-lm-4B/model.safetensors.index.json"
+    "${CHECKPOINTS_DIR}/acestep-5Hz-lm-4B/model-00002-of-00002.safetensors"
   )
 fi
 
