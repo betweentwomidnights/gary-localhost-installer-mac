@@ -1597,18 +1597,22 @@ final class ControlCenterViewModel: ObservableObject {
         appSupportDirectory.appendingPathComponent("cache/huggingface/hub", isDirectory: true)
     }
 
-    private func reclaimScriptURL() -> URL? {
+    private func runtimeScriptURL(_ name: String) -> URL? {
         guard let runtime = manager?.services.first(where: { $0.id == "carey" }) else { return nil }
-        // Staged beside download_carey_models.sh in the bundle, and in
-        // scripts/ when running from a checkout.
         let candidates = [
             runtime.service.workingDirectory
                 .deletingLastPathComponent()
                 .deletingLastPathComponent()
-                .appendingPathComponent("scripts/reclaim_duplicate_models.py"),
-            appSupportDirectory.appendingPathComponent("scripts/reclaim_duplicate_models.py"),
+                .appendingPathComponent("scripts/\(name)"),
+            appSupportDirectory.appendingPathComponent("scripts/\(name)"),
         ]
         return candidates.first { FileManager.default.isReadableFile(atPath: $0.path) }
+    }
+
+    // Staged beside download_carey_models.sh in the bundle, and in scripts/
+    // when running from a checkout.
+    private func reclaimScriptURL() -> URL? {
+        runtimeScriptURL("reclaim_duplicate_models.py")
     }
 
     /// Reclaiming rewrites files the services read, so nothing may be running.
@@ -1643,6 +1647,7 @@ final class ControlCenterViewModel: ObservableObject {
 
     func scanStorageUsage() {
         storageMaintenanceManager.scan(
+            scriptURL: runtimeScriptURL("measure_storage.py"),
             appSupportDirectory: appSupportDirectory,
             checkpointsDirectory: careyCheckpointDirectory
         )

@@ -61,6 +61,8 @@ cp "${REPO_ROOT}/scripts/download_carey_models.sh" "${RUNTIME_DST}/scripts/downl
 chmod +x "${RUNTIME_DST}/scripts/download_carey_models.sh"
 cp "${REPO_ROOT}/scripts/reclaim_duplicate_models.py" "${RUNTIME_DST}/scripts/reclaim_duplicate_models.py"
 chmod +x "${RUNTIME_DST}/scripts/reclaim_duplicate_models.py"
+cp "${REPO_ROOT}/scripts/measure_storage.py" "${RUNTIME_DST}/scripts/measure_storage.py"
+chmod +x "${RUNTIME_DST}/scripts/measure_storage.py"
 
 # Keep app bundle lean; checkpoints will be managed in cache/runtime.
 rm -rf "${RUNTIME_DST}/ace-lego/ACE-Step-1.5/checkpoints" || true

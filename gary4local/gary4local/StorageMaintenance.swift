@@ -12,14 +12,30 @@ import Foundation
 /// cannot symlink without developer mode and writes each file twice inside one
 /// repo cache. macOS symlinks fine, so that never happens here.
 
-struct StorageUsage: Equatable {
-    var huggingFaceCacheBytes: Int64 = 0
-    var careyCheckpointsBytes: Int64 = 0
-    var environmentsBytes: Int64 = 0
-    var totalBytes: Int64 = 0
+nonisolated struct StorageEntry: Equatable {
+    /// What the files add up to. What Finder and `du` report.
+    var logicalBytes: Int64 = 0
+    /// What the disk would give back. Files sharing storage with something
+    /// already counted are not counted again.
+    var actualBytes: Int64 = 0
 
-    var otherBytes: Int64 {
-        max(0, totalBytes - huggingFaceCacheBytes - careyCheckpointsBytes - environmentsBytes)
+    var sharedBytes: Int64 { max(0, logicalBytes - actualBytes) }
+    var isMostlyShared: Bool { sharedBytes > actualBytes }
+}
+
+nonisolated struct StorageUsage: Equatable {
+    var huggingFaceCache = StorageEntry()
+    var careyCheckpoints = StorageEntry()
+    var environments = StorageEntry()
+    var other = StorageEntry()
+
+    var totalLogicalBytes: Int64 {
+        huggingFaceCache.logicalBytes + careyCheckpoints.logicalBytes
+            + environments.logicalBytes + other.logicalBytes
+    }
+    var totalActualBytes: Int64 {
+        huggingFaceCache.actualBytes + careyCheckpoints.actualBytes
+            + environments.actualBytes + other.actualBytes
     }
 }
 
@@ -61,43 +77,83 @@ final class StorageMaintenanceManager: ObservableObject {
 
     // MARK: - Sizing
 
-    /// Directory sizes via `du`, which walks the tree in C and finishes in
-    /// about a second on a 200GB install. The Foundation enumerator this
-    /// replaced called stat twice per file and took minutes.
+    /// Real occupancy, via scripts/measure_storage.py.
     ///
-    /// These are logical sizes. A cloned file still reports its full size on
-    /// both sides, so reclaiming duplicates does NOT shrink these numbers --
-    /// it moves volumeFreeBytes instead. That is why both are shown.
-    func scan(appSupportDirectory: URL, checkpointsDirectory: URL?) {
+    /// `du` counts a cloned file in full on both sides, so after the duplicate
+    /// pass it reported a total far bigger than the disk was really using. The
+    /// helper asks APFS for each large file's physical extent and counts shared
+    /// storage once, which is the number that actually moves when space is
+    /// recovered.
+    func scan(scriptURL: URL?, appSupportDirectory: URL, checkpointsDirectory: URL?) {
         volumeFreeBytes = Self.freeBytes(at: appSupportDirectory)
         guard !isScanning else { return }
+        guard let scriptURL else {
+            errorMessage = "the storage measurement helper is missing from the runtime."
+            return
+        }
         isScanning = true
         errorMessage = nil
 
-        let hub = appSupportDirectory
-            .appendingPathComponent("cache/huggingface", isDirectory: true)
+        let hub = appSupportDirectory.appendingPathComponent("cache/huggingface", isDirectory: true)
         let envs = appSupportDirectory.appendingPathComponent("venvs", isDirectory: true)
         let checkpoints = checkpointsDirectory
-        let root = appSupportDirectory
+            ?? appSupportDirectory.appendingPathComponent("cache/carey", isDirectory: true)
 
-        Task.detached(priority: .utility) {
-            var paths = [hub, envs, root]
-            if let checkpoints { paths.append(checkpoints) }
-            let sizes = Self.directorySizes(paths)
+        // userInitiated, not utility: this runs because someone opened the
+        // panel and is watching it. Utility gets throttled disk I/O, which is
+        // most of what this does.
+        Task.detached(priority: .userInitiated) {
+            // Order matters. The cache is charged for storage it shares with
+            // the checkpoints tree, because the cache is what the hub needs to
+            // keep -- so the checkpoints row shows what removing it would give
+            // back, which is the useful way round.
+            var arguments = [
+                "python3", scriptURL.path,
+                "--path", "hub=\(hub.path)",
+                "--path", "checkpoints=\(checkpoints.path)",
+                "--path", "venvs=\(envs.path)",
+                "--path", "other=\(appSupportDirectory.path)",
+            ]
+            let output = Self.runJSON(arguments: &arguments)
+            let free = Self.freeBytes(at: appSupportDirectory)
 
-            let usage = StorageUsage(
-                huggingFaceCacheBytes: sizes[hub.path] ?? 0,
-                careyCheckpointsBytes: checkpoints.flatMap { sizes[$0.path] } ?? 0,
-                environmentsBytes: sizes[envs.path] ?? 0,
-                totalBytes: sizes[root.path] ?? 0
-            )
-            let free = Self.freeBytes(at: root)
             await MainActor.run {
-                self.usage = usage
-                self.volumeFreeBytes = free
                 self.isScanning = false
+                self.volumeFreeBytes = free
+                guard let paths = output?["paths"] as? [String: Any] else {
+                    if self.usage == nil {
+                        self.errorMessage = "could not measure storage."
+                    }
+                    return
+                }
+                func entry(_ key: String) -> StorageEntry {
+                    guard let row = paths[key] as? [String: Any] else { return StorageEntry() }
+                    return StorageEntry(
+                        logicalBytes: Int64(row["logical"] as? Int ?? 0),
+                        actualBytes: Int64(row["actual"] as? Int ?? 0)
+                    )
+                }
+                self.usage = StorageUsage(
+                    huggingFaceCache: entry("hub"),
+                    careyCheckpoints: entry("checkpoints"),
+                    environments: entry("venvs"),
+                    other: entry("other")
+                )
             }
         }
+    }
+
+    nonisolated private static func runJSON(arguments: inout [String]) -> [String: Any]? {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        task.arguments = arguments
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        do { try task.run() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
     nonisolated private static func freeBytes(at url: URL) -> Int64 {
@@ -105,39 +161,6 @@ final class StorageMaintenanceManager: ObservableObject {
             forKeys: [.volumeAvailableCapacityForImportantUsageKey]
         ), let available = values.volumeAvailableCapacityForImportantUsage else { return 0 }
         return Int64(available)
-    }
-
-    /// One `du -sk` for every path we care about. Returns bytes keyed by path.
-    nonisolated private static func directorySizes(_ urls: [URL]) -> [String: Int64] {
-        let existing = urls.filter { FileManager.default.fileExists(atPath: $0.path) }
-        guard !existing.isEmpty else { return [:] }
-
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/du")
-        // -s totals, -k in kibibytes. Paths last so du reports one line each.
-        task.arguments = ["-sk"] + existing.map(\.path)
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = FileHandle.nullDevice
-
-        do {
-            try task.run()
-        } catch {
-            return [:]
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        task.waitUntilExit()
-        guard let text = String(data: data, encoding: .utf8) else { return [:] }
-
-        var sizes: [String: Int64] = [:]
-        for line in text.split(separator: "\n") {
-            // "<kb>\t<path>" -- the path may contain spaces, so split once.
-            guard let tab = line.firstIndex(of: "\t") else { continue }
-            let kb = Int64(line[line.startIndex..<tab].trimmingCharacters(in: .whitespaces)) ?? 0
-            let path = String(line[line.index(after: tab)...])
-            sizes[path] = kb * 1024
-        }
-        return sizes
     }
 
     // MARK: - Reclaim

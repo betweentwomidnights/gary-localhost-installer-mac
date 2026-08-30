@@ -47,21 +47,24 @@ struct StorageSettingsSheet: View {
                 .disabled(storage.isBusy)
             }
 
-            // Free space is instant and is the number that moves when
-            // duplicates are reclaimed, so it is shown even while du runs.
+            // Free space is instant, so the panel says something useful
+            // before the measurement returns.
             row("free on this volume", storage.volumeFreeBytes, emphasised: true)
 
             if let usage = storage.usage {
                 Divider()
-                row("hugging face cache", usage.huggingFaceCacheBytes)
-                row("carey checkpoints", usage.careyCheckpointsBytes)
-                row("service environments", usage.environmentsBytes)
-                row("everything else", usage.otherBytes)
-                row("gary4local total", usage.totalBytes, emphasised: true)
-                Text("files that share storage are counted in full on both sides, so these can add up to more than the disk actually gives back.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 2)
+                entryRow("hugging face cache", usage.huggingFaceCache)
+                entryRow("carey checkpoints", usage.careyCheckpoints)
+                entryRow("service environments", usage.environments)
+                entryRow("everything else", usage.other)
+                Divider()
+                row("gary4local total", usage.totalActualBytes, emphasised: true)
+                if usage.totalLogicalBytes > usage.totalActualBytes {
+                    Text("sizes are what removing each would give back. \(formatBytes(usage.totalLogicalBytes - usage.totalActualBytes)) is shared between them and counted once.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 2)
+                }
             } else if storage.isScanning {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
@@ -86,6 +89,25 @@ struct StorageSettingsSheet: View {
         }
     }
 
+    /// One row, showing what removing this would actually give back. When most
+    /// of it is shared with something else, say so inline -- that is the case
+    /// where a bare number misleads.
+    private func entryRow(_ label: String, _ entry: StorageEntry) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .font(.caption)
+            if entry.sharedBytes > 0 {
+                Text("+\(formatBytes(entry.sharedBytes)) shared")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text(formatBytes(entry.actualBytes))
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+        }
+    }
+
     // MARK: - Reclaim
 
     @ViewBuilder
@@ -93,7 +115,7 @@ struct StorageSettingsSheet: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("duplicated model files")
                 .font(.caption.weight(.semibold))
-            Text("carey models used to be stored twice — once in the hugging face cache, once in the checkpoints folder. this replaces the second copy with a clone that shares the same storage, so the space comes back without deleting anything. watch free space, not the folder sizes.")
+            Text("carey models used to be stored twice — once in the hugging face cache, once in the checkpoints folder. this replaces the second copy with a clone that shares the same storage, so the space comes back without deleting anything.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
