@@ -37,6 +37,9 @@ import shutil
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from apfs_extents import first_extent_offset  # noqa: E402
+
 # Below this, a duplicate is not worth a hash pass.
 MIN_INTERESTING_BYTES = 1 * 1024 * 1024
 HASH_CHUNK = 8 * 1024 * 1024
@@ -200,6 +203,29 @@ def main() -> int:
             "found_bytes": matched_bytes,
             "reclaimed_bytes": reclaimed_bytes,
         })
+
+        # Before reading a byte: if this file already starts at the same
+        # physical extent as one of the same-size blobs, it is already a clone
+        # of it and there is nothing to recover. This is what makes a repeat
+        # run cost a few syscalls per file instead of hashing everything again.
+        own_offset = first_extent_offset(path)
+        already = None
+        if own_offset is not None:
+            for name in blob_sizes[size]:
+                if first_extent_offset(blobs[name]) == own_offset:
+                    already = name
+                    break
+        if already is not None:
+            matched_bytes += size
+            already_shared_files += 1
+            already_shared_bytes += size
+            emit({
+                "event": "already_shared",
+                "file": str(path.relative_to(checkpoints_dir)),
+                "bytes": size,
+            })
+            continue
+
         try:
             digest = sha256_file(path)
         except OSError as exc:

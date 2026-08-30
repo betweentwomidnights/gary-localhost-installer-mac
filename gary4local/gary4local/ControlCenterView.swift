@@ -110,7 +110,10 @@ struct ControlCenterView: View {
             SA3LoraManagerSheet(viewModel: viewModel)
         }
         .sheet(isPresented: $viewModel.isStorageSheetPresented) {
-            StorageSettingsSheet(viewModel: viewModel)
+            StorageSettingsSheet(
+                viewModel: viewModel,
+                storage: viewModel.storageMaintenanceManager
+            )
         }
         .sheet(isPresented: $viewModel.isSA3TrainingSheetPresented) {
             SA3LoraTrainingSheet(

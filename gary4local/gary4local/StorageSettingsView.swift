@@ -2,9 +2,11 @@ import SwiftUI
 
 struct StorageSettingsSheet: View {
     @ObservedObject var viewModel: ControlCenterViewModel
+    // Observed directly. Reaching it through a computed property off the view
+    // model meant SwiftUI never subscribed to it, so progress and spinners
+    // only appeared when something else happened to redraw the view.
+    @ObservedObject var storage: StorageMaintenanceManager
     @Environment(\.dismiss) private var dismiss
-
-    private var storage: StorageMaintenanceManager { viewModel.storageMaintenanceManager }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {

@@ -29,33 +29,14 @@ Caveats worth knowing:
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
-import struct
 import sys
 
-F_LOG2PHYS = 49
-# The kernel struct is packed: u_int32_t + off_t + off_t, no alignment padding.
-LOG2PHYS_FMT = "=IQQ"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from apfs_extents import first_extent_offset  # noqa: E402
+
 LARGE_FILE_BYTES = 1 * 1024 * 1024
-
-
-def first_extent_offset(path: str):
-    """Physical device offset of a file's first extent, or None."""
-    try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return None
-    try:
-        os.lseek(fd, 0, os.SEEK_SET)
-        packed = fcntl.fcntl(fd, F_LOG2PHYS, struct.pack(LOG2PHYS_FMT, 0, 0, 0))
-        _flags, _contig, devoffset = struct.unpack(LOG2PHYS_FMT, packed)
-        return devoffset
-    except OSError:
-        return None
-    finally:
-        os.close(fd)
 
 
 def measure(roots: dict) -> dict:
