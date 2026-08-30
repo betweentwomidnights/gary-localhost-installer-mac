@@ -1648,14 +1648,17 @@ final class ControlCenterViewModel: ObservableObject {
         )
     }
 
-    func reclaimDuplicateModels(dryRun: Bool) {
+    /// One press: find the duplicates and reclaim them. Splitting it into a
+    /// check and then a reclaim meant paying the hashing cost twice for the
+    /// same answer, and the pass only ever clones -- it never deletes -- so
+    /// there is nothing to confirm before it runs.
+    func reclaimDuplicateModels() {
         guard let script = reclaimScriptURL(),
               let checkpoints = careyCheckpointDirectory else { return }
         storageMaintenanceManager.reclaim(
             scriptURL: script,
             checkpointsDirectory: checkpoints,
-            huggingFaceHubDirectory: huggingFaceHubDirectory,
-            dryRun: dryRun
+            huggingFaceHubDirectory: huggingFaceHubDirectory
         )
     }
 

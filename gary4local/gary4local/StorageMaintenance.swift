@@ -16,16 +16,16 @@ struct StorageUsage: Equatable {
     var huggingFaceCacheBytes: Int64 = 0
     var careyCheckpointsBytes: Int64 = 0
     var environmentsBytes: Int64 = 0
-    var otherBytes: Int64 = 0
+    var totalBytes: Int64 = 0
 
-    var totalBytes: Int64 {
-        huggingFaceCacheBytes + careyCheckpointsBytes + environmentsBytes + otherBytes
+    var otherBytes: Int64 {
+        max(0, totalBytes - huggingFaceCacheBytes - careyCheckpointsBytes - environmentsBytes)
     }
 }
 
 struct StorageReclaimResult: Equatable {
-    var wasDryRun: Bool
     var matchedBytes: Int64
+    var reclaimedBytes: Int64
     var reclaimedFiles: Int
     var skipped: Int
     var freeDeltaBytes: Int64
@@ -39,20 +39,31 @@ final class StorageMaintenanceManager: ObservableObject {
     @Published private(set) var progressMessage = ""
     @Published private(set) var lastResult: StorageReclaimResult?
     @Published private(set) var errorMessage: String?
+    /// Free space on the volume. Instant, and the number that actually moves
+    /// when duplicates are reclaimed -- the directory sizes do not, because a
+    /// clone still reports its full size on both sides.
+    @Published private(set) var volumeFreeBytes: Int64 = 0
 
     private var process: Process?
 
+    /// Measuring and reclaiming are independent -- an in-progress measurement
+    /// used to disable the reclaim buttons, which made them look broken.
     var isBusy: Bool { isScanning || isReclaiming }
 
     func clearError() { errorMessage = nil }
 
     // MARK: - Sizing
 
-    /// Directory sizes, measured off the main thread. A full install is
-    /// hundreds of thousands of files, so this is slow enough to freeze the UI
-    /// if it runs inline.
+    /// Directory sizes via `du`, which walks the tree in C and finishes in
+    /// about a second on a 200GB install. The Foundation enumerator this
+    /// replaced called stat twice per file and took minutes.
+    ///
+    /// These are logical sizes. A cloned file still reports its full size on
+    /// both sides, so reclaiming duplicates does NOT shrink these numbers --
+    /// it moves volumeFreeBytes instead. That is why both are shown.
     func scan(appSupportDirectory: URL, checkpointsDirectory: URL?) {
-        guard !isBusy else { return }
+        volumeFreeBytes = Self.freeBytes(at: appSupportDirectory)
+        guard !isScanning else { return }
         isScanning = true
         errorMessage = nil
 
@@ -60,60 +71,66 @@ final class StorageMaintenanceManager: ObservableObject {
             .appendingPathComponent("cache/huggingface", isDirectory: true)
         let envs = appSupportDirectory.appendingPathComponent("venvs", isDirectory: true)
         let checkpoints = checkpointsDirectory
+        let root = appSupportDirectory
 
         Task.detached(priority: .utility) {
-            let hubBytes = Self.directorySize(hub)
-            let envBytes = Self.directorySize(envs)
-            let checkpointBytes = checkpoints.map(Self.directorySize) ?? 0
-            let totalBytes = Self.directorySize(appSupportDirectory)
-            // Checkpoints usually live inside app support; don't count twice.
-            let counted = hubBytes + envBytes
-                + (Self.isInside(checkpoints, appSupportDirectory) ? checkpointBytes : 0)
-            let other = max(0, totalBytes - counted)
+            var paths = [hub, envs, root]
+            if let checkpoints { paths.append(checkpoints) }
+            let sizes = Self.directorySizes(paths)
 
             let usage = StorageUsage(
-                huggingFaceCacheBytes: hubBytes,
-                careyCheckpointsBytes: checkpointBytes,
-                environmentsBytes: envBytes,
-                otherBytes: other
+                huggingFaceCacheBytes: sizes[hub.path] ?? 0,
+                careyCheckpointsBytes: checkpoints.flatMap { sizes[$0.path] } ?? 0,
+                environmentsBytes: sizes[envs.path] ?? 0,
+                totalBytes: sizes[root.path] ?? 0
             )
+            let free = Self.freeBytes(at: root)
             await MainActor.run {
                 self.usage = usage
+                self.volumeFreeBytes = free
                 self.isScanning = false
             }
         }
     }
 
-    nonisolated private static func isInside(_ path: URL?, _ root: URL) -> Bool {
-        guard let path else { return false }
-        return path.standardizedFileURL.path.hasPrefix(root.standardizedFileURL.path)
+    nonisolated private static func freeBytes(at url: URL) -> Int64 {
+        guard let values = try? url.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+        ), let available = values.volumeAvailableCapacityForImportantUsage else { return 0 }
+        return Int64(available)
     }
 
-    nonisolated private static func directorySize(_ url: URL) -> Int64 {
-        let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .isRegularFileKey]
-        guard let enumerator = FileManager.default.enumerator(
-            at: url,
-            includingPropertiesForKeys: keys,
-            options: [.skipsHiddenFiles]
-        ) else { return 0 }
+    /// One `du -sk` for every path we care about. Returns bytes keyed by path.
+    nonisolated private static func directorySizes(_ urls: [URL]) -> [String: Int64] {
+        let existing = urls.filter { FileManager.default.fileExists(atPath: $0.path) }
+        guard !existing.isEmpty else { return [:] }
 
-        var total: Int64 = 0
-        var seenInodes = Set<UInt64>()
-        for case let fileURL as URL in enumerator {
-            guard let values = try? fileURL.resourceValues(forKeys: Set(keys)),
-                  values.isRegularFile == true else { continue }
-            // A clone reports its full size on both sides, and hard links would
-            // be counted once per link. Count each inode once so the number
-            // matches what removing the tree would actually give back.
-            if let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
-               let inode = attrs[.systemFileNumber] as? UInt64 {
-                if seenInodes.contains(inode) { continue }
-                seenInodes.insert(inode)
-            }
-            let size = values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0
-            total += Int64(size)
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/du")
+        // -s totals, -k in kibibytes. Paths last so du reports one line each.
+        task.arguments = ["-sk"] + existing.map(\.path)
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+
+        do {
+            try task.run()
+        } catch {
+            return [:]
         }
-        return total
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard let text = String(data: data, encoding: .utf8) else { return [:] }
+
+        var sizes: [String: Int64] = [:]
+        for line in text.split(separator: "\n") {
+            // "<kb>\t<path>" -- the path may contain spaces, so split once.
+            guard let tab = line.firstIndex(of: "\t") else { continue }
+            let kb = Int64(line[line.startIndex..<tab].trimmingCharacters(in: .whitespaces)) ?? 0
+            let path = String(line[line.index(after: tab)...])
+            sizes[path] = kb * 1024
+        }
+        return sizes
     }
 
     // MARK: - Reclaim
@@ -121,8 +138,7 @@ final class StorageMaintenanceManager: ObservableObject {
     func reclaim(
         scriptURL: URL,
         checkpointsDirectory: URL,
-        huggingFaceHubDirectory: URL,
-        dryRun: Bool
+        huggingFaceHubDirectory: URL
     ) {
         guard !isBusy else { return }
         guard FileManager.default.isReadableFile(atPath: scriptURL.path) else {
@@ -132,18 +148,16 @@ final class StorageMaintenanceManager: ObservableObject {
         isReclaiming = true
         errorMessage = nil
         lastResult = nil
-        progressMessage = dryRun ? "looking for duplicated files..." : "reclaiming duplicated files..."
+        progressMessage = "looking for duplicated files..."
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        var arguments = [
+        task.arguments = [
             "python3",
             scriptURL.path,
             "--checkpoints-dir", checkpointsDirectory.path,
             "--hf-cache", huggingFaceHubDirectory.path,
         ]
-        if dryRun { arguments.append("--dry-run") }
-        task.arguments = arguments
 
         let pipe = Pipe()
         task.standardOutput = pipe
@@ -189,20 +203,30 @@ final class StorageMaintenanceManager: ObservableObject {
         let name = event["event"] as? String ?? ""
         switch name {
         case "start":
-            let candidates = event["candidate_files"] as? Int ?? 0
-            progressMessage = "checking \(candidates) file\(candidates == 1 ? "" : "s")..."
+            progressMessage = "looking for duplicated files..."
+        case "checking":
+            let count = event["files"] as? Int ?? 0
+            if count == 0 {
+                progressMessage = "nothing to check."
+            } else {
+                let bytes = Int64(event["bytes"] as? Int ?? 0)
+                progressMessage = "checking \(count) file\(count == 1 ? "" : "s") (\(Self.format(bytes)))..."
+            }
         case "progress":
-            if let file = event["file"] as? String,
-               let index = event["index"] as? Int,
+            if let index = event["index"] as? Int,
                let total = event["total"] as? Int {
-                progressMessage = "\(index)/\(total) — \(file)"
+                let reclaimed = Int64(event["reclaimed_bytes"] as? Int ?? 0)
+                let file = (event["file"] as? String) ?? ""
+                progressMessage = reclaimed > 0
+                    ? "\(index)/\(total) — freed \(Self.format(reclaimed)) so far — \(file)"
+                    : "\(index)/\(total) — \(file)"
             }
         case "error":
             errorMessage = event["message"] as? String ?? "the reclaim pass failed."
         case "done":
             lastResult = StorageReclaimResult(
-                wasDryRun: event["dry_run"] as? Bool ?? false,
                 matchedBytes: Int64(event["matched_bytes"] as? Int ?? 0),
+                reclaimedBytes: Int64(event["reclaimed_bytes"] as? Int ?? 0),
                 reclaimedFiles: event["reclaimed_files"] as? Int ?? 0,
                 skipped: event["skipped"] as? Int ?? 0,
                 freeDeltaBytes: Int64(event["free_delta_bytes"] as? Int ?? 0)
@@ -211,6 +235,13 @@ final class StorageMaintenanceManager: ObservableObject {
         default:
             break
         }
+    }
+
+    nonisolated static func format(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        formatter.allowedUnits = [.useGB, .useMB, .useKB]
+        return formatter.string(fromByteCount: bytes)
     }
 
     func cancel() {

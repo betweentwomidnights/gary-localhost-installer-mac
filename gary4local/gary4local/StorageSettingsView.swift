@@ -47,24 +47,24 @@ struct StorageSettingsSheet: View {
                 .disabled(storage.isBusy)
             }
 
+            // Free space is instant and is the number that moves when
+            // duplicates are reclaimed, so it is shown even while du runs.
+            row("free on this volume", storage.volumeFreeBytes, emphasised: true)
+
             if let usage = storage.usage {
+                Divider()
                 row("hugging face cache", usage.huggingFaceCacheBytes)
                 row("carey checkpoints", usage.careyCheckpointsBytes)
                 row("service environments", usage.environmentsBytes)
                 row("everything else", usage.otherBytes)
-                Divider()
-                row("total", usage.totalBytes, emphasised: true)
+                row("gary4local total", usage.totalBytes, emphasised: true)
             } else if storage.isScanning {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
-                    Text("measuring — a full install is a lot of files")
+                    Text("measuring...")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-            } else {
-                Text("no measurement yet.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -89,24 +89,18 @@ struct StorageSettingsSheet: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("duplicated model files")
                 .font(.caption.weight(.semibold))
-            Text("carey models used to be stored twice — once in the hugging face cache, once in the checkpoints folder. this replaces the second copy with a clone that shares the same storage. nothing is deleted, and both copies stay readable.")
+            Text("carey models used to be stored twice — once in the hugging face cache, once in the checkpoints folder. this replaces the second copy with a clone sharing the same storage. nothing is deleted and both copies stay readable, so the folder sizes above will not change — the free space will.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
-                Button("check for duplicates") {
-                    viewModel.reclaimDuplicateModels(dryRun: true)
+                Button(storage.isReclaiming ? "reclaiming..." : "find and reclaim duplicates") {
+                    viewModel.reclaimDuplicateModels()
                 }
-                .disabled(!viewModel.canReclaimDuplicateModels || storage.isBusy)
-
-                if let result = storage.lastResult, result.wasDryRun, result.matchedBytes > 0 {
-                    Button("reclaim \(formatBytes(result.matchedBytes))") {
-                        viewModel.reclaimDuplicateModels(dryRun: false)
-                    }
-                    .disabled(!viewModel.canReclaimDuplicateModels || storage.isBusy)
-                }
+                .disabled(!viewModel.canReclaimDuplicateModels || storage.isReclaiming)
 
                 if storage.isReclaiming {
+                    ProgressView().controlSize(.small)
                     Button("cancel") { storage.cancel() }
                 }
                 Spacer()
@@ -116,17 +110,15 @@ struct StorageSettingsSheet: View {
                 Text(viewModel.reclaimBlockedReason)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-
-            if storage.isReclaiming {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text(storage.progressMessage)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
+            } else if storage.isReclaiming {
+                Text(storage.progressMessage.isEmpty ? "starting..." : storage.progressMessage)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("this reads every model file that could be a duplicate, so it takes a while on a large install.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
 
             if let result = storage.lastResult, !storage.isReclaiming {
@@ -137,17 +129,12 @@ struct StorageSettingsSheet: View {
 
     @ViewBuilder
     private func resultText(_ result: StorageReclaimResult) -> some View {
-        if result.wasDryRun {
-            if result.matchedBytes > 0 {
-                Text("found \(formatBytes(result.matchedBytes)) of duplicated model files.")
-                    .font(.caption)
-            } else {
-                Text("no duplicated model files found. nothing to reclaim.")
+        VStack(alignment: .leading, spacing: 2) {
+            if result.reclaimedFiles == 0 {
+                Text("no duplicated model files found — nothing to reclaim.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-        } else {
-            VStack(alignment: .leading, spacing: 2) {
+            } else {
                 Text("reclaimed \(formatBytes(result.freeDeltaBytes)) across \(result.reclaimedFiles) file\(result.reclaimedFiles == 1 ? "" : "s").")
                     .font(.caption)
                 if result.skipped > 0 {

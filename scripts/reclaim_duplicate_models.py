@@ -176,17 +176,27 @@ def main() -> int:
     free_before = free_bytes(checkpoints_dir)
     matched_bytes = 0
     reclaimed_files = 0
+    reclaimed_bytes = 0
     skipped = 0
+    # Only size-matched files are ever hashed, so this is the real denominator
+    # for how long the pass will take -- not the total file count.
+    checkable = [(size, path) for size, path in files if size in blob_sizes]
+    checkable_bytes = sum(size for size, _ in checkable)
+    emit({
+        "event": "checking",
+        "files": len(checkable),
+        "bytes": checkable_bytes,
+    })
 
-    for index, (size, path) in enumerate(files):
-        if size not in blob_sizes:
-            continue
+    for index, (size, path) in enumerate(checkable):
         emit({
             "event": "progress",
             "index": index + 1,
-            "total": len(files),
+            "total": len(checkable),
             "file": str(path.relative_to(checkpoints_dir)),
             "bytes": size,
+            "found_bytes": matched_bytes,
+            "reclaimed_bytes": reclaimed_bytes,
         })
         try:
             digest = sha256_file(path)
@@ -234,10 +244,12 @@ def main() -> int:
             shutil.copystat(path, tmp_path)
             os.replace(str(tmp_path), str(path))
             reclaimed_files += 1
+            reclaimed_bytes += size
             emit({
                 "event": "reclaimed",
                 "file": str(path.relative_to(checkpoints_dir)),
                 "bytes": size,
+                "reclaimed_bytes": reclaimed_bytes,
             })
         except OSError as exc:
             emit({"event": "skip", "file": str(path), "reason": str(exc)})
@@ -252,6 +264,7 @@ def main() -> int:
         "event": "done",
         "dry_run": bool(args.dry_run),
         "matched_bytes": matched_bytes,
+        "reclaimed_bytes": reclaimed_bytes,
         "reclaimed_files": reclaimed_files,
         "skipped": skipped,
         # The measured figure is what the volume actually gained. It can differ
