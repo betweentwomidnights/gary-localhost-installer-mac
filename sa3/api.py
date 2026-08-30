@@ -282,8 +282,23 @@ SA3_TEXT_ENCODER_MARKER_NAMES = [
 ]
 
 
+# SA3 LoRA training is pinned to medium-base regardless of which model
+# inference is set to -- see scripts/mlx_training_assets.py, which fails closed
+# unless both assets come from that snapshot. It is resolved on demand during
+# the first training run, so without this it never appeared in the models UI:
+# several GB arrived unannounced mid-job and nothing could report or remove it.
+SA3_TRAINING_MODEL_NAME = "medium-base"
+
+
 def current_sa3_model_target() -> dict[str, Any] | None:
     return SA3_REQUIRED_MODEL_FILES.get(MODEL_NAME)
+
+
+def sa3_training_model_target() -> dict[str, Any] | None:
+    """The training base, when it is not already the inference model."""
+    if MODEL_NAME == SA3_TRAINING_MODEL_NAME:
+        return None
+    return SA3_REQUIRED_MODEL_FILES.get(SA3_TRAINING_MODEL_NAME)
 
 
 def current_sa3_text_encoder_target() -> dict[str, Any]:
@@ -484,6 +499,18 @@ def sa3_required_download_targets() -> list[dict[str, Any]]:
                 "files": list(model_target["files"]),
             }
         )
+    training_target = sa3_training_model_target()
+    if training_target is not None:
+        targets.append(
+            {
+                "type": "files",
+                "repo_id": training_target["repo_id"],
+                "label": training_target["label"],
+                "display_label": f"{training_target['repo_id']} (LoRA training base)",
+                "files": list(training_target["files"]),
+            }
+        )
+
     text_target = current_sa3_text_encoder_target()
     targets.append(
         {
@@ -505,6 +532,20 @@ def sa3_inventory_rows() -> list[dict[str, Any]]:
                 "label": f"{model_target['label']} required files",
                 "downloaded": not missing,
                 "missing": missing,
+            }
+        )
+
+    training_target = sa3_training_model_target()
+    if training_target is not None:
+        training_missing = cached_repo_missing_files(
+            training_target["repo_id"], list(training_target["files"])
+        )
+        rows.append(
+            {
+                "repo_id": training_target["repo_id"],
+                "label": f"{training_target['label']} (LoRA training base)",
+                "downloaded": not training_missing,
+                "missing": training_missing,
             }
         )
 
