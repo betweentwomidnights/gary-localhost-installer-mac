@@ -249,6 +249,8 @@ final class SA3AutolabelManager: ObservableObject {
     func start(
         datasetPath: String,
         style: SA3PromptStyle,
+        captioner: CareyCaptionerModel,
+        checkpointDirectory: URL,
         service: ResolvedService,
         pythonURL: URL,
         huggingFaceToken: String?,
@@ -286,6 +288,20 @@ final class SA3AutolabelManager: ObservableObject {
             launchError = "the Carey SA3 auto-label helper is missing."
             return
         }
+        // Without this the job runs for a while and then dies inside Python with
+        // a list of missing paths. Name the model and say where to get it.
+        let missingCaptionerFiles = CareyModelInventory.missingFiles(
+            captioner.requiredFiles,
+            in: checkpointDirectory
+        )
+        guard missingCaptionerFiles.isEmpty else {
+            let downloaded = CareyModelInventory.downloadedCaptioners(in: checkpointDirectory)
+            let alternatives = downloaded.map(\.shortName).joined(separator: ", ")
+            launchError = downloaded.isEmpty
+                ? "the \(captioner.shortName) captioner isn't downloaded. get it from carey → models."
+                : "the \(captioner.shortName) captioner isn't downloaded. you have \(alternatives), or get it from carey → models."
+            return
+        }
 
         let root = Self.storageRoot
         let jobID = "\(Self.jobTimestamp())-\(UUID().uuidString.prefix(8))"
@@ -315,7 +331,7 @@ final class SA3AutolabelManager: ObservableObject {
                 scriptURL.path,
                 "--dataset-dir", datasetURL.path,
                 "--style", style.rawValue,
-                "--caption-lm-model", "acestep-5Hz-lm-1.7B",
+                "--caption-lm-model", captioner.argument,
                 "--caption-lm-backend", "mlx",
                 "--job-id", jobID,
                 "--run-dir", runURL.path,
@@ -342,7 +358,7 @@ final class SA3AutolabelManager: ObservableObject {
                 jobId: jobID,
                 status: "starting",
                 phase: "starting",
-                message: "Launching the Carey captioner.",
+                message: "Launching the Carey captioner (\(captioner.shortName)).",
                 error: nil,
                 pid: nil,
                 childPid: nil,

@@ -188,6 +188,37 @@ final class CareyAceTrainingManager: ObservableObject {
             launchError = "carey checkpoints are missing. download the carey models first."
             return
         }
+        // The directory existing is not the same as the selected model being in
+        // it. Captioning loads the DiT too -- understand_music reads audio codes
+        // that come from the DiT tokenizing the VAE's latents -- so the model
+        // choice matters even when only preparing.
+        if let trainingModel = CareyTrainingModel.allCases.first(
+            where: { $0.argument == request.model }
+        ) {
+            let missing = CareyModelInventory.missingFiles(
+                trainingModel.requiredFiles,
+                in: checkpointDirectory
+            )
+            guard missing.isEmpty else {
+                launchError = "\(trainingModel.menuLabel) isn't fully downloaded (\(missing.count) file\(missing.count == 1 ? "" : "s") missing, including \(missing[0])). download it from carey → models."
+                return
+            }
+        }
+        if request.caption == "understand_music",
+           let captioner = CareyCaptionerModel(rawValue: request.captionLmModel) {
+            let missing = CareyModelInventory.missingFiles(
+                captioner.requiredFiles,
+                in: checkpointDirectory
+            )
+            guard missing.isEmpty else {
+                let downloaded = CareyModelInventory.downloadedCaptioners(in: checkpointDirectory)
+                let alternatives = downloaded.map(\.shortName).joined(separator: ", ")
+                launchError = downloaded.isEmpty
+                    ? "the \(captioner.shortName) captioner isn't downloaded. get one from carey → models."
+                    : "the \(captioner.shortName) captioner isn't downloaded. you have \(alternatives), or get it from carey → models."
+                return
+            }
+        }
         guard request.rank > 0, request.alpha > 0, request.epochs > 0,
               request.maxSteps >= 0,
               request.saveEvery > 0, request.saveBestAfter > 0,

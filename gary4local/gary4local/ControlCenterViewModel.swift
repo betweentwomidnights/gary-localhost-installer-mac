@@ -207,20 +207,6 @@ enum CareyDownloadTarget: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Checkpoint subdirectory this target populates, for the captioners.
-    var captionerModelName: String? {
-        switch self {
-        case .captionerSmall:
-            return "acestep-5Hz-lm-0.6B"
-        case .captionerMedium:
-            return "acestep-5Hz-lm-1.7B"
-        case .captionerLarge:
-            return "acestep-5Hz-lm-4B"
-        default:
-            return nil
-        }
-    }
-
     static let captioners: [CareyDownloadTarget] = [
         .captionerSmall, .captionerMedium, .captionerLarge,
     ]
@@ -594,32 +580,17 @@ final class ControlCenterViewModel: ObservableObject {
         ("ScragVAE Config", "checkpoints/scrag-vae/config.json"),
     ]
 
-    /// Files download_carey_models.sh writes for a captioner. 4B is sharded
-    /// into two safetensors plus an index; the other two are a single file.
-    /// Keep this in step with `download_captioner_model` in that script.
+    /// Panel rows for a captioner. The file list itself lives in
+    /// CareyCaptionerModel so the trainers and this panel cannot disagree about
+    /// what "downloaded" means.
     static func careyCaptionerRequiredFiles(
         for target: CareyDownloadTarget
     ) -> [(label: String, relativePath: String)] {
-        guard let model = target.captionerModelName else { return [] }
-        let weights: [String] = target == .captionerLarge
-            ? [
-                "model.safetensors.index.json",
-                "model-00001-of-00002.safetensors",
-                "model-00002-of-00002.safetensors",
-            ]
-            : ["model.safetensors"]
-        let common = [
-            "config.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "vocab.json",
-            "merges.txt",
-            "added_tokens.json",
-            "special_tokens_map.json",
-            "chat_template.jinja",
-        ]
-        return (common + weights).map { file in
-            ("\(model) \(file)", "checkpoints/\(model)/\(file)")
+        guard let model = CareyCaptionerModel.allCases.first(where: {
+            $0.downloadTarget == target
+        }) else { return [] }
+        return model.requiredFiles.map { relativePath in
+            (relativePath, "checkpoints/\(relativePath)")
         }
     }
 
@@ -1583,9 +1554,31 @@ final class ControlCenterViewModel: ObservableObject {
         )
     }
 
+    /// Checkpoints directory for Carey, or nil when the manifest has no Carey
+    /// service. The trainers ask through here rather than resolving it again.
+    var careyCheckpointDirectory: URL? {
+        guard let runtime = manager?.services.first(where: { $0.id == "carey" }) else {
+            return nil
+        }
+        return resolveCareyCheckpointDirectory(for: runtime)
+    }
+
+    /// Which captioners are on disk right now. Read by the pickers so a model
+    /// you don't have isn't offered as if you did.
+    var downloadedCareyCaptioners: [CareyCaptionerModel] {
+        guard let directory = careyCheckpointDirectory else { return [] }
+        return CareyModelInventory.downloadedCaptioners(in: directory)
+    }
+
+    var downloadedCareyTrainingModels: [CareyTrainingModel] {
+        guard let directory = careyCheckpointDirectory else { return [] }
+        return CareyModelInventory.downloadedTrainingModels(in: directory)
+    }
+
     func startSA3Autolabel(
         datasetPath: String,
-        style: SA3PromptStyle
+        style: SA3PromptStyle,
+        captioner: CareyCaptionerModel
     ) {
         guard let service = currentCareyRuntime()?.service,
               let pythonURL = careyPythonExecutableURL() else {
@@ -1594,9 +1587,17 @@ final class ControlCenterViewModel: ObservableObject {
             )
             return
         }
+        guard let checkpointDirectory = careyCheckpointDirectory else {
+            sa3AutolabelManager.reportLaunchError(
+                "Carey is not available in the loaded manifest."
+            )
+            return
+        }
         sa3AutolabelManager.start(
             datasetPath: datasetPath,
             style: style,
+            captioner: captioner,
+            checkpointDirectory: checkpointDirectory,
             service: service,
             pythonURL: pythonURL,
             huggingFaceToken: sharedHuggingFaceToken,

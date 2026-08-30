@@ -101,6 +101,8 @@ struct ControlCenterView: View {
                 trainer: viewModel.careyAceTrainingManager,
                 serviceIsRunning: viewModel.isCareyServiceRunning,
                 environmentReady: viewModel.isCareyEnvironmentReady,
+                downloadedCaptioners: viewModel.downloadedCareyCaptioners,
+                downloadedTrainingModels: viewModel.downloadedCareyTrainingModels,
                 onStart: viewModel.startCareyAceTraining
             )
         }
@@ -120,6 +122,7 @@ struct ControlCenterView: View {
                     viewModel.careyAceTrainingManager.state?.isActive == true,
                 onSuggestMetadata: viewModel.suggestSA3TrackMetadata,
                 onStartAutolabel: viewModel.startSA3Autolabel,
+                downloadedCaptioners: viewModel.downloadedCareyCaptioners,
                 onStart: viewModel.startSA3LoraTraining
             )
         }

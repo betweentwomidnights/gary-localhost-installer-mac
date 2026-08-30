@@ -13,7 +13,8 @@ struct SA3LoraTrainingSheet: View {
     let careyEnvironmentReady: Bool
     let careyTrainingIsActive: Bool
     let onSuggestMetadata: (String) async throws -> SA3MetadataSuggestion
-    let onStartAutolabel: (String, SA3PromptStyle) -> Void
+    let onStartAutolabel: (String, SA3PromptStyle, CareyCaptionerModel) -> Void
+    let downloadedCaptioners: [CareyCaptionerModel]
     let onStart: (SA3LoraTrainingRequest) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -119,7 +120,8 @@ struct SA3LoraTrainingSheet: View {
                 careyEnvironmentReady: careyEnvironmentReady,
                 careyTrainingIsActive: careyTrainingIsActive,
                 onSuggestMetadata: onSuggestMetadata,
-                onStartAutolabel: onStartAutolabel
+                onStartAutolabel: onStartAutolabel,
+                downloadedCaptioners: downloadedCaptioners
             )
         }
     }

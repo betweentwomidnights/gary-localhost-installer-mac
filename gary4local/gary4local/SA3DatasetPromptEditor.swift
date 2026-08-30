@@ -21,13 +21,16 @@ struct SA3DatasetPromptEditorSheet: View {
     let careyEnvironmentReady: Bool
     let careyTrainingIsActive: Bool
     let onSuggestMetadata: (String) async throws -> SA3MetadataSuggestion
-    let onStartAutolabel: (String, SA3PromptStyle) -> Void
+    let onStartAutolabel: (String, SA3PromptStyle, CareyCaptionerModel) -> Void
+    /// Captioners present on disk, so the picker can mark the rest.
+    let downloadedCaptioners: [CareyCaptionerModel]
 
     @Environment(\.dismiss) private var dismiss
     @State private var entries: [SA3DatasetPromptEntry] = []
     @State private var selectedIndex = 0
     @State private var templateText = Self.barePrompt
     @State private var promptStyle = SA3PromptStyle.bare
+    @State private var captioner = CareyCaptionerModel.fallback
     @State private var showStyleHelp = false
     @State private var isLoading = false
     @State private var isSaving = false
@@ -86,6 +89,7 @@ struct SA3DatasetPromptEditorSheet: View {
             loadEntries()
             autolabeler.refresh()
             lastAutolabelDone = relevantAutolabelState?.done ?? 0
+            selectAvailableCaptioner()
         }
         .onChange(of: autolabeler.state) { _, state in
             handleAutolabelStateChange(state)
@@ -200,6 +204,20 @@ struct SA3DatasetPromptEditorSheet: View {
                         Button("auto-label all", action: startAutolabel)
                             .disabled(!canStartAutolabel)
                             .help(autolabelHelp)
+                        Picker("captioner", selection: $captioner) {
+                            ForEach(CareyCaptionerModel.allCases) { model in
+                                Text(
+                                    downloadedCaptioners.contains(model)
+                                        ? model.menuLabel
+                                        : "\(model.menuLabel) — not downloaded"
+                                )
+                                .tag(model)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 260)
+                        .disabled(autolabelIsActive)
+                        .help("which ACE-Step caption model auto-label runs. larger reads the audio better and costs more memory.")
                     }
                     Spacer()
                     Text("\(captionedCount) of \(entries.count) tracks have prompt text")
@@ -416,6 +434,7 @@ struct SA3DatasetPromptEditorSheet: View {
             && !careyServiceIsRunning
             && !careyTrainingIsActive
             && autolabeler.state?.isActive != true
+            && downloadedCaptioners.contains(captioner)
     }
 
     private var autolabelHelp: String {
@@ -433,6 +452,12 @@ struct SA3DatasetPromptEditorSheet: View {
         }
         if autolabeler.state?.isActive == true {
             return "Another SA3 dataset is currently being auto-labeled."
+        }
+        if downloadedCaptioners.isEmpty {
+            return "No captioner is downloaded. Get one from Carey → Models."
+        }
+        if !downloadedCaptioners.contains(captioner) {
+            return "The \(captioner.shortName) captioner isn't downloaded. Get it from Carey → Models, or pick one you have."
         }
         return "Overwrites every text sidecar with captioned genre plus locally reconciled BPM and key."
     }
@@ -458,11 +483,28 @@ struct SA3DatasetPromptEditorSheet: View {
                 "save or discard unsaved sidecar changes before auto-labeling."
             return
         }
+        guard downloadedCaptioners.contains(captioner) else {
+            errorMessage = downloadedCaptioners.isEmpty
+                ? "no captioner is downloaded. get one from carey → models first."
+                : "the \(captioner.shortName) captioner isn't downloaded. get it from carey → models, or pick one you have."
+            return
+        }
         errorMessage = nil
         statusMessage = nil
         autolabeler.clearError()
         lastAutolabelDone = 0
-        onStartAutolabel(datasetPath, promptStyle)
+        onStartAutolabel(datasetPath, promptStyle, captioner)
+    }
+
+    /// A captioner can be removed between opening this sheet and using it, and
+    /// the default (1.7B) is not guaranteed to be the one you have. Prefer the
+    /// current pick, fall back to anything downloaded.
+    private func selectAvailableCaptioner() {
+        guard !downloadedCaptioners.isEmpty else { return }
+        if !downloadedCaptioners.contains(captioner),
+           let first = downloadedCaptioners.first {
+            captioner = first
+        }
     }
 
     private func suggestBPMKey() {

@@ -6,6 +6,8 @@ struct CareyAceTrainingSheet: View {
 
     let serviceIsRunning: Bool
     let environmentReady: Bool
+    let downloadedCaptioners: [CareyCaptionerModel]
+    let downloadedTrainingModels: [CareyTrainingModel]
     let onStart: (CareyAceTrainingRequest) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -15,7 +17,7 @@ struct CareyAceTrainingSheet: View {
     @State private var trigger = ""
     @State private var model = "base"
     @State private var timestepMu = "-0.4"
-    @State private var captionLmModel = "acestep-5Hz-lm-1.7B"
+    @State private var captionLmModel = CareyCaptionerModel.fallback.rawValue
     @State private var overwriteCaptions = false
     @State private var bpmKeySanityCheck = true
     @State private var adapterType = "dora"
@@ -48,11 +50,6 @@ struct CareyAceTrainingSheet: View {
     private let captionLmBackend = "mlx"
     private let trainingLogSectionID = "carey-ace-training-log"
 
-    private let captionLmModels = [
-        "acestep-5Hz-lm-0.6B",
-        "acestep-5Hz-lm-1.7B",
-        "acestep-5Hz-lm-4B",
-    ]
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -139,6 +136,20 @@ struct CareyAceTrainingSheet: View {
                 color: .orange
             )
         }
+        if let selected = CareyTrainingModel.allCases.first(where: { $0.argument == model }),
+           !downloadedTrainingModels.contains(selected) {
+            warning(
+                "\(selected.menuLabel) isn't downloaded. get it from carey → models before preparing or training.",
+                color: .orange
+            )
+        }
+        if let selected = CareyCaptionerModel(rawValue: captionLmModel),
+           !downloadedCaptioners.contains(selected) {
+            warning(
+                "the \(selected.shortName) captioner isn't downloaded. captioning needs it — get it from carey → models.",
+                color: .orange
+            )
+        }
         if let advisory = vramAdvisory {
             warning(advisory, color: .orange)
         }
@@ -183,12 +194,17 @@ struct CareyAceTrainingSheet: View {
                         GridRow {
                             Text("LM model")
                             Picker("LM model", selection: $captionLmModel) {
-                                Text("0.6B · not recommended").tag("acestep-5Hz-lm-0.6B")
-                                Text("1.7B · good quality").tag("acestep-5Hz-lm-1.7B")
-                                Text("4B · best quality, large memory").tag("acestep-5Hz-lm-4B")
+                                ForEach(CareyCaptionerModel.allCases) { entry in
+                                    Text(
+                                        downloadedCaptioners.contains(entry)
+                                            ? entry.menuLabel
+                                            : "\(entry.menuLabel) — not downloaded"
+                                    )
+                                    .tag(entry.rawValue)
+                                }
                             }
                             .labelsHidden()
-                            .frame(width: 250)
+                            .frame(width: 280)
                             .garyPickerAccent()
                         }
                         GridRow {
@@ -248,11 +264,17 @@ struct CareyAceTrainingSheet: View {
                         GridRow {
                             Text("base model")
                             Picker("base model", selection: $model) {
-                                Text("ace-step-v15-base").tag("base")
-                                Text("ace-step-v15-xl-base").tag("xl-base")
+                                ForEach(CareyTrainingModel.allCases) { entry in
+                                    Text(
+                                        downloadedTrainingModels.contains(entry)
+                                            ? entry.menuLabel
+                                            : "\(entry.menuLabel) — not downloaded"
+                                    )
+                                    .tag(entry.argument)
+                                }
                             }
                             .labelsHidden()
-                            .frame(width: 210)
+                            .frame(width: 260)
                             .garyPickerAccent()
                         }
                         GridRow {
