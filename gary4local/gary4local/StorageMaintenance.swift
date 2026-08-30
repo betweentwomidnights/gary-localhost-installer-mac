@@ -24,9 +24,16 @@ struct StorageUsage: Equatable {
 }
 
 struct StorageReclaimResult: Equatable {
+    /// Content that is duplicated. Stays true after a successful pass, so this
+    /// is NOT what you can expect to get back.
     var matchedBytes: Int64
+    /// What this run actually recovered.
     var reclaimedBytes: Int64
     var reclaimedFiles: Int
+    /// Files that were duplicates but already shared storage from an earlier
+    /// pass, so replacing them freed nothing.
+    var alreadySharedFiles: Int
+    var alreadySharedBytes: Int64
     var skipped: Int
     var freeDeltaBytes: Int64
 }
@@ -228,6 +235,8 @@ final class StorageMaintenanceManager: ObservableObject {
                 matchedBytes: Int64(event["matched_bytes"] as? Int ?? 0),
                 reclaimedBytes: Int64(event["reclaimed_bytes"] as? Int ?? 0),
                 reclaimedFiles: event["reclaimed_files"] as? Int ?? 0,
+                alreadySharedFiles: event["already_shared_files"] as? Int ?? 0,
+                alreadySharedBytes: Int64(event["already_shared_bytes"] as? Int ?? 0),
                 skipped: event["skipped"] as? Int ?? 0,
                 freeDeltaBytes: Int64(event["free_delta_bytes"] as? Int ?? 0)
             )

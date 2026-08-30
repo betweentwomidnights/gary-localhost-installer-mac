@@ -177,6 +177,8 @@ def main() -> int:
     matched_bytes = 0
     reclaimed_files = 0
     reclaimed_bytes = 0
+    already_shared_files = 0
+    already_shared_bytes = 0
     skipped = 0
     # Only size-matched files are ever hashed, so this is the real denominator
     # for how long the pass will take -- not the total file count.
@@ -241,16 +243,34 @@ def main() -> int:
             continue
 
         try:
+            # Measure what the clone actually bought. A file that already
+            # shares storage with its blob -- because a previous pass cloned
+            # it -- is still byte-identical and still "matches", but replacing
+            # it frees nothing. Counting those as reclaimable is what made a
+            # second run promise the same space over again.
+            free_before_file = free_bytes(checkpoints_dir)
             shutil.copystat(path, tmp_path)
             os.replace(str(tmp_path), str(path))
-            reclaimed_files += 1
-            reclaimed_bytes += size
-            emit({
-                "event": "reclaimed",
-                "file": str(path.relative_to(checkpoints_dir)),
-                "bytes": size,
-                "reclaimed_bytes": reclaimed_bytes,
-            })
+            gained = free_bytes(checkpoints_dir) - free_before_file
+
+            # Well under one file's worth: nothing was really recovered.
+            if gained < size // 2:
+                already_shared_files += 1
+                already_shared_bytes += size
+                emit({
+                    "event": "already_shared",
+                    "file": str(path.relative_to(checkpoints_dir)),
+                    "bytes": size,
+                })
+            else:
+                reclaimed_files += 1
+                reclaimed_bytes += size
+                emit({
+                    "event": "reclaimed",
+                    "file": str(path.relative_to(checkpoints_dir)),
+                    "bytes": size,
+                    "reclaimed_bytes": reclaimed_bytes,
+                })
         except OSError as exc:
             emit({"event": "skip", "file": str(path), "reason": str(exc)})
             skipped += 1
@@ -263,9 +283,13 @@ def main() -> int:
     emit({
         "event": "done",
         "dry_run": bool(args.dry_run),
+        # matched_bytes is "content that is duplicated", which stays true after
+        # a successful pass. reclaimed_* is what this run actually recovered.
         "matched_bytes": matched_bytes,
         "reclaimed_bytes": reclaimed_bytes,
         "reclaimed_files": reclaimed_files,
+        "already_shared_files": already_shared_files,
+        "already_shared_bytes": already_shared_bytes,
         "skipped": skipped,
         # The measured figure is what the volume actually gained. It can differ
         # from matched_bytes when a file was already sharing storage, or when

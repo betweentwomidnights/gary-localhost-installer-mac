@@ -130,18 +130,30 @@ struct StorageSettingsSheet: View {
     @ViewBuilder
     private func resultText(_ result: StorageReclaimResult) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            if result.reclaimedFiles == 0 {
-                Text("no duplicated model files found — nothing to reclaim.")
+            if result.reclaimedFiles > 0 {
+                Text("reclaimed \(formatBytes(result.reclaimedBytes)) across \(result.reclaimedFiles) file\(result.reclaimedFiles == 1 ? "" : "s").")
+                    .font(.caption)
+            } else if result.alreadySharedFiles > 0 {
+                // The duplicated content is still there and still matches; it
+                // just already shares storage, so there is nothing left to get.
+                Text("already deduplicated — \(result.alreadySharedFiles) duplicated file\(result.alreadySharedFiles == 1 ? "" : "s") already share storage, so there was nothing to reclaim.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                Text("reclaimed \(formatBytes(result.freeDeltaBytes)) across \(result.reclaimedFiles) file\(result.reclaimedFiles == 1 ? "" : "s").")
+                Text("no duplicated model files found — nothing to reclaim.")
                     .font(.caption)
-                if result.skipped > 0 {
-                    Text("\(result.skipped) file\(result.skipped == 1 ? "" : "s") skipped.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                    .foregroundStyle(.secondary)
+            }
+
+            if result.reclaimedFiles > 0, result.alreadySharedFiles > 0 {
+                Text("\(result.alreadySharedFiles) other file\(result.alreadySharedFiles == 1 ? " was" : "s were") already sharing storage.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if result.skipped > 0 {
+                Text("\(result.skipped) file\(result.skipped == 1 ? "" : "s") skipped.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
