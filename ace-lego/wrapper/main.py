@@ -228,6 +228,13 @@ LORA_REGISTRY: dict[str, dict[str, object]] = {}
 _caption_pools: dict[str, list[str]] = {}
 
 
+# Unloading after each job costs a reload on the next one. Worth it by default
+# on unified memory; overridable for machines that can spare the residency.
+KEEP_MODEL_LOADED = os.getenv("CAREY_KEEP_MODEL_LOADED", "false").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+
+
 def _model_family_for_config(config_path: str) -> str:
     normalized = (config_path or "").strip().lower()
     return "xl" if "-xl-" in normalized or normalized.startswith("acestep-v15-xl-") else "standard"
@@ -680,8 +687,21 @@ async def _load_model(client: httpx.AsyncClient, config_path: str) -> str:
 
 
 async def _unload_model(client: httpx.AsyncClient) -> None:
+    """Release the model for real.
+
+    Asks for a hard unload explicitly rather than letting the server's default
+    decide. A soft unload only flips a flag and keeps every weight resident, and
+    because it also clears `_initialized`, it stops /v1/load from doing its own
+    hard unload when the config changes -- so the next model would be built
+    while the previous one was still referenced, doubling peak memory on a
+    variant switch.
+    """
     global _current_model
-    resp = await client.post(f"{ACESTEP_URL}/v1/unload", timeout=60)
+    resp = await client.post(
+        f"{ACESTEP_URL}/v1/unload",
+        params={"mode": "hard"},
+        timeout=60,
+    )
     _current_model = None
     if resp.status_code != 200:
         raise RuntimeError(f"ACE-Step /v1/unload failed: {resp.text}")
@@ -1152,12 +1172,22 @@ async def _run_generation(job: Job, req):
                 finally:
                     if lora_config:
                         await _unload_lora(client)
-                    # On localhost with lifecycle management, keep the model
-                    # loaded between jobs — _ensure_required_model handles
-                    # switching when the next task needs a different variant.
-                    # Only release GPU queue tokens (Spark mode).
-                    if MANAGE_MODEL_LIFECYCLE and use_gpu_queue:
+                    # Release the model after every job.
+                    #
+                    # Keeping it resident between jobs is faster, but this runs
+                    # beside a DAW and whatever else the user has going, on
+                    # machines whose memory is shared with the GPU -- a 20GB xl
+                    # DiT parked indefinitely is not a trade most people want.
+                    # It also guarantees a clean slate for LoRAs: stale adapter
+                    # weights surviving into the next generation is a bug the
+                    # remote and PC backends both hit, where a session using
+                    # several LoRAs got progressively worse.
+                    #
+                    # Set CAREY_KEEP_MODEL_LOADED=true to keep the old
+                    # behaviour on a machine with memory to spare.
+                    if MANAGE_MODEL_LIFECYCLE and not KEEP_MODEL_LOADED:
                         await _unload_model(client)
+                    if MANAGE_MODEL_LIFECYCLE and use_gpu_queue:
                         await _release_gpu_token(client, session_id)
 
         except Exception as e:

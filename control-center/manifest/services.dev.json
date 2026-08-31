@@ -84,7 +84,7 @@
         "ACESTEP_NO_INIT": "true",
         "ACESTEP_INIT_LLM": "false",
         "ACESTEP_ALLOW_MAIN_AUTODOWNLOAD": "false",
-        "ACESTEP_UNLOAD_STRATEGY": "soft",
+        "ACESTEP_UNLOAD_STRATEGY": "hard",
         "ACESTEP_API_HOST": "127.0.0.1",
         "ACESTEP_API_PORT": "8001",
         "PYTORCH_ENABLE_MPS_FALLBACK": "${PYTORCH_ENABLE_MPS_FALLBACK}",

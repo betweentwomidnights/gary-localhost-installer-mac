@@ -239,3 +239,60 @@ class CareyWrapperModelSelectionTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CareyWrapperUnloadTest(unittest.IsolatedAsyncioTestCase):
+    """The model has to actually be released, not just marked unloaded.
+
+    A soft unload keeps every weight resident and clears `_initialized`, which
+    also stops /v1/load doing its own hard unload when the config changes -- so
+    the next variant would be built while the previous one was still referenced.
+    """
+
+    def setUp(self):
+        self._original_current_model = wrapper._current_model
+
+    def tearDown(self):
+        wrapper._current_model = self._original_current_model
+
+    async def test_unload_asks_for_a_hard_unload(self):
+        client = SimpleNamespace(post=AsyncMock(
+            return_value=SimpleNamespace(status_code=200, text="")
+        ))
+        wrapper._current_model = "acestep-v15-base"
+
+        await wrapper._unload_model(client)
+
+        _args, kwargs = client.post.call_args
+        self.assertEqual(kwargs.get("params"), {"mode": "hard"})
+        self.assertIsNone(wrapper._current_model)
+
+    async def test_switching_variants_releases_before_loading(self):
+        """The old model must be gone before the new one is built."""
+        order = []
+
+        async def fake_unload(_client):
+            order.append("unload")
+            wrapper._current_model = None
+
+        async def fake_load(_client, config):
+            order.append(f"load:{config}")
+            return config
+
+        wrapper._current_model = "acestep-v15-base"
+        job = SimpleNamespace(
+            status=None, progress=0, progress_text="", task_type="complete"
+        )
+        with patch.object(wrapper, "_unload_model", side_effect=fake_unload), \
+             patch.object(wrapper, "_load_model", side_effect=fake_load), \
+             patch.object(wrapper, "_required_model_for_task",
+                          return_value="acestep-v15-turbo"):
+            await wrapper._ensure_required_model(
+                SimpleNamespace(), job, SimpleNamespace(model="", track_name="")
+            )
+
+        self.assertEqual(order, ["unload", "load:acestep-v15-turbo"])
+
+    def test_models_are_released_after_a_job_by_default(self):
+        """Opt-out only: the default is to free memory after every generation."""
+        self.assertFalse(wrapper.KEEP_MODEL_LOADED)
