@@ -236,6 +236,86 @@ def measure_target(target: Path, keep_roots: list) -> tuple:
     return logical, freeable, files
 
 
+def remove_repo_file(hub: Path, repo_id: str, filename: str, dry_run: bool) -> int:
+    """Remove one file from a cached repo -- a finetune checkpoint, typically.
+
+    Jerry's finetunes are single files inside a shared repo, so the directory
+    path cannot be used: the repo holds other checkpoints someone may still
+    want. The snapshot links naming this file go, and its blob goes with them
+    if nothing else points at it.
+    """
+    repo_dir = hub / ("models--" + repo_id.replace("/", "--"))
+    if not repo_dir.is_dir():
+        emit({"event": "error", "message": f"{repo_id} is not in the cache"})
+        return 1
+
+    refs = snapshot_references(hub)
+    doomed_links = []
+    for dirpath, _dirnames, filenames in os.walk(repo_dir / "snapshots"):
+        for name in filenames:
+            link = Path(dirpath) / name
+            if not link.is_symlink():
+                continue
+            parts = link.parts
+            try:
+                snap_index = len(parts) - 1 - parts[::-1].index("snapshots")
+            except ValueError:
+                continue
+            if str(Path(*parts[snap_index + 2:])) == filename:
+                doomed_links.append(link)
+
+    if not doomed_links:
+        emit({"event": "error", "message": f"{filename} is not cached for {repo_id}"})
+        return 1
+
+    doomed = set(str(link) for link in doomed_links)
+    blobs = []
+    total = 0
+    for link in doomed_links:
+        try:
+            blob = link.resolve()
+        except OSError:
+            continue
+        # Only if every link to this blob is one we are removing.
+        others = [r for r in refs.get(str(blob), []) if str(r) not in doomed]
+        if others or blob in blobs:
+            continue
+        if blob.is_file():
+            blobs.append(blob)
+            total += blob.stat().st_size
+
+    emit({
+        "event": "measured", "target": f"{repo_id}/{filename}",
+        "logical_bytes": total, "freeable_bytes": total,
+        "shared_bytes": 0, "files": len(doomed_links), "cache_blobs": len(blobs),
+        "cache_bytes": total,
+    })
+    if dry_run:
+        emit({"event": "done", "dry_run": True, "removed": False,
+              "logical_bytes": total, "freeable_bytes": total, "freed_bytes": 0})
+        return 0
+
+    before = free_bytes(repo_dir)
+    for link in doomed_links:
+        try:
+            link.unlink()
+        except OSError:
+            continue
+    for blob in blobs:
+        try:
+            blob.unlink()
+        except OSError:
+            continue
+    prune_empty_dirs(doomed_links + blobs)
+    emit({
+        "event": "done", "dry_run": False, "removed": True,
+        "logical_bytes": total, "freeable_bytes": total,
+        "cache_blobs": len(blobs),
+        "freed_bytes": free_bytes(repo_dir) - before,
+    })
+    return 0
+
+
 def resolve_target(target: str, roots: list) -> Path:
     resolved = Path(target).expanduser()
     if resolved.is_symlink():
@@ -283,7 +363,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", action="append", default=[], required=True,
                         help="An allowed root. Repeatable.")
-    parser.add_argument("--target", required=True, help="Directory to remove.")
+    parser.add_argument("--target", help="Directory to remove.")
+    parser.add_argument("--repo", help="Cached repo id, with --file.")
+    parser.add_argument("--file", dest="filename",
+                        help="One file inside --repo to remove, e.g. a finetune checkpoint.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--hub",
@@ -298,6 +381,18 @@ def main() -> int:
 
     roots = [Path(r).expanduser() for r in args.root]
     existing_roots = [r for r in roots if r.is_dir()]
+
+    if args.repo or args.filename:
+        if not (args.repo and args.filename and args.hub):
+            emit({"event": "error", "message": "--repo, --file and --hub go together"})
+            return 1
+        return remove_repo_file(
+            Path(args.hub).expanduser(), args.repo, args.filename, args.dry_run
+        )
+
+    if not args.target:
+        emit({"event": "error", "message": "--target or --repo/--file is required"})
+        return 1
 
     try:
         target = resolve_target(args.target, existing_roots)

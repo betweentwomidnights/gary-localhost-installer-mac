@@ -2294,6 +2294,38 @@ private struct ModelDownloadSheet: View {
         }
     }
 
+    /// Remove a whole cached model repo listed by the stable audio panel.
+    @ViewBuilder
+    private func stableAudioRemoveButton(for row: StableAudioInventoryModelStatus) -> some View {
+        if row.downloaded {
+            let blocked = viewModel.modelRemovalBlockedReason(ownedBy: "stable_audio")
+            Button("remove") {
+                viewModel.measureModelRemoval(
+                    target: viewModel.huggingFaceRepoDirectory(for: row.id),
+                    displayName: row.label
+                )
+            }
+            .disabled(blocked != nil || viewModel.modelRemovalManager.isBusy)
+            .help(blocked ?? "remove \(row.id) from the model cache.")
+        }
+    }
+
+    /// Remove one finetune checkpoint. These are files inside a repo that holds
+    /// other checkpoints, so the whole repo must not go with them.
+    @ViewBuilder
+    private func finetuneRemoveButton(for checkpoint: String) -> some View {
+        let repo = viewModel.stableAudioPredownloadRepoInput
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !repo.isEmpty {
+            let blocked = viewModel.modelRemovalBlockedReason(ownedBy: "stable_audio")
+            Button("remove") {
+                viewModel.measureFinetuneRemoval(repo: repo, filename: checkpoint)
+            }
+            .disabled(blocked != nil || viewModel.modelRemovalManager.isBusy)
+            .help(blocked ?? "remove \(checkpoint) from \(repo).")
+        }
+    }
+
     @ViewBuilder
     private var stableAudioPredownloadContent: some View {
         Text("pre-download stable audio models and finetune checkpoints for offline use in gary4juce.")
@@ -2341,6 +2373,7 @@ private struct ModelDownloadSheet: View {
                         Text(row.label)
                             .font(.caption.monospaced())
                         Spacer()
+                        stableAudioRemoveButton(for: row)
                         if row.downloaded {
                             Text("downloaded")
                                 .font(.caption2)
@@ -2432,6 +2465,7 @@ private struct ModelDownloadSheet: View {
                                 .font(.caption.monospaced())
                                 .lineLimit(1)
                             Spacer()
+                            finetuneRemoveButton(for: checkpoint)
                         }
                     }
                 }
@@ -2479,15 +2513,6 @@ private struct ModelDownloadSheet: View {
         modelDownloadStatusText
 
         HStack(spacing: 8) {
-            Button("download all") {
-                viewModel.startCareyFocusedDownload()
-            }
-            .disabled(
-                !viewModel.canRunCareyFocusedDownload
-                || viewModel.isModelDownloadInProgress
-                || viewModel.isCareyLifecycleActionInProgress
-            )
-
             Button("refresh downloaded") {
                 viewModel.refreshCareyPredownloadInventory()
             }
@@ -2663,40 +2688,6 @@ private struct ModelDownloadSheet: View {
             .padding(.vertical, 2)
         }
 
-        Divider()
-
-        VStack(alignment: .leading, spacing: 8) {
-            Text("model lifecycle")
-                .font(.caption.weight(.semibold))
-            Text("start carey first. use these controls only when you want to manually load/unload the model.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text("stop the service for a full memory release.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 8) {
-                Button("load model") {
-                    viewModel.loadCareyModel()
-                }
-                .disabled(
-                    !viewModel.canManageModelDownloads
-                    || viewModel.isCareyLifecycleActionInProgress
-                    || viewModel.isModelDownloadInProgress
-                )
-
-                Button("unload model") {
-                    viewModel.unloadCareyModel()
-                }
-                .disabled(
-                    !viewModel.canManageModelDownloads
-                    || viewModel.isCareyLifecycleActionInProgress
-                    || viewModel.isModelDownloadInProgress
-                )
-                Spacer()
-            }
-        }
-
         if viewModel.isCareyDownloadInProgress {
             ProgressView(value: viewModel.careyPredownloadProgress)
                 .controlSize(.small)
@@ -2705,11 +2696,6 @@ private struct ModelDownloadSheet: View {
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
             }
-        }
-
-        if viewModel.isCareyLifecycleActionInProgress {
-            ProgressView()
-                .controlSize(.small)
         }
 
         Spacer()

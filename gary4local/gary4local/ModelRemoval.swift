@@ -14,8 +14,16 @@ import Foundation
 /// downloading or training. Those checks live in the view model, which is what
 /// can see service state; this type runs the operation and reports it.
 
+enum ModelRemovalSubject: Equatable {
+    /// A directory: a cache repo, a Carey checkpoint, Foundation's weights.
+    case directory(URL)
+    /// One file inside a cached repo -- a finetune checkpoint, which shares its
+    /// repo with other checkpoints someone may still want.
+    case repoFile(repo: String, filename: String)
+}
+
 struct ModelRemovalPreview: Equatable {
-    var target: URL
+    var subject: ModelRemovalSubject
     var displayName: String
     /// What the directory holds.
     var logicalBytes: Int64
@@ -60,7 +68,7 @@ final class ModelRemovalManager: ObservableObject {
     /// directory size.
     func measure(
         scriptURL: URL,
-        target: URL,
+        subject: ModelRemovalSubject,
         displayName: String,
         roots: [URL],
         hubDirectory: URL
@@ -71,7 +79,7 @@ final class ModelRemovalManager: ObservableObject {
         preview = nil
 
         let arguments = Self.arguments(
-            scriptURL: scriptURL, target: target, roots: roots,
+            scriptURL: scriptURL, subject: subject, roots: roots,
             hubDirectory: hubDirectory, dryRun: true
         )
         Task.detached(priority: .userInitiated) {
@@ -87,7 +95,7 @@ final class ModelRemovalManager: ObservableObject {
                     return
                 }
                 self.preview = ModelRemovalPreview(
-                    target: target,
+                    subject: subject,
                     displayName: displayName,
                     logicalBytes: Int64(measured["logical_bytes"] as? Int ?? 0),
                     freeableBytes: Int64(measured["freeable_bytes"] as? Int ?? 0),
@@ -109,7 +117,7 @@ final class ModelRemovalManager: ObservableObject {
         errorMessage = nil
 
         let arguments = Self.arguments(
-            scriptURL: scriptURL, target: preview.target, roots: roots,
+            scriptURL: scriptURL, subject: preview.subject, roots: roots,
             hubDirectory: hubDirectory, dryRun: false
         )
         Task.detached(priority: .userInitiated) {
@@ -138,14 +146,20 @@ final class ModelRemovalManager: ObservableObject {
     // MARK: - Process
 
     nonisolated private static func arguments(
-        scriptURL: URL, target: URL, roots: [URL], hubDirectory: URL, dryRun: Bool
+        scriptURL: URL, subject: ModelRemovalSubject, roots: [URL],
+        hubDirectory: URL, dryRun: Bool
     ) -> [String] {
         var arguments = ["python3", scriptURL.path]
         for root in roots {
             arguments.append(contentsOf: ["--root", root.path])
         }
         arguments.append(contentsOf: ["--hub", hubDirectory.path])
-        arguments.append(contentsOf: ["--target", target.path])
+        switch subject {
+        case .directory(let url):
+            arguments.append(contentsOf: ["--target", url.path])
+        case .repoFile(let repo, let filename):
+            arguments.append(contentsOf: ["--repo", repo, "--file", filename])
+        }
         if dryRun { arguments.append("--dry-run") }
         return arguments
     }

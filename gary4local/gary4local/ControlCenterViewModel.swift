@@ -1772,12 +1772,24 @@ final class ControlCenterViewModel: ObservableObject {
     }
 
     func measureModelRemoval(target: URL, displayName: String) {
+        measureModelRemoval(subject: .directory(target), displayName: displayName)
+    }
+
+    /// Removing one checkpoint out of a finetune repo, which holds others.
+    func measureFinetuneRemoval(repo: String, filename: String) {
+        measureModelRemoval(
+            subject: .repoFile(repo: repo, filename: filename),
+            displayName: filename
+        )
+    }
+
+    func measureModelRemoval(subject: ModelRemovalSubject, displayName: String) {
         guard let script = runtimeScriptURL("remove_model.py") else {
             return
         }
         modelRemovalManager.measure(
             scriptURL: script,
-            target: target,
+            subject: subject,
             displayName: displayName,
             roots: modelRemovalRoots,
             hubDirectory: huggingFaceHubDirectory
