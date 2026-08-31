@@ -2724,16 +2724,23 @@ private struct ModelDownloadSheet: View {
         from rows: [CareyRequiredModelStatus],
         useXlModels: Bool
     ) -> [CareyRequiredGroupStatus] {
-        let baseConfig = useXlModels ? "acestep-v15-xl-base" : "acestep-v15-base"
-        let sftConfig = useXlModels ? "acestep-v15-xl-sft" : "acestep-v15-sft"
-        let turboConfig = useXlModels ? "acestep-v15-xl-turbo" : "acestep-v15-turbo"
-        let groups: [(id: String, label: String, prefix: String, downloadTarget: CareyDownloadTarget?)] = [
-            ("dit_base", "DiT Base / Lego Base (\(baseConfig))", "checkpoints/\(baseConfig)/", CareyDownloadTarget.base),
-            ("dit_sft", "DiT SFT (\(sftConfig))", "checkpoints/\(sftConfig)/", CareyDownloadTarget.sft),
-            ("dit_turbo", "DiT Turbo (\(turboConfig))", "checkpoints/\(turboConfig)/", CareyDownloadTarget.turbo),
-            ("qwen_encoder", "Qwen Text Encoder", "checkpoints/Qwen3-Embedding-0.6B/", nil),
-            ("vae", "VAE", "checkpoints/vae/", nil),
-        ]
+        // Both families are listed. The xl toggle decides what Carey runs, not
+        // what you are allowed to see or download, and marking the active one
+        // is enough to keep that clear.
+        let activeSuffix = { (isXL: Bool) in isXL == useXlModels ? " — active" : "" }
+        let groups: [(id: String, label: String, prefix: String, downloadTarget: CareyDownloadTarget?)] =
+            CareyDownloadTarget.ditTargets.compactMap { target in
+                guard let config = target.careyConfigName else { return nil }
+                return (
+                    "dit_\(config)",
+                    "DiT \(target.displayName) (\(config))\(activeSuffix(target.isXLFamily))",
+                    "checkpoints/\(config)/",
+                    target
+                )
+            } + [
+                ("qwen_encoder", "Qwen Text Encoder", "checkpoints/Qwen3-Embedding-0.6B/", nil),
+                ("vae", "VAE", "checkpoints/vae/", nil),
+            ]
 
         return careyGroupStatuses(groups: groups, rows: rows)
     }

@@ -171,10 +171,17 @@ struct CareyRequiredModelStatus: Identifiable {
     let sizeBytes: Int64
 }
 
-enum CareyDownloadTarget: String, CaseIterable, Identifiable {
+nonisolated enum CareyDownloadTarget: String, CaseIterable, Identifiable {
     case base
     case sft
     case turbo
+    // The xl family gets its own targets rather than riding on the runtime
+    // toggle. Which family Carey *runs* is a separate question from which
+    // models you can see and fetch, and tying them together meant half the
+    // catalogue was invisible depending on a switch elsewhere.
+    case xlBase = "acestep-v15-xl-base"
+    case xlSft = "acestep-v15-xl-sft"
+    case xlTurbo = "acestep-v15-xl-turbo"
     case shared
     case scragVae = "scrag-vae"
     // The 5Hz captioner LMs. Opt-in rather than part of "all": only
@@ -196,6 +203,12 @@ enum CareyDownloadTarget: String, CaseIterable, Identifiable {
             return "turbo"
         case .shared:
             return "shared"
+        case .xlBase:
+            return "xl base"
+        case .xlSft:
+            return "xl sft"
+        case .xlTurbo:
+            return "xl turbo"
         case .scragVae:
             return "scrag vae"
         case .captionerSmall:
@@ -209,6 +222,38 @@ enum CareyDownloadTarget: String, CaseIterable, Identifiable {
 
     static let captioners: [CareyDownloadTarget] = [
         .captionerSmall, .captionerMedium, .captionerLarge,
+    ]
+
+    /// Checkpoint folder this target populates, for the DiT models.
+    var careyConfigName: String? {
+        switch self {
+        case .base: return "acestep-v15-base"
+        case .sft: return "acestep-v15-sft"
+        case .turbo: return "acestep-v15-turbo"
+        case .xlBase: return "acestep-v15-xl-base"
+        case .xlSft: return "acestep-v15-xl-sft"
+        case .xlTurbo: return "acestep-v15-xl-turbo"
+        default: return nil
+        }
+    }
+
+    var isXLFamily: Bool {
+        self == .xlBase || self == .xlSft || self == .xlTurbo
+    }
+
+    /// The script has one slot per DiT role and takes the folder name from the
+    /// environment, so both families use the same three tokens.
+    var downloadScriptToken: String {
+        switch self {
+        case .xlBase: return "base"
+        case .xlSft: return "sft"
+        case .xlTurbo: return "turbo"
+        default: return rawValue
+        }
+    }
+
+    static let ditTargets: [CareyDownloadTarget] = [
+        .base, .sft, .turbo, .xlBase, .xlSft, .xlTurbo,
     ]
 }
 
@@ -1007,32 +1052,28 @@ final class ControlCenterViewModel: ObservableObject {
         return ("acestep-v15-base", "acestep-v15-sft", "acestep-v15-turbo", "acestep-v15-base")
     }
 
+    /// Every DiT model, both families. The panel lists what exists to download,
+    /// not just what the runtime toggle currently selects.
     private func activeCareyRequiredModelFiles() -> [(label: String, relativePath: String)] {
-        requiredCareyModelFiles(for: [.base, .sft, .turbo])
+        requiredCareyModelFiles(for: CareyDownloadTarget.ditTargets)
     }
 
     private func requiredCareyModelFiles(
         for targets: [CareyDownloadTarget]
     ) -> [(label: String, relativePath: String)] {
-        let configs = activeCareyConfigNames()
         let targetSet = Set(targets)
         let includesShared = targetSet.contains(.shared)
-            || targetSet.contains(.base)
-            || targetSet.contains(.sft)
-            || targetSet.contains(.turbo)
+            || targetSet.contains(where: { $0.careyConfigName != nil })
 
         var files: [(label: String, relativePath: String)] = []
-        if targetSet.contains(.base) {
-            files += Self.careyDiTRequiredFiles(labelPrefix: "DiT Base", configName: configs.base)
-            if configs.lego != configs.base {
-                files += Self.careyDiTRequiredFiles(labelPrefix: "DiT Lego Base", configName: configs.lego)
-            }
-        }
-        if targetSet.contains(.sft) {
-            files += Self.careyDiTRequiredFiles(labelPrefix: "DiT SFT", configName: configs.sft)
-        }
-        if targetSet.contains(.turbo) {
-            files += Self.careyDiTRequiredFiles(labelPrefix: "DiT Turbo", configName: configs.turbo)
+        // Each DiT target names its own folder, so a target set can mix
+        // families without one overwriting the other.
+        for target in CareyDownloadTarget.ditTargets where targetSet.contains(target) {
+            guard let configName = target.careyConfigName else { continue }
+            files += Self.careyDiTRequiredFiles(
+                labelPrefix: "DiT \(target.displayName)",
+                configName: configName
+            )
         }
         if includesShared {
             files += Self.careySharedRequiredModelFiles
@@ -3008,6 +3049,20 @@ final class ControlCenterViewModel: ObservableObject {
         let normalizedTargets = Array(Set(targets)).sorted { lhs, rhs in
             CareyDownloadTarget.allCases.firstIndex(of: lhs)! < CareyDownloadTarget.allCases.firstIndex(of: rhs)!
         }
+        // One folder slot per DiT role, so asking for both families of the same
+        // role in one run would quietly fetch one of them twice. The panel never
+        // builds such a set; this is here so a future caller cannot either.
+        let conflicts: [(CareyDownloadTarget, CareyDownloadTarget)] = [
+            (.base, .xlBase), (.sft, .xlSft), (.turbo, .xlTurbo),
+        ]
+        let requestedSet = Set(normalizedTargets)
+        if let clash = conflicts.first(where: {
+            requestedSet.contains($0.0) && requestedSet.contains($0.1)
+        }) {
+            modelDownloadStatusMessage =
+                "download \(clash.0.displayName) and \(clash.1.displayName) separately."
+            return
+        }
         let targetDescription: String
         if Set(normalizedTargets) == Set([.base, .sft, .turbo]) {
             targetDescription = "carey required files"
@@ -3030,15 +3085,29 @@ final class ControlCenterViewModel: ObservableObject {
             let checkpointDirectory = self.resolveCareyCheckpointDirectory(for: runtime)
             var scriptEnvironment = runtime.service.environment
             scriptEnvironment["ACESTEP_CHECKPOINT_DIR"] = checkpointDirectory.path
+            // The script has one folder slot per DiT role, filled from the
+            // environment. Taking these from the requested targets rather than
+            // the runtime toggle is what lets either family be fetched without
+            // switching the toggle first.
             let configs = self.activeCareyConfigNames()
+            let requested = Set(normalizedTargets)
+            func configName(role: CareyDownloadTarget, xl: CareyDownloadTarget, fallback: String) -> String {
+                if requested.contains(xl) { return xl.careyConfigName ?? fallback }
+                if requested.contains(role) { return role.careyConfigName ?? fallback }
+                return fallback
+            }
+            let baseConfig = configName(role: .base, xl: .xlBase, fallback: configs.base)
             scriptEnvironment["ACESTEP_NO_INIT"] = "true"
-            scriptEnvironment["ACESTEP_CONFIG_PATH"] = configs.base
-            scriptEnvironment["ACESTEP_BASE_CONFIG_PATH"] = configs.base
-            scriptEnvironment["ACESTEP_SFT_CONFIG_PATH"] = configs.sft
-            scriptEnvironment["ACESTEP_TURBO_CONFIG_PATH"] = configs.turbo
-            scriptEnvironment["ACESTEP_LEGO_CONFIG_PATH"] = configs.lego
-            scriptEnvironment["ACESTEP_REGULAR_CONFIG_PATH"] = configs.base
-            scriptEnvironment["CAREY_DOWNLOAD_TARGETS"] = normalizedTargets.map(\.rawValue).joined(separator: ",")
+            scriptEnvironment["ACESTEP_CONFIG_PATH"] = baseConfig
+            scriptEnvironment["ACESTEP_BASE_CONFIG_PATH"] = baseConfig
+            scriptEnvironment["ACESTEP_SFT_CONFIG_PATH"] =
+                configName(role: .sft, xl: .xlSft, fallback: configs.sft)
+            scriptEnvironment["ACESTEP_TURBO_CONFIG_PATH"] =
+                configName(role: .turbo, xl: .xlTurbo, fallback: configs.turbo)
+            scriptEnvironment["ACESTEP_LEGO_CONFIG_PATH"] = baseConfig
+            scriptEnvironment["ACESTEP_REGULAR_CONFIG_PATH"] = baseConfig
+            scriptEnvironment["CAREY_DOWNLOAD_TARGETS"] =
+                normalizedTargets.map(\.downloadScriptToken).joined(separator: ",")
             let result = await Task.detached(priority: .userInitiated) {
                 Self.runCareyDownloadScript(
                     scriptURL: scriptURL,
@@ -4837,10 +4906,12 @@ final class ControlCenterViewModel: ObservableObject {
             let tailLines = outputLines.suffix(4).joined(separator: " | ")
 
             if process.terminationStatus == 0 {
-                let message = tailLines.isEmpty
-                    ? "carey focused download completed."
-                    : "carey focused download completed. \(tailLines)"
-                return (0, message)
+                // The script's last lines are its own verification -- "files are
+                // present", then an ls of the paths it checked. Useful in the
+                // log, noise in the panel, where the row indicators already say
+                // what arrived. The tail is kept for failures, where it is the
+                // only clue about what went wrong.
+                return (0, "carey model download finished.")
             }
 
             let message = tailLines.isEmpty
