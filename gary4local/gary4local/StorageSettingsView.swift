@@ -32,6 +32,7 @@ struct StorageSettingsSheet: View {
         .padding(16)
         .frame(minWidth: 620, minHeight: 460)
         .onAppear { viewModel.scanStorageUsage() }
+        .onDisappear { storage.clearNotices() }
     }
 
     // MARK: - Usage

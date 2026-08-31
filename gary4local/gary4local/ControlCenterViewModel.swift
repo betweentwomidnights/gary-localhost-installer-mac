@@ -1771,6 +1771,25 @@ final class ControlCenterViewModel: ObservableObject {
         return nil
     }
 
+    /// Rescan whichever model panel is showing.
+    ///
+    /// A row that was just removed keeps claiming to be downloaded until its
+    /// own inventory is re-read, and each panel has its own. Refreshing all of
+    /// them would work but does needless service calls; refreshing none is what
+    /// left stable audio insisting a removed model was still there.
+    func refreshCurrentModelPanel() {
+        switch modelDownloadServiceID {
+        case "carey":
+            refreshCareyPredownloadInventory()
+        case "sa3":
+            refreshSA3PredownloadInventory()
+        case "stable_audio":
+            refreshStableAudioPredownloadInventory()
+        default:
+            refreshModelCatalogAndStatuses()
+        }
+    }
+
     func measureModelRemoval(target: URL, displayName: String) {
         measureModelRemoval(subject: .directory(target), displayName: displayName)
     }

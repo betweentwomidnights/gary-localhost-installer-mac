@@ -2028,11 +2028,18 @@ private struct ModelDownloadSheet: View {
         .frame(minWidth: 760, minHeight: 520, maxHeight: 760)
         .overlay(alignment: .bottom) { modelRemovalStatus }
         .onChange(of: removal.lastResult) { _, result in
-            // The row that was just removed is stale until the panel rescans.
+            // The row that was just removed keeps claiming to be downloaded
+            // until its own panel rescans.
             guard result != nil else { return }
-            viewModel.refreshCareyPredownloadInventory()
-            viewModel.refreshModelCatalogAndStatuses()
-            viewModel.scanStorageUsage()
+            viewModel.refreshCurrentModelPanel()
+        }
+        .onChange(of: viewModel.modelDownloadServiceID) { _, _ in
+            // Switching panels leaves another service's notice on screen.
+            removal.clear()
+        }
+        .onDisappear {
+            // Closing the sheet is a dismissal.
+            removal.clear()
         }
         .alert(
             "remove \(viewModel.modelRemovalManager.preview?.displayName ?? "")?",

@@ -63,6 +63,19 @@ final class ModelRemovalManager: ObservableObject {
 
     func clearError() { errorMessage = nil }
 
+    /// Exactly one notice at a time. A failure and an earlier success were both
+    /// held at once, so dismissing the failure uncovered a stale success from a
+    /// previous removal and it read as a stack of messages.
+    private func report(error: String) {
+        lastResult = nil
+        errorMessage = error
+    }
+
+    private func report(result: ModelRemovalResult) {
+        errorMessage = nil
+        lastResult = result
+    }
+
     /// Measure first, always. The number shown in the confirmation is the one
     /// the user decides on, so it has to be the honest one rather than the
     /// directory size.
@@ -76,6 +89,7 @@ final class ModelRemovalManager: ObservableObject {
         guard !isBusy else { return }
         isMeasuring = true
         errorMessage = nil
+        lastResult = nil
         preview = nil
 
         let arguments = Self.arguments(
@@ -87,11 +101,11 @@ final class ModelRemovalManager: ObservableObject {
             await MainActor.run {
                 self.isMeasuring = false
                 if let failure = Self.firstError(in: events) {
-                    self.errorMessage = failure
+                    self.report(error: failure)
                     return
                 }
                 guard let measured = events.first(where: { $0["event"] as? String == "measured" }) else {
-                    self.errorMessage = "could not measure \(displayName)."
+                    self.report(error: "could not measure \(displayName).")
                     return
                 }
                 self.preview = ModelRemovalPreview(
@@ -115,6 +129,7 @@ final class ModelRemovalManager: ObservableObject {
         guard !isBusy else { return }
         isRemoving = true
         errorMessage = nil
+        lastResult = nil
 
         let arguments = Self.arguments(
             scriptURL: scriptURL, subject: preview.subject, roots: roots,
@@ -125,19 +140,19 @@ final class ModelRemovalManager: ObservableObject {
             await MainActor.run {
                 self.isRemoving = false
                 if let failure = Self.firstError(in: events) {
-                    self.errorMessage = failure
+                    self.report(error: failure)
                     return
                 }
                 guard let done = events.last(where: { $0["event"] as? String == "done" }),
                       done["removed"] as? Bool == true else {
-                    self.errorMessage = "\(preview.displayName) was not removed."
+                    self.report(error: "\(preview.displayName) was not removed.")
                     return
                 }
-                self.lastResult = ModelRemovalResult(
+                self.report(result: ModelRemovalResult(
                     displayName: preview.displayName,
                     freedBytes: Int64(done["freed_bytes"] as? Int ?? 0),
                     logicalBytes: Int64(done["logical_bytes"] as? Int ?? 0)
-                )
+                ))
                 self.preview = nil
             }
         }

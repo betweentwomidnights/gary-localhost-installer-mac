@@ -75,6 +75,14 @@ final class StorageMaintenanceManager: ObservableObject {
 
     func clearError() { errorMessage = nil }
 
+    /// Drop any notice from a previous run. Closing the panel is a dismissal --
+    /// otherwise a result from ten minutes ago is still sitting there when it
+    /// is reopened.
+    func clearNotices() {
+        errorMessage = nil
+        lastResult = nil
+    }
+
     // MARK: - Sizing
 
     /// Real occupancy, via scripts/measure_storage.py.
@@ -252,8 +260,10 @@ final class StorageMaintenanceManager: ObservableObject {
                     : "\(index)/\(total) — \(file)"
             }
         case "error":
+            lastResult = nil
             errorMessage = event["message"] as? String ?? "the reclaim pass failed."
         case "done":
+            errorMessage = nil
             lastResult = StorageReclaimResult(
                 matchedBytes: Int64(event["matched_bytes"] as? Int ?? 0),
                 reclaimedBytes: Int64(event["reclaimed_bytes"] as? Int ?? 0),
