@@ -3377,11 +3377,19 @@ def create_app() -> FastAPI:
         if config_path:
             params["config_path"] = config_path
 
-        status_msg, ok = handler.initialize_service(**{
+        # Off the event loop. Loading a DiT is tens of seconds of synchronous
+        # work, and running it inline stops this server answering /health --
+        # which the wrapper proxies with a 5s timeout, so the whole backend
+        # reads as disconnected in gary4juce for the duration of a load.
+        init_kwargs = {
             k: v for k, v in params.items()
             if k in ("project_root", "config_path", "device", "use_flash_attention",
                      "compile_model", "offload_to_cpu", "offload_dit_to_cpu", "quantization")
-        })
+        }
+        status_msg, ok = await asyncio.get_running_loop().run_in_executor(
+            getattr(app.state, "executor", None),
+            lambda: handler.initialize_service(**init_kwargs),
+        )
         if not ok:
             raise HTTPException(status_code=500, detail=f"Model load failed: {status_msg}")
         app.state._initialized = True
@@ -3407,46 +3415,55 @@ def create_app() -> FastAPI:
                 app.state._soft_unloaded = True
                 return _wrap_response({"status": "unloaded_soft", "mode": unload_mode})
 
-            for attr in (
-                "model",
-                "vae",
-                "text_encoder",
-                "acoustic_model",
-                "silence_latent",
-                "tokenize",
-                "detokenize",
-                # MLX-side objects / compiled callables
-                "mlx_decoder",
-                "mlx_vae",
-                "_mlx_compiled_decode",
-                "_mlx_compiled_encode_sample",
-                "_mlx_compiled_encode_mean",
-                "_mlx_vae_dtype",
-            ):
-                obj = getattr(handler, attr, None)
-                if obj is not None:
-                    try:
-                        setattr(handler, attr, None)
-                        del obj
-                    except Exception:
-                        pass
+            # Also off the event loop: dropping the references is cheap, but
+            # gc.collect() followed by an MPS synchronise and cache purge is
+            # not, and it lands immediately after a generation -- which is
+            # exactly when gary4juce is polling to see if we are still alive.
+            def _release() -> None:
+                for attr in (
+                    "model",
+                    "vae",
+                    "text_encoder",
+                    "acoustic_model",
+                    "silence_latent",
+                    "tokenize",
+                    "detokenize",
+                    # MLX-side objects / compiled callables
+                    "mlx_decoder",
+                    "mlx_vae",
+                    "_mlx_compiled_decode",
+                    "_mlx_compiled_encode_sample",
+                    "_mlx_compiled_encode_mean",
+                    "_mlx_vae_dtype",
+                ):
+                    obj = getattr(handler, attr, None)
+                    if obj is not None:
+                        try:
+                            setattr(handler, attr, None)
+                            del obj
+                        except Exception:
+                            pass
 
-            # Keep MLX backend flags in a known state after hard unload.
-            if hasattr(handler, "use_mlx_dit"):
-                handler.use_mlx_dit = False
-            if hasattr(handler, "use_mlx_vae"):
-                handler.use_mlx_vae = False
+                # Keep MLX backend flags in a known state after hard unload.
+                if hasattr(handler, "use_mlx_dit"):
+                    handler.use_mlx_dit = False
+                if hasattr(handler, "use_mlx_vae"):
+                    handler.use_mlx_vae = False
 
-            gc.collect()
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-            elif hasattr(torch, "mps") and torch.backends.mps.is_available():
-                if hasattr(torch.mps, "synchronize"):
-                    torch.mps.synchronize()
-                if hasattr(torch.mps, "empty_cache"):
-                    torch.mps.empty_cache()
+                gc.collect()
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                elif hasattr(torch, "mps") and torch.backends.mps.is_available():
+                    if hasattr(torch.mps, "synchronize"):
+                        torch.mps.synchronize()
+                    if hasattr(torch.mps, "empty_cache"):
+                        torch.mps.empty_cache()
+
+            await asyncio.get_running_loop().run_in_executor(
+                getattr(app.state, "executor", None), _release
+            )
             app.state._initialized = False
             app.state._soft_unloaded = False
             return _wrap_response({"status": "unloaded", "mode": unload_mode})
