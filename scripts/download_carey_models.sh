@@ -33,6 +33,11 @@ DOWNLOAD_SCRAG_VAE=0
 DOWNLOAD_LM_06B=0
 DOWNLOAD_LM_17B=0
 DOWNLOAD_LM_4B=0
+# Qwen and the VAE arrive together with any DiT model, but they are separate
+# things on disk and either can be removed on its own -- so either has to be
+# fetchable on its own too.
+DOWNLOAD_QWEN=0
+DOWNLOAD_VAE=0
 
 if [[ ! -d "${ACE_ROOT}" ]]; then
   echo "ACE-Step repo not found at: ${ACE_ROOT}"
@@ -54,6 +59,8 @@ normalize_carey_download_targets() {
     DOWNLOAD_SFT=1
     DOWNLOAD_TURBO=1
     DOWNLOAD_SHARED=1
+    DOWNLOAD_QWEN=1
+    DOWNLOAD_VAE=1
     DOWNLOAD_SCRAG_VAE=1
     return 0
   fi
@@ -73,6 +80,14 @@ normalize_carey_download_targets() {
         ;;
       shared)
         DOWNLOAD_SHARED=1
+        DOWNLOAD_QWEN=1
+        DOWNLOAD_VAE=1
+        ;;
+      qwen|qwen3-embedding-0.6b)
+        DOWNLOAD_QWEN=1
+        ;;
+      vae)
+        DOWNLOAD_VAE=1
         ;;
       scrag|scrag-vae|scragvae)
         DOWNLOAD_SCRAG_VAE=1
@@ -97,13 +112,16 @@ normalize_carey_download_targets() {
 
   if (( DOWNLOAD_BASE == 0 && DOWNLOAD_SFT == 0 && DOWNLOAD_TURBO == 0 && DOWNLOAD_SHARED == 0 \
         && DOWNLOAD_SCRAG_VAE == 0 && DOWNLOAD_LM_06B == 0 && DOWNLOAD_LM_17B == 0 \
-        && DOWNLOAD_LM_4B == 0 )); then
+        && DOWNLOAD_LM_4B == 0 && DOWNLOAD_QWEN == 0 && DOWNLOAD_VAE == 0 )); then
     echo "CAREY_DOWNLOAD_TARGETS did not select any downloads." >&2
     return 1
   fi
 
+  # Any DiT needs both of these to run, so they come along with it.
   if (( DOWNLOAD_BASE == 1 || DOWNLOAD_SFT == 1 || DOWNLOAD_TURBO == 1 )); then
     DOWNLOAD_SHARED=1
+    DOWNLOAD_QWEN=1
+    DOWNLOAD_VAE=1
   fi
 
   return 0
@@ -642,7 +660,7 @@ if (( DOWNLOAD_TURBO == 1 )); then
   download_dit_model_files "DiT Turbo" "${ACESTEP_TURBO_CONFIG_PATH}"
 fi
 
-if (( DOWNLOAD_SHARED == 1 )); then
+if (( DOWNLOAD_QWEN == 1 )); then
   download_required_file "Qwen Weights" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/model.safetensors" "Qwen3-Embedding-0.6B/model.safetensors"
   download_required_file "Qwen Config" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/config.json" "Qwen3-Embedding-0.6B/config.json"
   download_required_file "Qwen Tokenizer" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/tokenizer.json" "Qwen3-Embedding-0.6B/tokenizer.json"
@@ -652,7 +670,9 @@ if (( DOWNLOAD_SHARED == 1 )); then
   download_required_file "Qwen Special Tokens" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/special_tokens_map.json" "Qwen3-Embedding-0.6B/special_tokens_map.json"
   download_required_file "Qwen Added Tokens" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/added_tokens.json" "Qwen3-Embedding-0.6B/added_tokens.json"
   download_required_file "Qwen Chat Template" "ACE-Step/Ace-Step1.5" "Qwen3-Embedding-0.6B/chat_template.jinja" "Qwen3-Embedding-0.6B/chat_template.jinja"
+fi
 
+if (( DOWNLOAD_VAE == 1 )); then
   download_required_file "VAE Weights" "ACE-Step/Ace-Step1.5" "vae/diffusion_pytorch_model.safetensors" "vae/diffusion_pytorch_model.safetensors"
   download_required_file "VAE Config" "ACE-Step/Ace-Step1.5" "vae/config.json" "vae/config.json"
 fi
@@ -704,13 +724,15 @@ fi
 if (( DOWNLOAD_TURBO == 1 )); then
   quick_check_paths+=("${CHECKPOINTS_DIR}/${ACESTEP_TURBO_CONFIG_PATH}/config.json")
 fi
-if (( DOWNLOAD_SHARED == 1 )); then
+if (( DOWNLOAD_QWEN == 1 )); then
   quick_check_paths+=(
     "${CHECKPOINTS_DIR}/Qwen3-Embedding-0.6B/model.safetensors"
     "${CHECKPOINTS_DIR}/Qwen3-Embedding-0.6B/config.json"
     "${CHECKPOINTS_DIR}/Qwen3-Embedding-0.6B/tokenizer.json"
-    "${CHECKPOINTS_DIR}/vae/diffusion_pytorch_model.safetensors"
   )
+fi
+if (( DOWNLOAD_VAE == 1 )); then
+  quick_check_paths+=("${CHECKPOINTS_DIR}/vae/diffusion_pytorch_model.safetensors")
 fi
 if (( DOWNLOAD_SCRAG_VAE == 1 )); then
   quick_check_paths+=(

@@ -183,6 +183,11 @@ nonisolated enum CareyDownloadTarget: String, CaseIterable, Identifiable {
     case xlSft = "acestep-v15-xl-sft"
     case xlTurbo = "acestep-v15-xl-turbo"
     case shared
+    // Qwen and the VAE come with any DiT, but they are separately removable, so
+    // they have to be separately fetchable -- otherwise removing one leaves the
+    // panel with a gap and no button to fill it.
+    case qwen
+    case vae
     case scragVae = "scrag-vae"
     // The 5Hz captioner LMs. Opt-in rather than part of "all": only
     // auto-labelling and training captions load them, and all three together
@@ -203,6 +208,10 @@ nonisolated enum CareyDownloadTarget: String, CaseIterable, Identifiable {
             return "turbo"
         case .shared:
             return "shared"
+        case .qwen:
+            return "qwen text encoder"
+        case .vae:
+            return "vae"
         case .xlBase:
             return "xl base"
         case .xlSft:
@@ -613,7 +622,7 @@ final class ControlCenterViewModel: ObservableObject {
         return ["1", "true", "yes", "on"].contains(environmentValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
     }
 
-    private static let careySharedRequiredModelFiles: [(label: String, relativePath: String)] = [
+    private static let careyQwenRequiredModelFiles: [(label: String, relativePath: String)] = [
         ("Qwen Weights", "checkpoints/Qwen3-Embedding-0.6B/model.safetensors"),
         ("Qwen Config", "checkpoints/Qwen3-Embedding-0.6B/config.json"),
         ("Qwen Tokenizer", "checkpoints/Qwen3-Embedding-0.6B/tokenizer.json"),
@@ -623,6 +632,9 @@ final class ControlCenterViewModel: ObservableObject {
         ("Qwen Special Tokens", "checkpoints/Qwen3-Embedding-0.6B/special_tokens_map.json"),
         ("Qwen Added Tokens", "checkpoints/Qwen3-Embedding-0.6B/added_tokens.json"),
         ("Qwen Chat Template", "checkpoints/Qwen3-Embedding-0.6B/chat_template.jinja"),
+    ]
+
+    private static let careyVaeRequiredModelFiles: [(label: String, relativePath: String)] = [
         ("VAE Weights", "checkpoints/vae/diffusion_pytorch_model.safetensors"),
         ("VAE Config", "checkpoints/vae/config.json"),
     ]
@@ -1062,7 +1074,9 @@ final class ControlCenterViewModel: ObservableObject {
         for targets: [CareyDownloadTarget]
     ) -> [(label: String, relativePath: String)] {
         let targetSet = Set(targets)
-        let includesShared = targetSet.contains(.shared)
+        // A DiT cannot run without either of these, so asking for one asks for
+        // both -- matching what the download script does.
+        let needsSharedAssets = targetSet.contains(.shared)
             || targetSet.contains(where: { $0.careyConfigName != nil })
 
         var files: [(label: String, relativePath: String)] = []
@@ -1075,8 +1089,11 @@ final class ControlCenterViewModel: ObservableObject {
                 configName: configName
             )
         }
-        if includesShared {
-            files += Self.careySharedRequiredModelFiles
+        if needsSharedAssets || targetSet.contains(.qwen) {
+            files += Self.careyQwenRequiredModelFiles
+        }
+        if needsSharedAssets || targetSet.contains(.vae) {
+            files += Self.careyVaeRequiredModelFiles
         }
         if targetSet.contains(.scragVae) {
             files += Self.careyOptionalModelFiles

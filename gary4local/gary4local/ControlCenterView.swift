@@ -2738,8 +2738,8 @@ private struct ModelDownloadSheet: View {
                     target
                 )
             } + [
-                ("qwen_encoder", "Qwen Text Encoder", "checkpoints/Qwen3-Embedding-0.6B/", nil),
-                ("vae", "VAE", "checkpoints/vae/", nil),
+                ("qwen_encoder", "Qwen Text Encoder (shared)", "checkpoints/Qwen3-Embedding-0.6B/", CareyDownloadTarget.qwen),
+                ("vae", "VAE (shared)", "checkpoints/vae/", CareyDownloadTarget.vae),
             ]
 
         return careyGroupStatuses(groups: groups, rows: rows)

@@ -51,6 +51,20 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def git_blob_sha1(path: Path) -> str:
+    """Git's object id for a file's contents.
+
+    Hugging Face names each blob after its etag, and that is only the sha256 for
+    files stored in LFS. Small files keep their git object id instead, so
+    matching those on sha256 alone never hits and their blobs are left behind.
+    """
+    data = path.read_bytes()
+    digest = hashlib.sha1()
+    digest.update(f"blob {len(data)}\0".encode())
+    digest.update(data)
+    return digest.hexdigest()
+
+
 def snapshot_references(hub: Path) -> dict:
     """blob path -> the snapshot symlinks pointing at it, keyed by repo.
 
@@ -99,8 +113,10 @@ def backing_cache_entries(model_dir: Path, hub: Path) -> tuple:
             if offset is not None:
                 by_extent.setdefault(offset, []).append(rel)
         else:
+            # Both spellings: a small file may be stored either way.
             try:
                 by_hash.setdefault(sha256_file(path), []).append(rel)
+                by_hash.setdefault(git_blob_sha1(path), []).append(rel)
             except OSError:
                 continue
 
