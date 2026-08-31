@@ -2368,16 +2368,6 @@ private struct ModelDownloadSheet: View {
 
         modelDownloadStatusText
 
-        HStack(spacing: 8) {
-            Button("refresh downloaded") {
-                viewModel.refreshStableAudioPredownloadInventory(
-                    checkpointsHint: viewModel.stableAudioPredownloadCheckpoints
-                )
-            }
-            Spacer()
-        }
-        .disabled(!viewModel.canManageStableAudioPredownloads || viewModel.isModelDownloadInProgress)
-
         if !viewModel.stableAudioInventoryModels.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 Text("downloaded models")
