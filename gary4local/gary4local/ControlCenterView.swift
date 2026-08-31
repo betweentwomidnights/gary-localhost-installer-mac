@@ -2301,6 +2301,22 @@ private struct ModelDownloadSheet: View {
         }
     }
 
+    /// Download one of the pretrained repos the panel lists. Rows carry their
+    /// own button here, the same as every other model panel.
+    @ViewBuilder
+    private func stableAudioDownloadButton(for row: StableAudioInventoryModelStatus) -> some View {
+        if !row.downloaded {
+            Button("download") {
+                viewModel.startStableAudioPredownloadRepo(row.id)
+            }
+            .disabled(
+                !viewModel.canManageStableAudioPredownloads
+                || viewModel.isModelDownloadInProgress
+            )
+            .help("download \(row.id).")
+        }
+    }
+
     /// Remove a whole cached model repo listed by the stable audio panel.
     @ViewBuilder
     private func stableAudioRemoveButton(for row: StableAudioInventoryModelStatus) -> some View {
@@ -2340,10 +2356,7 @@ private struct ModelDownloadSheet: View {
         Text("this mirrors jerry's repo + checkpoint flow. downloads go to the same hugging face cache used at runtime.")
             .font(.caption)
             .foregroundStyle(.secondary)
-        Text("stable-audio-open-small is already downloaded/loaded when jerry starts.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        Text("use the quick option below for stable-audio-open-1.0 or fetch finetune checkpoints.")
+        Text("jerry pulls stable-audio-open-small at startup if it is missing. download either model here to have it ready first, or fetch finetune checkpoints below.")
             .font(.caption)
             .foregroundStyle(.secondary)
 
@@ -2356,9 +2369,6 @@ private struct ModelDownloadSheet: View {
         modelDownloadStatusText
 
         HStack(spacing: 8) {
-            Button("download open-1.0") {
-                viewModel.startStableAudioPredownloadOpenOne()
-            }
             Button("refresh downloaded") {
                 viewModel.refreshStableAudioPredownloadInventory(
                     checkpointsHint: viewModel.stableAudioPredownloadCheckpoints
@@ -2380,6 +2390,7 @@ private struct ModelDownloadSheet: View {
                         Text(row.label)
                             .font(.caption.monospaced())
                         Spacer()
+                        stableAudioDownloadButton(for: row)
                         stableAudioRemoveButton(for: row)
                         if row.downloaded {
                             Text("downloaded")

@@ -2604,14 +2604,21 @@ final class ControlCenterViewModel: ObservableObject {
         }
     }
 
-    func startStableAudioPredownloadOpenOne() {
+    /// Download any pretrained stable audio repo the panel lists.
+    ///
+    /// This used to exist only for open-1.0, as a standalone button, which left
+    /// SAOS with no way to be fetched at all once it had been removed -- the
+    /// panel assumed it was always present because jerry pulls it at startup.
+    func startStableAudioPredownloadRepo(_ repoID: String) {
+        let repo = repoID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !repo.isEmpty else { return }
         startStableAudioPredownload(
             payload: [
                 "target_type": "pretrained",
-                "repo_id": "stabilityai/stable-audio-open-1.0",
+                "repo_id": repo,
                 "require_token": true
             ],
-            targetLabel: "stabilityai/stable-audio-open-1.0"
+            targetLabel: repo
         )
     }
 
