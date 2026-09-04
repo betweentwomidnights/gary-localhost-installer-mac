@@ -257,8 +257,13 @@
         "SA3_DECODE_CHUNK_SIZE": "128",
         "SA3_DECODE_OVERLAP": "32",
         "SA3_DECODE_CHUNK_BATCH_SIZE": "1",
+        "SA3_USE_DECODER_LORA": "0",
         "SA3_CONTINUE_TAIL_MODE": "regen_past",
         "SA3_CONTINUE_TAIL_PAD": "6",
+        "SA3_CONTINUE_SPLICE_SOURCE": "1",
+        "SA3_CONTINUE_SPLICE_XFADE": "0.03",
+        "SA3_CONTINUE_SPLICE_GAIN_MATCH": "1",
+        "SA3_CONTINUE_MASK_OVERLAP": "0.2",
         "SA3_LATENT_DIAG": "0",
         "OUTPUT_DIR": "${APP_SUPPORT_DIR}/sa3/outputs"
       },

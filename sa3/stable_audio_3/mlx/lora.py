@@ -601,10 +601,13 @@ def _resolve_target_key(source_weight_key: str, target_keys: tuple[str, ...]) ->
 
 def _target_key_candidates(source_weight_key: str) -> tuple[str, ...]:
     prefixes = (
+        "model.pretransform.model.decoder.",
+        "pretransform.model.decoder.",
         "model.model.",
         "model.",
         "conditioner.",
         "encoder.",
+        "decoder.",
         "conditioners.prompt.model.encoder.",
         "conditioners.prompt.model.",
         "conditioners.prompt.",

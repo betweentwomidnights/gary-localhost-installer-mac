@@ -85,6 +85,11 @@ struct SA3RuntimeSettings: Codable, Equatable {
     var latentShift: String
     var latentTargetStd: String
     var continuationTailPad: String
+    var continuationSpliceSource: Bool
+    var continuationSpliceXfade: String
+    var continuationSpliceGainMatch: Bool
+    var continuationMaskOverlap: String
+    var useDecoderLora: Bool
     var useFP32DiT: Bool
 
     static let fallbackDefaults = SA3RuntimeSettings(
@@ -94,6 +99,11 @@ struct SA3RuntimeSettings: Codable, Equatable {
         latentShift: "0.0",
         latentTargetStd: "",
         continuationTailPad: "6",
+        continuationSpliceSource: true,
+        continuationSpliceXfade: "0.03",
+        continuationSpliceGainMatch: true,
+        continuationMaskOverlap: "0.2",
+        useDecoderLora: false,
         useFP32DiT: true
     )
 
@@ -104,6 +114,11 @@ struct SA3RuntimeSettings: Codable, Equatable {
         latentShift: String,
         latentTargetStd: String,
         continuationTailPad: String,
+        continuationSpliceSource: Bool,
+        continuationSpliceXfade: String,
+        continuationSpliceGainMatch: Bool,
+        continuationMaskOverlap: String,
+        useDecoderLora: Bool,
         useFP32DiT: Bool
     ) {
         self.peakNormalizeDb = peakNormalizeDb
@@ -112,6 +127,11 @@ struct SA3RuntimeSettings: Codable, Equatable {
         self.latentShift = latentShift
         self.latentTargetStd = latentTargetStd
         self.continuationTailPad = continuationTailPad
+        self.continuationSpliceSource = continuationSpliceSource
+        self.continuationSpliceXfade = continuationSpliceXfade
+        self.continuationSpliceGainMatch = continuationSpliceGainMatch
+        self.continuationMaskOverlap = continuationMaskOverlap
+        self.useDecoderLora = useDecoderLora
         self.useFP32DiT = useFP32DiT
     }
 
@@ -123,6 +143,20 @@ struct SA3RuntimeSettings: Codable, Equatable {
         latentShift = environment["SA3_LATENT_SHIFT"] ?? defaults.latentShift
         latentTargetStd = environment["SA3_LATENT_TARGET_STD"] ?? defaults.latentTargetStd
         continuationTailPad = environment["SA3_CONTINUE_TAIL_PAD"] ?? defaults.continuationTailPad
+        continuationSpliceSource = Self.boolValue(
+            environment["SA3_CONTINUE_SPLICE_SOURCE"],
+            default: defaults.continuationSpliceSource
+        )
+        continuationSpliceXfade = environment["SA3_CONTINUE_SPLICE_XFADE"] ?? defaults.continuationSpliceXfade
+        continuationSpliceGainMatch = Self.boolValue(
+            environment["SA3_CONTINUE_SPLICE_GAIN_MATCH"],
+            default: defaults.continuationSpliceGainMatch
+        )
+        continuationMaskOverlap = environment["SA3_CONTINUE_MASK_OVERLAP"] ?? defaults.continuationMaskOverlap
+        useDecoderLora = Self.boolValue(
+            environment["SA3_USE_DECODER_LORA"],
+            default: defaults.useDecoderLora
+        )
         useFP32DiT = (environment["SA3_MLX_DIT_DTYPE"] ?? "float32").lowercased() == "float32"
     }
 
@@ -134,8 +168,53 @@ struct SA3RuntimeSettings: Codable, Equatable {
             latentShift: latentShift.trimmingCharacters(in: .whitespacesAndNewlines),
             latentTargetStd: latentTargetStd.trimmingCharacters(in: .whitespacesAndNewlines),
             continuationTailPad: continuationTailPad.trimmingCharacters(in: .whitespacesAndNewlines),
+            continuationSpliceSource: continuationSpliceSource,
+            continuationSpliceXfade: continuationSpliceXfade.trimmingCharacters(in: .whitespacesAndNewlines),
+            continuationSpliceGainMatch: continuationSpliceGainMatch,
+            continuationMaskOverlap: continuationMaskOverlap.trimmingCharacters(in: .whitespacesAndNewlines),
+            useDecoderLora: useDecoderLora,
             useFP32DiT: useFP32DiT
         )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case peakNormalizeDb
+        case limiterCeilingDb
+        case latentRescale
+        case latentShift
+        case latentTargetStd
+        case continuationTailPad
+        case continuationSpliceSource
+        case continuationSpliceXfade
+        case continuationSpliceGainMatch
+        case continuationMaskOverlap
+        case useDecoderLora
+        case useFP32DiT
+    }
+
+    init(from decoder: Decoder) throws {
+        let defaults = Self.fallbackDefaults
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        peakNormalizeDb = try values.decodeIfPresent(String.self, forKey: .peakNormalizeDb) ?? defaults.peakNormalizeDb
+        limiterCeilingDb = try values.decodeIfPresent(String.self, forKey: .limiterCeilingDb) ?? defaults.limiterCeilingDb
+        latentRescale = try values.decodeIfPresent(String.self, forKey: .latentRescale) ?? defaults.latentRescale
+        latentShift = try values.decodeIfPresent(String.self, forKey: .latentShift) ?? defaults.latentShift
+        latentTargetStd = try values.decodeIfPresent(String.self, forKey: .latentTargetStd) ?? defaults.latentTargetStd
+        continuationTailPad = try values.decodeIfPresent(String.self, forKey: .continuationTailPad) ?? defaults.continuationTailPad
+        continuationSpliceSource = try values.decodeIfPresent(Bool.self, forKey: .continuationSpliceSource) ?? defaults.continuationSpliceSource
+        continuationSpliceXfade = try values.decodeIfPresent(String.self, forKey: .continuationSpliceXfade) ?? defaults.continuationSpliceXfade
+        continuationSpliceGainMatch = try values.decodeIfPresent(Bool.self, forKey: .continuationSpliceGainMatch) ?? defaults.continuationSpliceGainMatch
+        continuationMaskOverlap = try values.decodeIfPresent(String.self, forKey: .continuationMaskOverlap) ?? defaults.continuationMaskOverlap
+        useDecoderLora = try values.decodeIfPresent(Bool.self, forKey: .useDecoderLora) ?? defaults.useDecoderLora
+        useFP32DiT = try values.decodeIfPresent(Bool.self, forKey: .useFP32DiT) ?? defaults.useFP32DiT
+    }
+
+    private static func boolValue(_ value: String?, default defaultValue: Bool) -> Bool {
+        guard let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !normalized.isEmpty else {
+            return defaultValue
+        }
+        return !["0", "false", "no", "off"].contains(normalized)
     }
 }
 
@@ -471,6 +550,11 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var sa3LatentShift: String = SA3RuntimeSettings.fallbackDefaults.latentShift
     @Published var sa3LatentTargetStd: String = SA3RuntimeSettings.fallbackDefaults.latentTargetStd
     @Published var sa3ContinuationTailPad: String = SA3RuntimeSettings.fallbackDefaults.continuationTailPad
+    @Published var sa3ContinuationSpliceSource: Bool = SA3RuntimeSettings.fallbackDefaults.continuationSpliceSource
+    @Published var sa3ContinuationSpliceXfade: String = SA3RuntimeSettings.fallbackDefaults.continuationSpliceXfade
+    @Published var sa3ContinuationSpliceGainMatch: Bool = SA3RuntimeSettings.fallbackDefaults.continuationSpliceGainMatch
+    @Published var sa3ContinuationMaskOverlap: String = SA3RuntimeSettings.fallbackDefaults.continuationMaskOverlap
+    @Published var sa3UseDecoderLora: Bool = SA3RuntimeSettings.fallbackDefaults.useDecoderLora
     @Published var sa3UseFP32DiT: Bool = SA3RuntimeSettings.fallbackDefaults.useFP32DiT
     @Published var isCareyLoraSheetPresented: Bool = false
     @Published var careyLoraState: CareyLoraState?
@@ -954,6 +1038,38 @@ final class ControlCenterViewModel: ObservableObject {
         sa3PythonExecutableURL() != nil
     }
 
+    var isSA3DecoderLoraDownloaded: Bool {
+        if let downloaded = sa3InventoryModels.first(where: {
+            $0.repoID == "thepatch/same-l-decoder-lora"
+        })?.downloaded {
+            return downloaded
+        }
+        guard let runtime = currentSA3Runtime() else { return false }
+        let hubPath = runtime.service.environment["HUGGINGFACE_HUB_CACHE"]
+            ?? runtime.service.environment["HF_HUB_CACHE"]
+            ?? NSString(string: "~/.cache/huggingface/hub").expandingTildeInPath
+        let snapshots = URL(fileURLWithPath: hubPath, isDirectory: true)
+            .appendingPathComponent("models--thepatch--same-l-decoder-lora/snapshots", isDirectory: true)
+        guard let revisions = try? FileManager.default.contentsOfDirectory(
+            at: snapshots,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return false
+        }
+        return revisions.contains { revision in
+            let checkpoint = revision.appendingPathComponent("squeakfix_v3.safetensors")
+            guard let values = try? checkpoint.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]) else {
+                return false
+            }
+            return values.isRegularFile == true && (values.fileSize ?? 0) > 0
+        }
+    }
+
+    var canEnableSA3DecoderLora: Bool {
+        isSA3DecoderLoraDownloaded || sa3UseDecoderLora
+    }
+
     var isSA3AutolabelActive: Bool {
         sa3AutolabelManager.state?.isActive == true
     }
@@ -1369,6 +1485,11 @@ final class ControlCenterViewModel: ObservableObject {
             latentShift: sa3LatentShift,
             latentTargetStd: sa3LatentTargetStd,
             continuationTailPad: sa3ContinuationTailPad,
+            continuationSpliceSource: sa3ContinuationSpliceSource,
+            continuationSpliceXfade: sa3ContinuationSpliceXfade,
+            continuationSpliceGainMatch: sa3ContinuationSpliceGainMatch,
+            continuationMaskOverlap: sa3ContinuationMaskOverlap,
+            useDecoderLora: sa3UseDecoderLora,
             useFP32DiT: sa3UseFP32DiT
         )
     }
@@ -1380,6 +1501,11 @@ final class ControlCenterViewModel: ObservableObject {
         sa3LatentShift = settings.latentShift
         sa3LatentTargetStd = settings.latentTargetStd
         sa3ContinuationTailPad = settings.continuationTailPad
+        sa3ContinuationSpliceSource = settings.continuationSpliceSource
+        sa3ContinuationSpliceXfade = settings.continuationSpliceXfade
+        sa3ContinuationSpliceGainMatch = settings.continuationSpliceGainMatch
+        sa3ContinuationMaskOverlap = settings.continuationMaskOverlap
+        sa3UseDecoderLora = settings.useDecoderLora
         sa3UseFP32DiT = settings.useFP32DiT
     }
 
@@ -4625,6 +4751,11 @@ final class ControlCenterViewModel: ObservableObject {
         environment["SA3_LATENT_SHIFT"] = sa3LatentShift
         environment["SA3_LATENT_TARGET_STD"] = sa3LatentTargetStd
         environment["SA3_CONTINUE_TAIL_PAD"] = sa3ContinuationTailPad
+        environment["SA3_CONTINUE_SPLICE_SOURCE"] = sa3ContinuationSpliceSource ? "1" : "0"
+        environment["SA3_CONTINUE_SPLICE_XFADE"] = sa3ContinuationSpliceXfade
+        environment["SA3_CONTINUE_SPLICE_GAIN_MATCH"] = sa3ContinuationSpliceGainMatch ? "1" : "0"
+        environment["SA3_CONTINUE_MASK_OVERLAP"] = sa3ContinuationMaskOverlap
+        environment["SA3_USE_DECODER_LORA"] = sa3UseDecoderLora ? "1" : "0"
         environment["SA3_MLX_DIT_DTYPE"] = sa3UseFP32DiT ? "float32" : "float16"
         return environment
     }

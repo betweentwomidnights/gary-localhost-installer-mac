@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import types
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,7 @@ from mlx.utils import tree_flatten
 
 from stable_audio_3.models.lora import load_lora_checkpoint
 from stable_audio_3.mlx.lora import MLXLoRASet
+from stable_audio_3.mlx.pipeline import StableAudioMLXPipeline
 from stable_audio_3.mlx.sampling import (
     make_distribution_shift_spec,
     shift_timestep_values,
@@ -596,6 +598,42 @@ def test_saved_mlx_training_checkpoint_loads_through_existing_lora_runtime(
     assert report.applied_layers == 1
     expected = model.layer.base.weight + model.layer.lora_B @ model.layer.lora_A
     assert mx.allclose(fresh.layer.weight, expected)
+
+
+def test_managed_decoder_lora_merges_without_consuming_a_user_lora_slot(
+    tmp_path: Path,
+):
+    source = TinyMLXLinear()
+    inject_trainable_lora(source, rank=1, alpha=1)
+    source.layer.lora_A = mx.array([[1.0, 2.0, 3.0]], dtype=mx.float32)
+    source.layer.lora_B = mx.array([[0.5], [-0.25]], dtype=mx.float32)
+    checkpoint = save_trainable_lora(
+        source,
+        tmp_path / "decoder.safetensors",
+        rank=1,
+        alpha=1,
+        extra_metadata={"target": "decoder"},
+    )
+
+    decoder = TinyMLXLinear()
+    before = mx.array(decoder.layer.weight)
+    pipeline = StableAudioMLXPipeline(
+        source_name="test",
+        model_config={},
+        requirements=types.SimpleNamespace(),
+        compatibility=types.SimpleNamespace(),
+        mlx_dit=object(),
+        text_conditioner=object(),
+        number_conditioner=object(),
+        autoencoder=types.SimpleNamespace(decoder=decoder),
+    )
+
+    pipeline.load_decoder_lora(checkpoint)
+
+    assert not mx.array_equal(decoder.layer.weight, before)
+    assert pipeline.decoder_lora_path == checkpoint.resolve()
+    assert pipeline.decoder_lora_report["applied_layers"] == 1
+    assert pipeline.lora_paths == ()
 
 
 def test_saved_mlx_dora_checkpoint_loads_through_existing_lora_runtime(
