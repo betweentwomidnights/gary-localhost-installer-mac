@@ -1,5 +1,110 @@
 import Foundation
 
+struct CareyOptimizedModelStatus: Identifiable {
+    let target: CareyDownloadTarget
+    let downloaded: Bool
+    let sizeBytes: Int64
+
+    var id: String { target.rawValue }
+}
+
+enum CareyOptimizedModelInventory {
+    static let revision = "218ca5e51809821177bdfed70bf500020df6e958"
+    private static let repositoryCacheName = "models--thepatch--acestep-1.5-mlx"
+
+    static func statuses(hubCacheDirectory: URL) -> [CareyOptimizedModelStatus] {
+        CareyDownloadTarget.optimizedTargets.map { target in
+            let root = artifactRoot(for: target, hubCacheDirectory: hubCacheDirectory)
+            let size = validatedSize(of: root, variant: target.careyConfigName ?? "")
+            return CareyOptimizedModelStatus(
+                target: target,
+                downloaded: size != nil,
+                sizeBytes: size ?? 0
+            )
+        }
+    }
+
+    private static func artifactRoot(
+        for target: CareyDownloadTarget,
+        hubCacheDirectory: URL
+    ) -> URL {
+        let variant = target.careyConfigName ?? ""
+        return hubCacheDirectory
+            .appendingPathComponent(repositoryCacheName, isDirectory: true)
+            .appendingPathComponent("snapshots/\(revision)/MLX", isDirectory: true)
+            .appendingPathComponent("\(variant)-f16", isDirectory: true)
+    }
+
+    private static func validatedSize(of root: URL, variant: String) -> Int64? {
+        let expectedSourceRevisions = [
+            "acestep-v15-base": "e432212fec32b8965a14ffa57ae653438d6abd14",
+            "acestep-v15-sft": "c410d249e71ea9385a7b586865e65b1473e1098d",
+            "acestep-v15-turbo": "19671f406d603126926c1b7e2adc169acbcade22",
+            "acestep-v15-xl-base": "220c1166efbdd9583eafcb12eb160594bbfcb241",
+            "acestep-v15-xl-sft": "d06de46b4622f781cf07f4a013a67d591ca52819",
+            "acestep-v15-xl-turbo": "d4a0b288b83ebb7e25a8c0b32c573c22e134e8ee",
+        ]
+        guard let expectedSourceRevision = expectedSourceRevisions[variant] else { return nil }
+        guard let decoder = provenance(at: root.appendingPathComponent("provenance.json")),
+              decoder.variant == variant,
+              decoder.source.revision == expectedSourceRevision,
+              let conditioning = provenance(
+                at: root.appendingPathComponent("conditioning/provenance.json")
+              ),
+              conditioning.variant == variant,
+              conditioning.source.revision == expectedSourceRevision else {
+            return nil
+        }
+
+        let fixed = [
+            root.appendingPathComponent("config.json"),
+            root.appendingPathComponent("model.safetensors.index.json"),
+            root.appendingPathComponent("conditioning/model.safetensors.index.json"),
+            root.appendingPathComponent("conditioning/silence_latent.pt"),
+        ]
+        let recorded = decoder.artifact.files.map { root.appendingPathComponent($0.filename) }
+            + conditioning.artifact.files.map {
+                root.appendingPathComponent("conditioning/\($0.filename)")
+            }
+        let paths = fixed + recorded
+        guard paths.allSatisfy({ nonEmptyFileSize($0) != nil }) else { return nil }
+        return paths.compactMap(nonEmptyFileSize).reduce(0, +)
+    }
+
+    private static func provenance(at url: URL) -> ArtifactProvenance? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(ArtifactProvenance.self, from: data)
+    }
+
+    private static func nonEmptyFileSize(_ url: URL) -> Int64? {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              values.isRegularFile == true,
+              let size = values.fileSize,
+              size > 0 else {
+            return nil
+        }
+        return Int64(size)
+    }
+
+    private struct ArtifactProvenance: Decodable {
+        let variant: String
+        let source: Source
+        let artifact: Artifact
+    }
+
+    private struct Source: Decodable {
+        let revision: String?
+    }
+
+    private struct Artifact: Decodable {
+        let files: [ArtifactFile]
+    }
+
+    private struct ArtifactFile: Decodable {
+        let filename: String
+    }
+}
+
 /// What "downloaded" means for the Carey checkpoints, in one place.
 ///
 /// The file lists here mirror `scripts/download_carey_models.sh` -- that script

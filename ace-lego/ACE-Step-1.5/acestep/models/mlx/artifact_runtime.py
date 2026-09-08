@@ -13,6 +13,7 @@ from .artifact_source import sha256_file
 
 ARTIFACT_REPO_ID = "thepatch/acestep-1.5-mlx"
 ARTIFACT_REVISION = "218ca5e51809821177bdfed70bf500020df6e958"
+WEIGHT_SOURCE_POLICIES = frozenset({"auto", "optimized", "legacy"})
 
 
 @dataclass(frozen=True)
@@ -60,13 +61,26 @@ ARTIFACTS = {
 
 
 def optimized_load_requested() -> bool:
-    """Return whether the guarded optimized Carey load path is enabled."""
+    """Return whether policy allows the guarded optimized Carey load path."""
+    return weight_source_policy() != "legacy"
+
+
+def weight_source_policy() -> str:
+    """Return the validated Carey weight-source policy from the environment."""
+    configured = os.getenv("ACESTEP_MLX_WEIGHT_SOURCE", "").strip().lower()
+    if configured:
+        if configured not in WEIGHT_SOURCE_POLICIES:
+            raise ValueError(f"Invalid ACESTEP_MLX_WEIGHT_SOURCE: {configured!r}")
+        return configured
+
+    # Backward compatibility for development scripts and older manifests.
     value = os.getenv("ACESTEP_MLX_OPTIMIZED_LOAD", "0")
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    enabled = value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return "optimized" if enabled else "legacy"
 
 
-def resolve_artifact_dir(variant: str) -> Path:
-    """Return a verified local artifact directory, downloading the pinned snapshot if needed."""
+def resolve_artifact_dir(variant: str, *, local_files_only: bool = False) -> Path:
+    """Return a verified artifact, optionally refusing all network access."""
     spec = ARTIFACTS.get(variant)
     if spec is None:
         raise ValueError(f"No optimized MLX artifact is registered for {variant!r}")
@@ -81,6 +95,7 @@ def resolve_artifact_dir(variant: str) -> Path:
             revision=ARTIFACT_REVISION,
             allow_patterns=[f"{spec.subdir}/*", f"{spec.subdir}/conditioning/*"],
             token=False,
+            local_files_only=local_files_only,
         )
         root = Path(snapshot) / spec.subdir
     _validate_identity(root, spec)

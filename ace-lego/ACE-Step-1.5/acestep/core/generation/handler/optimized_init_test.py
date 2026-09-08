@@ -41,6 +41,35 @@ class OptimizedInitTests(unittest.TestCase):
         self.assertIsNone(result)
         check_model.assert_not_called()
 
+    def test_auto_uses_legacy_when_local_artifact_is_absent(self):
+        """Automatic selection must fall back without attempting a download."""
+        with patch.dict(os.environ, {"ACESTEP_MLX_WEIGHT_SOURCE": "auto"}, clear=True), patch(
+            "acestep.models.mlx.artifact_runtime.resolve_artifact_dir",
+            side_effect=FileNotFoundError("not cached"),
+        ) as resolve:
+            result = resolve_optimized_artifact(
+                variant="acestep-v15-xl-base",
+                use_mlx_dit=True,
+                resolved_device="mps",
+            )
+        self.assertIsNone(result)
+        resolve.assert_called_once_with("acestep-v15-xl-base", local_files_only=True)
+
+    def test_optimized_requires_a_downloaded_valid_artifact(self):
+        """Explicit optimized selection must fail instead of silently using legacy."""
+        with patch.dict(
+            os.environ, {"ACESTEP_MLX_WEIGHT_SOURCE": "optimized"}, clear=True
+        ), patch(
+            "acestep.models.mlx.artifact_runtime.resolve_artifact_dir",
+            side_effect=FileNotFoundError("not cached"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "not downloaded or valid"):
+                resolve_optimized_artifact(
+                    variant="acestep-v15-xl-base",
+                    use_mlx_dit=True,
+                    resolved_device="mps",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -33,6 +33,7 @@ DOWNLOAD_SCRAG_VAE=0
 DOWNLOAD_LM_06B=0
 DOWNLOAD_LM_17B=0
 DOWNLOAD_LM_4B=0
+DOWNLOAD_MLX_VARIANTS=()
 # Qwen and the VAE arrive together with any DiT model, but they are separate
 # things on disk and either can be removed on its own -- so either has to be
 # fetchable on its own too.
@@ -101,6 +102,11 @@ normalize_carey_download_targets() {
       lm-4b|acestep-5hz-lm-4b)
         DOWNLOAD_LM_4B=1
         ;;
+      mlx-acestep-v15-base|mlx-acestep-v15-sft|mlx-acestep-v15-turbo|mlx-acestep-v15-xl-base|mlx-acestep-v15-xl-sft|mlx-acestep-v15-xl-turbo)
+        DOWNLOAD_MLX_VARIANTS+=("${token#mlx-}")
+        DOWNLOAD_QWEN=1
+        DOWNLOAD_VAE=1
+        ;;
       "")
         ;;
       *)
@@ -112,7 +118,8 @@ normalize_carey_download_targets() {
 
   if (( DOWNLOAD_BASE == 0 && DOWNLOAD_SFT == 0 && DOWNLOAD_TURBO == 0 && DOWNLOAD_SHARED == 0 \
         && DOWNLOAD_SCRAG_VAE == 0 && DOWNLOAD_LM_06B == 0 && DOWNLOAD_LM_17B == 0 \
-        && DOWNLOAD_LM_4B == 0 && DOWNLOAD_QWEN == 0 && DOWNLOAD_VAE == 0 )); then
+        && DOWNLOAD_LM_4B == 0 && DOWNLOAD_QWEN == 0 && DOWNLOAD_VAE == 0 \
+        && ${#DOWNLOAD_MLX_VARIANTS[@]} == 0 )); then
     echo "CAREY_DOWNLOAD_TARGETS did not select any downloads." >&2
     return 1
   fi
@@ -625,6 +632,58 @@ download_dit_model_files() {
     "${config_name}/silence_latent.pt"
 }
 
+download_mlx_artifact() {
+  local variant="$1"
+  local suffix="${variant#acestep-v15-}"
+  local subdir="MLX/acestep-v15-${suffix}-f16"
+  local label="MLX_${variant//-/_}"
+
+  echo "[${label}] ensuring pinned Apple MLX artifact ${variant}"
+  "${DOWNLOADER_PYTHON}" - \
+    "thepatch/acestep-1.5-mlx" \
+    "218ca5e51809821177bdfed70bf500020df6e958" \
+    "${subdir}" \
+    "${label}" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+from huggingface_hub import snapshot_download
+
+repo_id, revision, subdir, label = sys.argv[1:5]
+workers = max(1, int(os.environ.get("G4L_HF_SNAPSHOT_MAX_WORKERS", "8")))
+snapshot = Path(
+    snapshot_download(
+        repo_id=repo_id,
+        revision=revision,
+        allow_patterns=[f"{subdir}/*", f"{subdir}/conditioning/*"],
+        token=False,
+        max_workers=workers,
+    )
+)
+root = snapshot / subdir
+required = [
+    root / "config.json",
+    root / "model.safetensors.index.json",
+    root / "provenance.json",
+    root / "conditioning/model.safetensors.index.json",
+    root / "conditioning/provenance.json",
+    root / "conditioning/silence_latent.pt",
+]
+missing = [str(path) for path in required if not path.is_file()]
+if missing:
+    raise RuntimeError(f"downloaded MLX artifact is incomplete: {missing}")
+for provenance_path in (root / "provenance.json", root / "conditioning/provenance.json"):
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    for record in provenance.get("artifact", {}).get("files", []):
+        path = provenance_path.parent / record["filename"]
+        if not path.is_file() or path.stat().st_size != record["size"]:
+            raise RuntimeError(f"downloaded MLX artifact file is incomplete: {path}")
+print(f"[{label}] 100% verified: {root}", flush=True)
+PY
+}
+
 resolve_worker_path || {
   echo "could not locate hf_predownload_worker.py under runtime/workspace repositories."
   exit 1
@@ -658,6 +717,12 @@ fi
 
 if (( DOWNLOAD_TURBO == 1 )); then
   download_dit_model_files "DiT Turbo" "${ACESTEP_TURBO_CONFIG_PATH}"
+fi
+
+if (( ${#DOWNLOAD_MLX_VARIANTS[@]} > 0 )); then
+  for mlx_variant in "${DOWNLOAD_MLX_VARIANTS[@]}"; do
+    download_mlx_artifact "${mlx_variant}"
+  done
 fi
 
 if (( DOWNLOAD_QWEN == 1 )); then

@@ -6,11 +6,11 @@ than held in a conversation.
 
 ## Release-candidate sequence
 
-- [ ] Checkpoint the current ACE-Step MLX, conditioning-shell, native-adapter,
+- [x] Checkpoint the current ACE-Step MLX, conditioning-shell, native-adapter,
       training-parity, lifecycle, and storage UI work before integrating remote
       changes. The working tree is intentionally broad and must not be rebased
       or cleaned while uncommitted.
-- [ ] Integrate the already-pushed `origin/main` parity work: Gary/Terry seed
+- [x] Integrate the already-pushed `origin/main` parity work: Gary/Terry seed
       handling plus SA3 decoder-LoRA and seamless-continuation changes. Resolve
       the Carey manifest/UI overlaps deliberately and run both upstream and
       local regression tests.
@@ -159,7 +159,7 @@ more often, so it matters more than it did.
       control. That is sufficient for this release; do not spend another long
       M4 Air training run on this gate. Keep a short artifact-only
       preprocess/train/save/reload smoke in release validation.
-- [ ] **Mac-only model inventory after the single-artifact gate.** Split Carey's
+- [x] **Mac-only model inventory after the single-artifact gate.** Split Carey's
       download panel into “Apple MLX models” and “Shared components”; each of the
       six variants gets one primary Mac download that supports both generation
       and training. Existing legacy checkpoints remain a supported compatibility
@@ -169,7 +169,7 @@ more often, so it matters more than it did.
       keeping Qwen, stock/Scrag VAE, and captioners out of the migration target.
       PC must report this capability as unavailable rather than inheriting Mac
       UI or artifact assumptions.
-- [ ] **Explicit Carey weight-source policy.** Replace the boolean-only choice
+- [x] **Explicit Carey weight-source policy.** Replace the boolean-only choice
       with an internal `auto | optimized | legacy` policy. `auto` must never
       download multi-GB weights during generation: use a verified local optimized
       artifact when present, otherwise use an installed legacy checkpoint.

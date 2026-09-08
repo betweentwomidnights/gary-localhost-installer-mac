@@ -696,6 +696,29 @@ struct ControlCenterView: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
+                Text("mlx model files")
+                    .font(.subheadline)
+                Picker("mlx model files", selection: Binding(
+                    get: { viewModel.careyWeightSource },
+                    set: { viewModel.setCareyWeightSource($0) }
+                )) {
+                    ForEach(CareyWeightSource.allCases) { source in
+                        Text(source.displayName).tag(source)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .garyPickerAccent()
+                .disabled(viewModel.careyBackendEngine != .mlx)
+                Text(
+                    "automatic uses a downloaded Apple MLX model when available, otherwise it keeps using your existing ACE-Step files. "
+                    + "Apple MLX never downloads during generation. Existing always uses the previous checkpoint format."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
                 Text("decoder")
                     .font(.subheadline)
                 Toggle(
@@ -2562,7 +2585,7 @@ private struct ModelDownloadSheet: View {
         Text("carey uses ace-step lego mode with `acestep_init_llm=false`. lego uses the active base family only, while complete can use base, sft, or turbo from that same family.")
             .font(.caption)
             .foregroundStyle(.secondary)
-        Text("service startup is lazy. use this sheet to pre-download the selected regular or xl model family before generating.")
+        Text("service startup is lazy. Apple MLX models load much faster and are recommended on this Mac. Existing checkpoint models remain supported.")
             .font(.caption)
             .foregroundStyle(.secondary)
         Text("plain regular base is still the safer lego default without a LoRA. xl-base gets more interesting once you have a matching xl LoRA.")
@@ -2589,6 +2612,49 @@ private struct ModelDownloadSheet: View {
                 .foregroundStyle(.red)
         }
 
+        if !viewModel.careyOptimizedModels.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Apple MLX models")
+                    .font(.caption.weight(.semibold))
+                Text("one download supports both generation and BF16-compute adapter training. Downloads are explicit; generation never starts one.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                ForEach(viewModel.careyOptimizedModels) { model in
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(model.downloaded ? Color.green : Color.gray.opacity(0.5))
+                            .frame(width: 8, height: 8)
+                        Text("\(model.target.displayName) (optimized)")
+                            .font(.caption.monospaced())
+                        Spacer()
+                        Text(model.downloaded ? formatByteCount(model.sizeBytes) : "not downloaded")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Button(
+                            viewModel.isCareyDownloadTargetActive(model.target)
+                                ? "downloading..."
+                                : (model.downloaded ? "downloaded" : "download")
+                        ) {
+                            viewModel.startCareyFocusedDownload(for: model.target)
+                        }
+                        .disabled(
+                            model.downloaded
+                            || !viewModel.canRunCareyFocusedDownload
+                            || viewModel.isModelDownloadInProgress
+                            || viewModel.isCareyLifecycleActionInProgress
+                        )
+                    }
+                }
+            }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.accentColor.opacity(0.08))
+            )
+
+            Divider()
+        }
+
         if viewModel.careyRequiredModels.isEmpty {
             Text("no carey model inventory found yet.")
                 .font(.caption)
@@ -2598,10 +2664,43 @@ private struct ModelDownloadSheet: View {
                 from: viewModel.careyRequiredModels,
                 useXlModels: viewModel.careyUseXlModels
             )
+            let legacyCleanupRows = groupedRows.filter { row in
+                guard let target = row.downloadTarget,
+                      CareyDownloadTarget.ditTargets.contains(target),
+                      row.isComplete else { return false }
+                return viewModel.careyOptimizedModels.contains {
+                    $0.downloaded && $0.target.careyConfigName == target.careyConfigName
+                }
+            }
+            if !legacyCleanupRows.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Free up storage from existing ACE-Step models?")
+                        .font(.caption.weight(.semibold))
+                    Text("These models also have a complete Apple MLX download. Keep them for compatibility, or remove them after confirming Apple MLX generation works for you.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    ForEach(legacyCleanupRows) { row in
+                        HStack(spacing: 8) {
+                            Text(row.label.replacingOccurrences(of: " — active", with: ""))
+                                .font(.caption.monospaced())
+                            Spacer()
+                            Text("keeping is the default")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            careyRemoveButton(for: row)
+                        }
+                    }
+                }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.orange.opacity(0.08))
+                )
+            }
             let downloadedFileCount = viewModel.careyRequiredModels.filter(\.downloaded).count
             let totalFileCount = viewModel.careyRequiredModels.count
             VStack(alignment: .leading, spacing: 6) {
-                Text("required components (\(downloadedFileCount)/\(totalFileCount) files)")
+                Text("existing checkpoints + shared components (\(downloadedFileCount)/\(totalFileCount) files)")
                     .font(.caption.weight(.semibold))
                 ForEach(groupedRows) { row in
                     HStack(spacing: 8) {

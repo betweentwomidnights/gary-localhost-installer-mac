@@ -12,6 +12,7 @@ from .artifact_runtime import (
     load_decoder_artifact,
     optimized_load_requested,
     resolve_artifact_dir,
+    weight_source_policy,
 )
 
 _TRAINING_DTYPES = {
@@ -44,11 +45,15 @@ def load_training_artifact_if_compatible(
     ):
         return None
     try:
-        artifact = resolve_artifact_dir(variant)
+        artifact = resolve_artifact_dir(variant, local_files_only=True)
         null_condition = load_decoder_artifact(artifact, decoder)
     except Exception as exc:
+        if weight_source_policy() == "optimized":
+            raise RuntimeError(
+                f"Pinned Apple MLX weights for {variant} are not downloaded or valid"
+            ) from exc
         logger.warning(
-            "Pinned MLX training artifact unavailable for {}; using source checkpoint: {}",
+            "Pinned MLX training artifact unavailable for {}; auto policy is using source checkpoint: {}",
             variant,
             exc,
         )

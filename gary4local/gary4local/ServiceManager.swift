@@ -64,6 +64,7 @@ final class ServiceManager: ObservableObject {
     private var stableAudioBackendEngine = "mps"
     private var melodyFlowBackendEngine = "mps"
     private var careyBackendEngine = "mlx"
+    private var careyWeightSource = "auto"
     private var careyUseXlModels = false
     private var careyUseScragVae = false
     private var careyUseSampledMlxVaeEncode = true
@@ -111,6 +112,20 @@ final class ServiceManager: ObservableObject {
         let normalized = Self.normalizeCareyBackendEngine(backend)
         guard careyBackendEngine != normalized else { return }
         careyBackendEngine = normalized
+
+        guard restartIfRunning else { return }
+        guard let runtime = services.first(where: { $0.id == "carey" }) else { return }
+        if runtime.processState == .running || runtime.processState == .starting {
+            restart(serviceID: "carey")
+        }
+    }
+
+    func setCareyWeightSource(_ source: String, restartIfRunning: Bool) {
+        let normalized = ["auto", "optimized", "legacy"].contains(source.lowercased())
+            ? source.lowercased()
+            : "auto"
+        guard careyWeightSource != normalized else { return }
+        careyWeightSource = normalized
 
         guard restartIfRunning else { return }
         guard let runtime = services.first(where: { $0.id == "carey" }) else { return }
@@ -1462,6 +1477,7 @@ final class ServiceManager: ObservableObject {
             env["ACESTEP_FORCE_TORCH_MPS"] = useMlx ? "0" : "1"
             env["ACESTEP_USE_MLX_DIT"] = useMlx ? "1" : "0"
             env["ACESTEP_USE_MLX_VAE"] = useMlx ? "1" : "0"
+            env["ACESTEP_MLX_WEIGHT_SOURCE"] = careyWeightSource
             env["ACESTEP_NO_INIT"] = "true"
             env["ACESTEP_CONFIG_PATH"] = baseConfig
             env["ACESTEP_BASE_CONFIG_PATH"] = baseConfig

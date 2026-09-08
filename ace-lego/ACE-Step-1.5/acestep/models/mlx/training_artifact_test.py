@@ -64,7 +64,9 @@ class TrainingArtifactTests(unittest.TestCase):
                     )
 
         self.assertEqual(result, ("null", "/artifact"))
-        resolve.assert_called_once_with("acestep-v15-xl-base")
+        resolve.assert_called_once_with(
+            "acestep-v15-xl-base", local_files_only=True
+        )
 
 
 if __name__ == "__main__":

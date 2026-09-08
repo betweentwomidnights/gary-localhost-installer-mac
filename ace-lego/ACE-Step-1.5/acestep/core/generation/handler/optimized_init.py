@@ -16,16 +16,22 @@ def resolve_optimized_artifact(
     from acestep.models.mlx.artifact_runtime import (
         optimized_load_requested,
         resolve_artifact_dir,
+        weight_source_policy,
     )
 
     if not optimized_load_requested():
         return None
+    policy = weight_source_policy()
     try:
-        return resolve_artifact_dir(variant)
+        return resolve_artifact_dir(variant, local_files_only=True)
     except Exception as exc:
+        if policy == "optimized":
+            raise RuntimeError(
+                f"Pinned Apple MLX weights for {variant} are not downloaded or valid"
+            ) from exc
         logger.warning(
             "[initialize_service] Optimized MLX artifact unavailable; "
-            "using full PyTorch fallback: {}",
+            "auto policy is using the installed legacy checkpoint: {}",
             exc,
         )
         return None

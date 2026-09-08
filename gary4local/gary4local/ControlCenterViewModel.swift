@@ -78,6 +78,26 @@ enum CareyBackendEngine: String, CaseIterable, Identifiable {
     }
 }
 
+enum CareyWeightSource: String, CaseIterable, Identifiable {
+    case automatic = "auto"
+    case optimized
+    case legacy
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .automatic: return "automatic"
+        case .optimized: return "apple mlx"
+        case .legacy: return "existing"
+        }
+    }
+
+    static func from(rawValue: String) -> CareyWeightSource {
+        CareyWeightSource(rawValue: rawValue.lowercased()) ?? .automatic
+    }
+}
+
 struct SA3RuntimeSettings: Codable, Equatable {
     var peakNormalizeDb: String
     var limiterCeilingDb: String
@@ -261,6 +281,12 @@ nonisolated enum CareyDownloadTarget: String, CaseIterable, Identifiable {
     case xlBase = "acestep-v15-xl-base"
     case xlSft = "acestep-v15-xl-sft"
     case xlTurbo = "acestep-v15-xl-turbo"
+    case mlxBase = "mlx-acestep-v15-base"
+    case mlxSft = "mlx-acestep-v15-sft"
+    case mlxTurbo = "mlx-acestep-v15-turbo"
+    case mlxXlBase = "mlx-acestep-v15-xl-base"
+    case mlxXlSft = "mlx-acestep-v15-xl-sft"
+    case mlxXlTurbo = "mlx-acestep-v15-xl-turbo"
     case shared
     // Qwen and the VAE come with any DiT, but they are separately removable, so
     // they have to be separately fetchable -- otherwise removing one leaves the
@@ -297,6 +323,12 @@ nonisolated enum CareyDownloadTarget: String, CaseIterable, Identifiable {
             return "xl sft"
         case .xlTurbo:
             return "xl turbo"
+        case .mlxBase: return "base"
+        case .mlxSft: return "sft"
+        case .mlxTurbo: return "turbo"
+        case .mlxXlBase: return "xl base"
+        case .mlxXlSft: return "xl sft"
+        case .mlxXlTurbo: return "xl turbo"
         case .scragVae:
             return "scrag vae"
         case .captionerSmall:
@@ -321,12 +353,18 @@ nonisolated enum CareyDownloadTarget: String, CaseIterable, Identifiable {
         case .xlBase: return "acestep-v15-xl-base"
         case .xlSft: return "acestep-v15-xl-sft"
         case .xlTurbo: return "acestep-v15-xl-turbo"
+        case .mlxBase: return "acestep-v15-base"
+        case .mlxSft: return "acestep-v15-sft"
+        case .mlxTurbo: return "acestep-v15-turbo"
+        case .mlxXlBase: return "acestep-v15-xl-base"
+        case .mlxXlSft: return "acestep-v15-xl-sft"
+        case .mlxXlTurbo: return "acestep-v15-xl-turbo"
         default: return nil
         }
     }
 
     var isXLFamily: Bool {
-        self == .xlBase || self == .xlSft || self == .xlTurbo
+        [.xlBase, .xlSft, .xlTurbo, .mlxXlBase, .mlxXlSft, .mlxXlTurbo].contains(self)
     }
 
     /// The script has one slot per DiT role and takes the folder name from the
@@ -336,6 +374,8 @@ nonisolated enum CareyDownloadTarget: String, CaseIterable, Identifiable {
         case .xlBase: return "base"
         case .xlSft: return "sft"
         case .xlTurbo: return "turbo"
+        case .mlxBase, .mlxSft, .mlxTurbo, .mlxXlBase, .mlxXlSft, .mlxXlTurbo:
+            return rawValue
         default: return rawValue
         }
     }
@@ -343,6 +383,12 @@ nonisolated enum CareyDownloadTarget: String, CaseIterable, Identifiable {
     static let ditTargets: [CareyDownloadTarget] = [
         .base, .sft, .turbo, .xlBase, .xlSft, .xlTurbo,
     ]
+
+    static let optimizedTargets: [CareyDownloadTarget] = [
+        .mlxBase, .mlxSft, .mlxTurbo, .mlxXlBase, .mlxXlSft, .mlxXlTurbo,
+    ]
+
+    var isOptimized: Bool { Self.optimizedTargets.contains(self) }
 }
 
 enum CareyLoraModelFamily: String, CaseIterable, Identifiable, Codable {
@@ -568,6 +614,7 @@ final class ControlCenterViewModel: ObservableObject {
     private static let stableAudioBackendDefaultsKey = "stableAudioBackendEngine"
     private static let melodyFlowBackendDefaultsKey = "melodyFlowBackendEngine"
     private static let careyBackendDefaultsKey = "careyBackendEngine"
+    private static let careyWeightSourceDefaultsKey = "careyWeightSource"
     private static let careyUseXlModelsDefaultsKey = "careyUseXlModels"
     private static let careyUseScragVaeDefaultsKey = "careyUseScragVae"
     private static let careyUseSampledMlxVaeEncodeDefaultsKey = "careyUseSampledMlxVaeEncode"
@@ -605,6 +652,7 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var careyRequiredModels: [CareyRequiredModelStatus] = []
     @Published var careyOptionalModels: [CareyRequiredModelStatus] = []
     @Published var careyCaptionerModels: [CareyRequiredModelStatus] = []
+    @Published var careyOptimizedModels: [CareyOptimizedModelStatus] = []
     /// Which Carey models are complete on disk. Refreshed by
     /// refreshCareyModelAvailability(), never computed on read -- see there.
     @Published private(set) var downloadedCareyCaptioners: [CareyCaptionerModel] = []
@@ -616,6 +664,7 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var stableAudioBackendEngine: StableAudioBackendEngine = .mps
     @Published var melodyFlowBackendEngine: MelodyFlowBackendEngine = .mps
     @Published var careyBackendEngine: CareyBackendEngine = .mlx
+    @Published var careyWeightSource: CareyWeightSource = .automatic
     @Published var careyUseXlModels: Bool = false
     @Published var careyUseScragVae: Bool = false
     @Published var careyUseSampledMlxVaeEncode: Bool = true
@@ -939,6 +988,10 @@ final class ControlCenterViewModel: ObservableObject {
             forKey: Self.careyBackendDefaultsKey
         ) ?? CareyBackendEngine.mlx.rawValue
         careyBackendEngine = CareyBackendEngine.from(rawValue: savedCareyBackend)
+        let savedCareyWeightSource = UserDefaults.standard.string(
+            forKey: Self.careyWeightSourceDefaultsKey
+        ) ?? CareyWeightSource.automatic.rawValue
+        careyWeightSource = CareyWeightSource.from(rawValue: savedCareyWeightSource)
         careyUseXlModels = UserDefaults.standard.bool(forKey: Self.careyUseXlModelsDefaultsKey)
         careyUseScragVae = UserDefaults.standard.bool(forKey: Self.careyUseScragVaeDefaultsKey)
         if UserDefaults.standard.object(forKey: Self.careyUseSampledMlxVaeEncodeDefaultsKey) != nil {
@@ -1259,6 +1312,7 @@ final class ControlCenterViewModel: ObservableObject {
         careyRequiredModels = []
         careyOptionalModels = []
         careyCaptionerModels = []
+        careyOptimizedModels = []
         rebuildFailureReport = nil
         rebuildDiagnosticsStatusMessage = ""
         managerCancellables.removeAll()
@@ -1275,6 +1329,7 @@ final class ControlCenterViewModel: ObservableObject {
             manager.setStableAudioBackendEngine(stableAudioBackendEngine.rawValue, restartIfRunning: false)
             manager.setMelodyFlowBackendEngine(melodyFlowBackendEngine.rawValue, restartIfRunning: false)
             manager.setCareyBackendEngine(careyBackendEngine.rawValue, restartIfRunning: false)
+            manager.setCareyWeightSource(careyWeightSource.rawValue, restartIfRunning: false)
             manager.setCareyUseXlModels(careyUseXlModels, restartIfRunning: false)
             manager.setCareyUseScragVae(careyUseScragVae, restartIfRunning: false)
             manager.setCareyUseSampledMlxVaeEncode(careyUseSampledMlxVaeEncode, restartIfRunning: false)
@@ -1301,6 +1356,7 @@ final class ControlCenterViewModel: ObservableObject {
             careyRequiredModels = []
             careyOptionalModels = []
             careyCaptionerModels = []
+            careyOptimizedModels = []
             modelDownloadStatusMessage = ""
             isModelCatalogLoading = false
         }
@@ -1482,6 +1538,18 @@ final class ControlCenterViewModel: ObservableObject {
             careyBackendStatus = "carey backend set to \(backend.displayName). service restarting..."
         } else {
             careyBackendStatus = "carey backend set to \(backend.displayName)."
+        }
+    }
+
+    func setCareyWeightSource(_ source: CareyWeightSource) {
+        guard careyWeightSource != source else { return }
+        careyWeightSource = source
+        UserDefaults.standard.set(source.rawValue, forKey: Self.careyWeightSourceDefaultsKey)
+        manager?.setCareyWeightSource(source.rawValue, restartIfRunning: true)
+        if manager?.services.first(where: { $0.id == "carey" })?.isRunning == true {
+            careyBackendStatus = "carey weight source set to \(source.displayName). service restarting..."
+        } else {
+            careyBackendStatus = "carey weight source set to \(source.displayName) for the next start."
         }
     }
 
@@ -3136,7 +3204,7 @@ final class ControlCenterViewModel: ObservableObject {
             modelDownloadStatusMessage = "downloading carey model files..."
         } else if canRunCareyFocusedDownload {
             let familyDescription = careyUseXlModels ? "xl" : "regular"
-            modelDownloadStatusMessage = "download the \(familyDescription) carey model family you want to use, or fetch all three at once. ScragVAE is optional."
+            modelDownloadStatusMessage = "Apple MLX is recommended for \(familyDescription) models. Existing checkpoints remain supported and ScragVAE is optional."
         } else {
             modelDownloadStatusMessage = "focused download script not found (expected in runtime/scripts or workspace/scripts)."
         }
@@ -3195,6 +3263,9 @@ final class ControlCenterViewModel: ObservableObject {
         careyRequiredModels = rows
         careyOptionalModels = optionalRows
         careyCaptionerModels = captionerRows
+        careyOptimizedModels = CareyOptimizedModelInventory.statuses(
+            hubCacheDirectory: resolveCareyHubCacheDirectory(for: runtime)
+        )
         refreshCareyModelAvailability()
         if !isCareyDownloadInProgress {
             let downloadedCount = rows.filter(\.downloaded).count
@@ -5010,6 +5081,20 @@ final class ControlCenterViewModel: ObservableObject {
         }
         return runtime.service.workingDirectory
             .appendingPathComponent("checkpoints", isDirectory: true)
+            .standardizedFileURL
+    }
+
+    private func resolveCareyHubCacheDirectory(for runtime: ServiceRuntime) -> URL {
+        let configured = runtime.service.environment["HUGGINGFACE_HUB_CACHE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !configured.isEmpty {
+            return URL(
+                fileURLWithPath: NSString(string: configured).expandingTildeInPath,
+                isDirectory: true
+            ).standardizedFileURL
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/GaryLocalhost/cache/huggingface/hub")
             .standardizedFileURL
     }
 

@@ -1,9 +1,11 @@
 """Tests for pinned decoder and conditioning artifact identity validation."""
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from acestep.models.mlx.artifact_export import FORMAT_NAME, FORMAT_VERSION
 from acestep.models.mlx.artifact_runtime import (
@@ -11,6 +13,7 @@ from acestep.models.mlx.artifact_runtime import (
     ARTIFACT_REVISION,
     ArtifactSpec,
     _validate_identity,
+    weight_source_policy,
 )
 from acestep.models.mlx.artifact_source import sha256_file
 
@@ -102,6 +105,28 @@ class ArtifactRuntimeTests(unittest.TestCase):
                 "acestep-v15-xl-turbo",
             },
         )
+
+    def test_weight_source_policy_supports_new_and_legacy_flags(self):
+        """The explicit policy wins while the old boolean remains compatible."""
+        with patch.dict(
+            os.environ,
+            {"ACESTEP_MLX_WEIGHT_SOURCE": "auto", "ACESTEP_MLX_OPTIMIZED_LOAD": "0"},
+        ):
+            self.assertEqual(weight_source_policy(), "auto")
+        with patch.dict(
+            os.environ,
+            {"ACESTEP_MLX_OPTIMIZED_LOAD": "1"},
+            clear=True,
+        ):
+            self.assertEqual(weight_source_policy(), "optimized")
+
+    def test_invalid_weight_source_policy_is_rejected(self):
+        """A misspelled source must fail instead of changing load behavior."""
+        with patch.dict(
+            os.environ, {"ACESTEP_MLX_WEIGHT_SOURCE": "download"}, clear=True
+        ):
+            with self.assertRaisesRegex(ValueError, "Invalid ACESTEP_MLX_WEIGHT_SOURCE"):
+                weight_source_policy()
 
     def test_conditioning_index_corruption_is_rejected(self):
         """A changed conditioning index must fail before model construction."""
