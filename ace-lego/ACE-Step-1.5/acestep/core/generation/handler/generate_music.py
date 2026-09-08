@@ -5,6 +5,7 @@ This module provides the public ``generate_music`` entry point extracted from
 """
 
 import traceback
+import time
 from typing import Any, Dict, List, Optional, Union
 
 from loguru import logger
@@ -105,10 +106,12 @@ class GenerateMusicMixin:
         )
 
         logger.info("[generate_music] Starting generation...")
+        request_started = time.perf_counter()
         if progress:
             progress(0.51, desc="Preparing inputs...")
         logger.info("[generate_music] Preparing inputs...")
 
+        stage_started = time.perf_counter()
         runtime = self._prepare_generate_music_runtime(
             batch_size=batch_size,
             audio_duration=audio_duration,
@@ -116,6 +119,7 @@ class GenerateMusicMixin:
             seed=seed,
             use_random_seed=use_random_seed,
         )
+        runtime_seconds = time.perf_counter() - stage_started
         actual_batch_size = runtime["actual_batch_size"]
         actual_seed_list = runtime["actual_seed_list"]
         seed_value_for_ui = runtime["seed_value_for_ui"]
@@ -123,6 +127,7 @@ class GenerateMusicMixin:
         repainting_end = runtime["repainting_end"]
 
         try:
+            stage_started = time.perf_counter()
             refer_audios, processed_src_audio, audio_error = self._prepare_reference_and_source_audio(
                 reference_audio=reference_audio,
                 src_audio=src_audio,
@@ -132,7 +137,9 @@ class GenerateMusicMixin:
             )
             if audio_error is not None:
                 return audio_error
+            audio_prep_seconds = time.perf_counter() - stage_started
 
+            stage_started = time.perf_counter()
             service_inputs = self._prepare_generate_music_service_inputs(
                 actual_batch_size=actual_batch_size,
                 processed_src_audio=processed_src_audio,
@@ -149,10 +156,12 @@ class GenerateMusicMixin:
                 repainting_start=repainting_start,
                 repainting_end=repainting_end,
             )
+            service_input_seconds = time.perf_counter() - stage_started
             repaint_injection_ratio = _resolve_repaint_injection_ratio(
                 repaint_mode,
                 repaint_strength,
             )
+            stage_started = time.perf_counter()
             service_run = self._run_generate_music_service_with_progress(
                 progress=progress,
                 actual_batch_size=actual_batch_size,
@@ -173,9 +182,11 @@ class GenerateMusicMixin:
                 infer_method=infer_method,
                 task_type=task_type,
             )
+            service_seconds = time.perf_counter() - stage_started
             outputs = service_run["outputs"]
             infer_steps_for_progress = service_run["infer_steps_for_progress"]
 
+            stage_started = time.perf_counter()
             pred_latents, time_costs = self._prepare_generate_music_decode_state(
                 outputs=outputs,
                 infer_steps_for_progress=infer_steps_for_progress,
@@ -184,12 +195,38 @@ class GenerateMusicMixin:
                 latent_shift=latent_shift,
                 latent_rescale=latent_rescale,
             )
+            decode_prep_seconds = time.perf_counter() - stage_started
+            stage_started = time.perf_counter()
             pred_wavs, pred_latents_cpu, time_costs = self._decode_generate_music_pred_latents(
                 pred_latents=pred_latents,
                 progress=progress,
                 use_tiled_decode=use_tiled_decode,
                 time_costs=time_costs,
                 task_type=task_type,
+            )
+            decode_seconds = time.perf_counter() - stage_started
+            request_total_seconds = time.perf_counter() - request_started
+            time_costs.update(
+                {
+                    "request_runtime_time_cost": runtime_seconds,
+                    "request_audio_prep_time_cost": audio_prep_seconds,
+                    "request_service_input_time_cost": service_input_seconds,
+                    "request_service_time_cost": service_seconds,
+                    "request_decode_prep_time_cost": decode_prep_seconds,
+                    "request_decode_time_cost": decode_seconds,
+                    "request_total_time_cost": request_total_seconds,
+                }
+            )
+            logger.info(
+                "[timing] request total={:.3f}s runtime={:.3f}s audio={:.3f}s "
+                "inputs={:.3f}s service={:.3f}s decode_prep={:.3f}s decode={:.3f}s",
+                request_total_seconds,
+                runtime_seconds,
+                audio_prep_seconds,
+                service_input_seconds,
+                service_seconds,
+                decode_prep_seconds,
+                decode_seconds,
             )
             return self._build_generate_music_success_payload(
                 outputs=outputs,

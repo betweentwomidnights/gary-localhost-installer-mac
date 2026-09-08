@@ -29,7 +29,9 @@ from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
-from transformers.utils import auto_docstring, can_return_tuple, logging
+from transformers.utils import can_return_tuple, logging
+
+from ..common.transformers_docstrings import auto_docstring
 from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3MLP,
     Qwen3RMSNorm,

@@ -22,6 +22,75 @@ class _Host(ServiceGenerateExecuteMixin, ServiceGenerateOutputsMixin):
 class ServiceGenerateExecuteMixinTests(unittest.TestCase):
     """Validate helper behavior for kwargs and output assembly."""
 
+    def test_prepare_service_condition_skips_fsq_for_non_cover_batch(self):
+        """Non-cover conditioning should run only the encoder and preserve source latents."""
+        host = _Host()
+        encoder_hidden_states = torch.ones(1, 2, 4)
+        encoder_attention_mask = torch.ones(1, 2, dtype=torch.bool)
+        encoder = Mock(return_value=(encoder_hidden_states, encoder_attention_mask))
+        prepare_condition = Mock(side_effect=AssertionError("FSQ path must not run"))
+        host.model = type(
+            "FakeModel",
+            (),
+            {"encoder": encoder, "prepare_condition": prepare_condition},
+        )()
+        src_latents = torch.arange(16, dtype=torch.float32).reshape(1, 4, 4)
+        chunk_masks = torch.ones(1, 4, 1, dtype=torch.bool)
+
+        actual_hidden, actual_mask, context_latents = host._prepare_service_condition(
+            text_hidden_states=torch.zeros(1, 2, 4),
+            text_attention_mask=torch.ones(1, 2, dtype=torch.bool),
+            lyric_hidden_states=torch.zeros(1, 2, 4),
+            lyric_attention_mask=torch.ones(1, 2, dtype=torch.bool),
+            refer_audio_acoustic_hidden_states_packed=torch.zeros(1, 2, 4),
+            refer_audio_order_mask=torch.zeros(1, dtype=torch.long),
+            hidden_states=src_latents,
+            attention_mask=torch.ones(1, 4),
+            silence_latent=host.silence_latent,
+            src_latents=src_latents,
+            chunk_masks=chunk_masks,
+            is_covers=torch.tensor([False]),
+        )
+
+        self.assertIs(actual_hidden, encoder_hidden_states)
+        self.assertIs(actual_mask, encoder_attention_mask)
+        torch.testing.assert_close(context_latents[..., :4], src_latents)
+        torch.testing.assert_close(context_latents[..., 4:], chunk_masks.to(torch.float32))
+        prepare_condition.assert_not_called()
+
+    def test_prepare_service_condition_keeps_cover_fsq_path(self):
+        """Any cover item should delegate to the upstream conditioning implementation."""
+        host = _Host()
+        expected = (
+            torch.ones(1, 2, 4),
+            torch.ones(1, 2, dtype=torch.bool),
+            torch.ones(1, 4, 5),
+        )
+        prepare_condition = Mock(return_value=expected)
+        host.model = type(
+            "FakeModel",
+            (),
+            {"encoder": Mock(), "prepare_condition": prepare_condition},
+        )()
+
+        actual = host._prepare_service_condition(
+            text_hidden_states=torch.zeros(1, 2, 4),
+            text_attention_mask=torch.ones(1, 2, dtype=torch.bool),
+            lyric_hidden_states=torch.zeros(1, 2, 4),
+            lyric_attention_mask=torch.ones(1, 2, dtype=torch.bool),
+            refer_audio_acoustic_hidden_states_packed=torch.zeros(1, 2, 4),
+            refer_audio_order_mask=torch.zeros(1, dtype=torch.long),
+            hidden_states=torch.zeros(1, 4, 4),
+            attention_mask=torch.ones(1, 4),
+            silence_latent=host.silence_latent,
+            src_latents=torch.zeros(1, 4, 4),
+            chunk_masks=torch.ones(1, 4, 1),
+            is_covers=torch.tensor([True]),
+        )
+
+        self.assertIs(actual, expected)
+        prepare_condition.assert_called_once()
+
     def test_build_generate_kwargs_adds_timesteps_tensor(self):
         """Timesteps input should be converted to a device tensor in kwargs."""
         host = _Host()
@@ -191,6 +260,7 @@ class ServiceGenerateExecuteMixinTests(unittest.TestCase):
             "FakeModel",
             (),
             {
+                "encoder": Mock(return_value=(cond[0], cond[1])),
                 "prepare_condition": Mock(side_effect=[cond, cond]),
             },
         )()
@@ -215,7 +285,7 @@ class ServiceGenerateExecuteMixinTests(unittest.TestCase):
             "lyric_attention_mask": torch.ones(1, 2, dtype=torch.bool),
             "refer_audio_acoustic_hidden_states_packed": torch.zeros(1, 2, 4, dtype=torch.float32),
             "refer_audio_order_mask": torch.zeros(1, dtype=torch.long),
-            "chunk_mask": torch.ones(1, 4, dtype=torch.bool),
+            "chunk_mask": torch.ones(1, 4, 1, dtype=torch.bool),
             "is_covers": torch.tensor([True]),
             "precomputed_lm_hints_25Hz": None,
             "non_cover_text_hidden_states": torch.zeros(1, 2, 4, dtype=torch.float32),

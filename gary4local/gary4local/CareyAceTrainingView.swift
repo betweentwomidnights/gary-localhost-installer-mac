@@ -28,9 +28,9 @@ struct CareyAceTrainingSheet: View {
     @State private var saveEvery = "25"
     @State private var saveBestAfter = "25"
     @State private var batchSize = "1"
-    @State private var gradientAccumulation = "1"
-    @State private var learningRate = "3e-4"
-    @State private var lossWeighting = "min_snr"
+    @State private var gradientAccumulation = "4"
+    @State private var learningRate = "1e-4"
+    @State private var lossWeighting = "none"
     @State private var snrGamma = "5"
     @State private var maxDuration = "240"
     @State private var genreRatio = "20"
@@ -309,7 +309,7 @@ struct CareyAceTrainingSheet: View {
                                 TextField("learning rate", text: $learningRate)
                                     .textFieldStyle(.roundedBorder)
                                     .frame(width: 110)
-                                Text("1e-4 trains lightly; 3e-4 trains hard. Current: \(learningRateDescription).")
+                                Text("1e-4 matches the ACE reference recipe. Current: \(learningRateDescription).")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -416,8 +416,8 @@ struct CareyAceTrainingSheet: View {
                             GridRow {
                                 Text("loss weighting")
                                 Picker("loss weighting", selection: $lossWeighting) {
-                                    Text("Min-SNR (recommended)").tag("min_snr")
-                                    Text("none (flat MSE)").tag("none")
+                                    Text("none · reference flat MSE").tag("none")
+                                    Text("Min-SNR · experimental").tag("min_snr")
                                 }
                                 .labelsHidden()
                                 .frame(width: 190)

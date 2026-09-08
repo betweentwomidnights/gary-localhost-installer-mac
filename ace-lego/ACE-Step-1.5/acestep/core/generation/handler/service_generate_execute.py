@@ -1,6 +1,7 @@
 """Execution helpers for service generation diffusion and output assembly."""
 
 import random
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -9,6 +10,52 @@ from loguru import logger
 
 class ServiceGenerateExecuteMixin:
     """Run diffusion execution for normalized service-generation requests."""
+
+    def _prepare_service_condition(
+        self,
+        *,
+        text_hidden_states: torch.Tensor,
+        text_attention_mask: torch.Tensor,
+        lyric_hidden_states: torch.Tensor,
+        lyric_attention_mask: torch.Tensor,
+        refer_audio_acoustic_hidden_states_packed: torch.Tensor,
+        refer_audio_order_mask: torch.Tensor,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        silence_latent: torch.Tensor,
+        src_latents: torch.Tensor,
+        chunk_masks: torch.Tensor,
+        is_covers: torch.Tensor,
+        precomputed_lm_hints_25Hz: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Prepare conditioning while skipping unused FSQ work for non-cover batches."""
+        if isinstance(is_covers, torch.Tensor) and not bool(is_covers.any().item()):
+            encoder_hidden_states, encoder_attention_mask = self.model.encoder(
+                text_hidden_states=text_hidden_states,
+                text_attention_mask=text_attention_mask,
+                lyric_hidden_states=lyric_hidden_states,
+                lyric_attention_mask=lyric_attention_mask,
+                refer_audio_acoustic_hidden_states_packed=refer_audio_acoustic_hidden_states_packed,
+                refer_audio_order_mask=refer_audio_order_mask,
+            )
+            context_latents = torch.cat([src_latents, chunk_masks.to(hidden_states.dtype)], dim=-1)
+            return encoder_hidden_states, encoder_attention_mask, context_latents
+
+        return self.model.prepare_condition(
+            text_hidden_states=text_hidden_states,
+            text_attention_mask=text_attention_mask,
+            lyric_hidden_states=lyric_hidden_states,
+            lyric_attention_mask=lyric_attention_mask,
+            refer_audio_acoustic_hidden_states_packed=refer_audio_acoustic_hidden_states_packed,
+            refer_audio_order_mask=refer_audio_order_mask,
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            silence_latent=silence_latent,
+            src_latents=src_latents,
+            chunk_masks=chunk_masks,
+            is_covers=is_covers,
+            precomputed_lm_hints_25Hz=precomputed_lm_hints_25Hz,
+        )
 
     def _unpack_service_processed_data(self, processed_data: Tuple[Any, ...]) -> Dict[str, Any]:
         """Convert batch preprocessing tuple into a keyed payload."""
@@ -169,9 +216,12 @@ class ServiceGenerateExecuteMixin:
             audio_cover_strength,
             cover_noise_strength,
         )
+        execute_started = time.perf_counter()
+        condition_started = execute_started
+        non_cover_condition_seconds = 0.0
         with torch.inference_mode():
             with self._load_model_context("model"):
-                encoder_hidden_states, encoder_attention_mask, context_latents = self.model.prepare_condition(
+                encoder_hidden_states, encoder_attention_mask, context_latents = self._prepare_service_condition(
                     text_hidden_states=payload["text_hidden_states"],
                     text_attention_mask=payload["text_attention_mask"],
                     lyric_hidden_states=payload["lyric_hidden_states"],
@@ -191,16 +241,18 @@ class ServiceGenerateExecuteMixin:
                     is_covers=payload["is_covers"],
                     precomputed_lm_hints_25Hz=payload["precomputed_lm_hints_25Hz"],
                 )
+                condition_seconds = time.perf_counter() - condition_started
 
                 if self.use_mlx_dit and self.mlx_decoder is not None:
                     try:
                         enc_hs_nc, enc_am_nc, ctx_nc = None, None, None
                         if audio_cover_strength < 1.0 and payload["non_cover_text_hidden_states"] is not None:
+                            non_cover_started = time.perf_counter()
                             non_is_covers = torch.zeros_like(payload["is_covers"])
                             sil_exp = self.silence_latent[:, :payload["src_latents"].shape[1], :].expand(
                                 payload["src_latents"].shape[0], -1, -1
                             )
-                            enc_hs_nc, enc_am_nc, ctx_nc = self.model.prepare_condition(
+                            enc_hs_nc, enc_am_nc, ctx_nc = self._prepare_service_condition(
                                 text_hidden_states=payload["non_cover_text_hidden_states"],
                                 text_attention_mask=payload["non_cover_text_attention_masks"],
                                 lyric_hidden_states=payload["lyric_hidden_states"],
@@ -216,7 +268,9 @@ class ServiceGenerateExecuteMixin:
                                 chunk_masks=payload["chunk_mask"],
                                 is_covers=non_is_covers,
                             )
+                            non_cover_condition_seconds = time.perf_counter() - non_cover_started
 
+                        diffusion_started = time.perf_counter()
                         outputs = self._mlx_run_diffusion(
                             encoder_hidden_states=encoder_hidden_states,
                             encoder_attention_mask=encoder_attention_mask,
@@ -242,7 +296,16 @@ class ServiceGenerateExecuteMixin:
                             encoder_attention_mask_non_cover=enc_am_nc,
                             context_latents_non_cover=ctx_nc,
                         )
+                        dispatch_seconds = time.perf_counter() - diffusion_started
                         _tc = outputs.get("time_costs", {})
+                        _tc.update(
+                            {
+                                "condition_prepare_time_cost": condition_seconds,
+                                "non_cover_condition_time_cost": non_cover_condition_seconds,
+                                "diffusion_dispatch_time_cost": dispatch_seconds,
+                                "execute_total_time_cost": time.perf_counter() - execute_started,
+                            }
+                        )
                         logger.info(
                             "[service_generate] DiT diffusion complete via MLX ({:.2f}s total, {:.3f}s/step, {} steps).",
                             float(_tc.get("diffusion_time_cost", 0.0)),
@@ -250,10 +313,27 @@ class ServiceGenerateExecuteMixin:
                             int(_tc.get("num_steps", requested_steps)),
                         )
                     except Exception as exc:
+                        if getattr(self, "_conditioning_shell_active", False):
+                            raise RuntimeError(
+                                "MLX diffusion failed while the decoder-free conditioning shell was active"
+                            ) from exc
                         logger.warning("[service_generate] MLX diffusion failed (%s); falling back to PyTorch.", exc)
                         outputs = self.model.generate_audio(**generate_kwargs)
                 else:
                     logger.info("[service_generate] DiT diffusion via PyTorch ({})...", self.device)
                     outputs = self.model.generate_audio(**generate_kwargs)
+
+        timing = outputs.setdefault("time_costs", {})
+        timing.setdefault("condition_prepare_time_cost", condition_seconds)
+        timing.setdefault("non_cover_condition_time_cost", non_cover_condition_seconds)
+        timing.setdefault("execute_total_time_cost", time.perf_counter() - execute_started)
+        logger.info(
+            "[timing] execute total={:.3f}s condition={:.3f}s non_cover={:.3f}s "
+            "diffusion_dispatch={:.3f}s",
+            float(timing["execute_total_time_cost"]),
+            float(timing["condition_prepare_time_cost"]),
+            float(timing["non_cover_condition_time_cost"]),
+            float(timing.get("diffusion_dispatch_time_cost", 0.0)),
+        )
 
         return outputs, encoder_hidden_states, encoder_attention_mask, context_latents

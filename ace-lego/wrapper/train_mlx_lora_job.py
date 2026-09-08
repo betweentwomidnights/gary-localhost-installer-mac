@@ -416,6 +416,12 @@ def build_train_command(
         str(args.learning_rate),
         "--weight-decay",
         str(args.weight_decay),
+        "--lr-scheduler",
+        args.lr_scheduler,
+        "--warmup-steps",
+        str(args.warmup_steps),
+        "--max-grad-norm",
+        str(args.max_grad_norm),
         "--batch-size",
         str(args.batch_size),
         "--gradient-accumulation",
@@ -1243,7 +1249,12 @@ def write_plan(
             "gradientCheckpointing": resolve_gradient_checkpointing(args),
             "memoryLimitGb": resolve_memory_limit_gb(args),
             "optimizer": "adamw",
+            "learningRate": args.learning_rate,
             "weightDecay": args.weight_decay,
+            "lrScheduler": args.lr_scheduler,
+            "warmupSteps": args.warmup_steps,
+            "maxGradNorm": args.max_grad_norm,
+            "gradientAccumulation": args.gradient_accumulation,
             "lossWeighting": args.loss_weighting,
             "snrGamma": args.snr_gamma,
             "caption": args.caption,
@@ -1399,8 +1410,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("attention", "balanced"),
         default="balanced",
     )
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument(
+        "--lr-scheduler",
+        choices=("cosine", "linear", "constant"),
+        default="cosine",
+    )
+    parser.add_argument("--warmup-steps", type=int, default=100)
+    parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--cfg-ratio", type=float, default=0.15)
     parser.add_argument(
         "--timestep-mu",
@@ -1408,14 +1426,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Advanced training schedule override. Default: -0.4.",
     )
-    parser.add_argument("--loss-weighting", choices=("none", "min_snr"), default="min_snr")
+    parser.add_argument("--loss-weighting", choices=("none", "min_snr"), default="none")
     parser.add_argument("--snr-gamma", type=float, default=5.0)
     parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--save-every", type=int, default=25)
     parser.add_argument("--save-best", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-best-after", type=int, default=25)
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--gradient-accumulation", type=int, default=1)
+    parser.add_argument("--gradient-accumulation", type=int, default=4)
     parser.add_argument("--max-duration", type=float, default=240.0)
     parser.add_argument("--adapter-type", choices=("lora", "dora"), default="dora")
     parser.add_argument("--preprocess-device", default="auto")
@@ -1460,6 +1478,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("learning rate must be greater than zero")
     if args.weight_decay < 0:
         raise ValueError("weight decay must be non-negative")
+    if args.warmup_steps < 0:
+        raise ValueError("warmup steps must be non-negative")
+    if args.max_grad_norm <= 0:
+        raise ValueError("max gradient norm must be greater than zero")
     if args.snr_gamma <= 0:
         raise ValueError("SNR gamma must be greater than zero")
     if args.max_steps < 0:

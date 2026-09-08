@@ -45,6 +45,10 @@ class LyricScoreMixin(LyricAlignmentCommonMixin):
         """
         if self.model is None:
             return self._lyric_score_error("Model not initialized")
+        if getattr(self.model, "decoder", None) is None:
+            return self._lyric_score_error(
+                "Lyric attention scoring is unavailable with optimized MLX loading"
+            )
 
         custom_layers_config = self._resolve_custom_layers_config(custom_layers_config)
 

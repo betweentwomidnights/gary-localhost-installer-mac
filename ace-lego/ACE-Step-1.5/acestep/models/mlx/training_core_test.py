@@ -20,6 +20,31 @@ import mlx.nn as nn  # noqa: E402
 from acestep.models.mlx import training_core as ace_training  # noqa: E402
 
 
+def test_reference_defaults_use_plain_mse_and_scheduled_adamw() -> None:
+    flow = ace_training.ACEFlowMatchingConfig()
+    adamw = ace_training.ACEAdamWConfig()
+
+    assert flow.loss_weighting == "none"
+    assert adamw.learning_rate == 1e-4
+    assert adamw.scheduler == "cosine"
+    assert adamw.warmup_steps == 100
+
+
+def test_learning_rate_schedule_clamps_warmup_and_decays_to_one_percent() -> None:
+    schedule = ace_training.build_learning_rate_schedule(
+        ace_training.ACEAdamWConfig(
+            learning_rate=1e-4,
+            scheduler="cosine",
+            warmup_steps=100,
+            total_steps=120,
+        )
+    )
+
+    assert float(schedule(mx.array(0))) == pytest.approx(1e-5, rel=1e-5)
+    assert float(schedule(mx.array(12))) == pytest.approx(1e-4, rel=1e-5)
+    assert float(schedule(mx.array(120))) == pytest.approx(1e-6, rel=1e-5)
+
+
 def test_flow_min_snr_weights_match_pc_reference_cases() -> None:
     low_snr = ace_training.flow_min_snr_weights(
         mx.array([0.5, 0.9], dtype=mx.float32),

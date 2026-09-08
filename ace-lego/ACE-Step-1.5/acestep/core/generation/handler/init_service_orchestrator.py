@@ -64,10 +64,18 @@ class InitServiceOrchestratorMixin:
             checkpoint_path = Path(checkpoint_dir)
             logger.info(f"[initialize_service] Using checkpoint directory: {checkpoint_dir}")
 
+            from .optimized_init import resolve_optimized_artifact
+
+            artifact_path = resolve_optimized_artifact(
+                variant=config_path,
+                use_mlx_dit=use_mlx_dit,
+                resolved_device=resolved_device,
+            )
             precheck_failure = self._ensure_models_present(
                 checkpoint_path=checkpoint_path,
                 config_path=config_path,
                 prefer_source=prefer_source,
+                require_dit=artifact_path is None,
             )
             if precheck_failure is not None:
                 self.model = None
@@ -78,16 +86,29 @@ class InitServiceOrchestratorMixin:
                 self.silence_latent = None
                 return precheck_failure
 
-            self._sync_model_code_if_needed(config_path, checkpoint_path)
-
             model_path = os.path.join(checkpoint_dir, config_path)
-            self._load_main_model_from_checkpoint(
-                model_checkpoint_path=model_path,
-                device=torch_runtime_device,
-                use_flash_attention=use_flash_attention,
-                compile_model=normalized_compile,
-                quantization=self.quantization,
-            )
+            self._mlx_native_adapter = None
+            self._mlx_null_condition_emb = None
+            self._mlx_artifact_dir = artifact_path
+            if artifact_path is not None:
+                from .optimized_init import load_optimized_conditioning
+
+                load_optimized_conditioning(
+                    self,
+                    variant=config_path,
+                    artifact_path=artifact_path,
+                    dtype=self.dtype,
+                    device=torch_runtime_device,
+                )
+            else:
+                self._sync_model_code_if_needed(config_path, checkpoint_path)
+                self._load_main_model_from_checkpoint(
+                    model_checkpoint_path=model_path,
+                    device=torch_runtime_device,
+                    use_flash_attention=use_flash_attention,
+                    compile_model=normalized_compile,
+                    quantization=self.quantization,
+                )
             vae_path = self._load_vae_model(
                 checkpoint_dir=checkpoint_dir,
                 device=torch_runtime_device,
@@ -103,6 +124,10 @@ class InitServiceOrchestratorMixin:
                 use_mlx_dit=use_mlx_dit,
                 mlx_compile_requested=mlx_compile_requested,
             )
+            if artifact_path is not None and not self.use_mlx_dit:
+                raise RuntimeError(
+                    "Optimized conditioning shell loaded but the pinned MLX decoder failed to initialize"
+                )
 
             status_msg = self._build_initialize_status_message(
                 device=torch_runtime_device,

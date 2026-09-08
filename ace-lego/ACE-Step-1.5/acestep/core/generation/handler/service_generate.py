@@ -5,9 +5,11 @@ It coordinates request normalization, batch preparation, diffusion execution,
 and output attachment without owning model internals.
 """
 
+import time
 from typing import Any, Dict, List, Optional, Union
 
 import torch
+from loguru import logger
 
 
 class ServiceGenerateMixin:
@@ -83,6 +85,8 @@ class ServiceGenerateMixin:
             Exception: Propagates exceptions raised by downstream helper methods
                 (e.g., normalization, diffusion execution, output assembly).
         """
+        service_started = time.perf_counter()
+        stage_started = service_started
         normalized = self._normalize_service_generate_inputs(
             captions=captions,
             lyrics=lyrics,
@@ -97,6 +101,8 @@ class ServiceGenerateMixin:
             seed=seed,
             return_intermediate=return_intermediate,
         )
+        normalize_seconds = time.perf_counter() - stage_started
+        stage_started = time.perf_counter()
         batch = self._prepare_batch(
             captions=normalized["captions"],
             lyrics=normalized["lyrics"],
@@ -113,7 +119,11 @@ class ServiceGenerateMixin:
             cover_noise_strength=cover_noise_strength,
             task_type=task_type,
         )
+        batch_seconds = time.perf_counter() - stage_started
+        stage_started = time.perf_counter()
         payload = self._unpack_service_processed_data(self.preprocess_batch(batch))
+        preprocess_seconds = time.perf_counter() - stage_started
+        stage_started = time.perf_counter()
         seed_param = self._resolve_service_seed_param(normalized["seed_list"])
         self._ensure_silence_latent_on_device()
         generate_kwargs = self._build_service_generate_kwargs(
@@ -132,6 +142,8 @@ class ServiceGenerateMixin:
             timesteps=timesteps,
             task_type=task_type,
         )
+        kwargs_seconds = time.perf_counter() - stage_started
+        stage_started = time.perf_counter()
         outputs, encoder_hidden_states, encoder_attention_mask, context_latents = (
             self._execute_service_generate_diffusion(
                 payload=payload,
@@ -143,7 +155,9 @@ class ServiceGenerateMixin:
                 cover_noise_strength=cover_noise_strength,
             )
         )
-        return self._attach_service_generate_outputs(
+        execute_seconds = time.perf_counter() - stage_started
+        stage_started = time.perf_counter()
+        result = self._attach_service_generate_outputs(
             outputs=outputs,
             payload=payload,
             batch=batch,
@@ -152,3 +166,29 @@ class ServiceGenerateMixin:
             context_latents=context_latents,
             return_intermediate=normalized["return_intermediate"],
         )
+        attach_seconds = time.perf_counter() - stage_started
+        total_seconds = time.perf_counter() - service_started
+        timing = result.setdefault("time_costs", {})
+        timing.update(
+            {
+                "service_normalize_time_cost": normalize_seconds,
+                "service_batch_time_cost": batch_seconds,
+                "service_preprocess_time_cost": preprocess_seconds,
+                "service_kwargs_time_cost": kwargs_seconds,
+                "service_execute_time_cost": execute_seconds,
+                "service_attach_time_cost": attach_seconds,
+                "service_total_time_cost": total_seconds,
+            }
+        )
+        logger.info(
+            "[timing] service total={:.3f}s normalize={:.3f}s batch={:.3f}s "
+            "preprocess={:.3f}s kwargs={:.3f}s execute={:.3f}s attach={:.3f}s",
+            total_seconds,
+            normalize_seconds,
+            batch_seconds,
+            preprocess_seconds,
+            kwargs_seconds,
+            execute_seconds,
+            attach_seconds,
+        )
+        return result

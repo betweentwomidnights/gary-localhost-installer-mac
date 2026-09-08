@@ -14,6 +14,8 @@ from typing import Optional
 import torch
 import warnings
 
+from acestep.cache_paths import get_acestep_cache_root
+
 from acestep.core.generation.handler import (
     AudioCodesMixin,
     BatchPrepMixin,
@@ -137,9 +139,7 @@ class AceStepHandler(
         self._progress_estimates_lock = threading.Lock()
         self._progress_estimates = {"records": []}
         self._progress_estimates_path = os.path.join(
-            self._get_project_root(),
-            ".cache",
-            "acestep",
+            get_acestep_cache_root(self._get_project_root()),
             "progress_estimates.json",
         )
         self._load_progress_estimates()
@@ -162,6 +162,10 @@ class AceStepHandler(
         self.mlx_decoder = None
         self.use_mlx_dit = False
         self.mlx_dit_compiled = False
+        self._mlx_artifact_dir = None
+        self._mlx_null_condition_emb = None
+        self._conditioning_shell_active = False
+        self._mlx_native_adapter = None
 
         # MLX VAE acceleration (macOS Apple Silicon only)
         self.mlx_vae = None

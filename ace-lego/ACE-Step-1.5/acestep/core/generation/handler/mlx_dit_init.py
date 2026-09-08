@@ -115,17 +115,43 @@ class MlxDitInitMixin:
                 return False
 
             from acestep.models.mlx.dit_model import MLXDiTDecoder
-            from acestep.models.mlx.dit_convert import convert_and_load
 
             mlx_decoder = MLXDiTDecoder.from_config(self.config)
-            convert_and_load(self.model, mlx_decoder)
+            artifact_dir = getattr(self, "_mlx_artifact_dir", None)
+            if artifact_dir is not None:
+                from acestep.models.mlx.artifact_runtime import load_decoder_artifact
+
+                self._mlx_null_condition_emb = load_decoder_artifact(artifact_dir, mlx_decoder)
+            else:
+                from acestep.models.mlx.dit_convert import convert_and_load
+
+                convert_and_load(self.model, mlx_decoder)
+                self._mlx_null_condition_emb = None
+            from acestep.models.mlx.dit_quantization import (
+                quantize_dit,
+                requested_dit_quantization,
+            )
+
+            quantization = requested_dit_quantization()
+            if quantization is not None:
+                started = perf_counter()
+                quantize_dit(mlx_decoder, quantization)
+                logger.info(
+                    "[MLX-DiT] Runtime-quantized linear weights to {}-bit "
+                    "groups of {} in {:.3f}s.",
+                    quantization.bits,
+                    quantization.group_size,
+                    perf_counter() - started,
+                )
             self._maybe_materialize_mlx_dit_static_buffers(mlx_decoder)
             self.mlx_decoder = mlx_decoder
             self.use_mlx_dit = True
             self.mlx_dit_compiled = compile_model
             logger.info(
                 "[MLX-DiT] Native MLX DiT decoder initialized successfully "
-                f"(mx.compile={compile_model})."
+                f"(mx.compile={compile_model}, "
+                f"grouped_sliding={mlx_decoder.use_grouped_sliding_attention}, "
+                f"quantization={quantization})."
             )
             return True
         except Exception as exc:  # noqa: BLE001
@@ -142,6 +168,11 @@ class MlxDitInitMixin:
 
         if getattr(self, "model", None) is None or getattr(self, "config", None) is None:
             return False, "MLX DiT refresh failed: model is not initialized."
+        if getattr(self, "_conditioning_shell_active", False):
+            return False, (
+                "MLX DiT refresh requires the native adapter path while the "
+                "decoder-free conditioning shell is active."
+            )
 
         try:
             from acestep.models.mlx import mlx_available

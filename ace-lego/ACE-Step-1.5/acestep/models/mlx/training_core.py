@@ -29,7 +29,7 @@ class ACEFlowMatchingConfig:
     timestep_sigma: float = 1.0
     data_proportion: float = 0.0
     use_meanflow: bool = False
-    loss_weighting: str = LOSS_WEIGHTING_MIN_SNR
+    loss_weighting: str = LOSS_WEIGHTING_NONE
     snr_gamma: float = 5.0
 
 
@@ -37,10 +37,13 @@ class ACEFlowMatchingConfig:
 class ACEAdamWConfig:
     """AdamW settings used by Gary's ACE MLX LoRA training loop."""
 
-    learning_rate: float = 3e-4
+    learning_rate: float = 1e-4
     weight_decay: float = 0.0
     betas: tuple[float, float] = (0.9, 0.999)
     eps: float = 1e-8
+    scheduler: str = "cosine"
+    warmup_steps: int = 100
+    total_steps: int = 1
 
 
 def sample_timesteps(
@@ -118,7 +121,7 @@ def flow_matching_loss_from_prediction(
     flow_target,
     timesteps,
     *,
-    loss_weighting: str = LOSS_WEIGHTING_MIN_SNR,
+    loss_weighting: str = LOSS_WEIGHTING_NONE,
     snr_gamma: float = 5.0,
 ):
     """Compute ACE flow-matching MSE with optional Min-SNR weighting."""
@@ -209,16 +212,56 @@ def create_adamw_optimizer(config: ACEAdamWConfig | None = None):
     _require_mlx()
     config = config or ACEAdamWConfig()
     return optim.AdamW(
-        learning_rate=float(config.learning_rate),
+        learning_rate=build_learning_rate_schedule(config),
         betas=list(config.betas),
         eps=float(config.eps),
         weight_decay=float(config.weight_decay),
     )
 
 
-def ace_adamw_update_step(
+def build_learning_rate_schedule(config: ACEAdamWConfig):
+    """Build the reference ACE warmup and decay schedule in optimizer steps."""
+    _require_mlx()
+    total_steps = max(1, int(config.total_steps))
+    warmup_steps = min(
+        max(0, int(config.warmup_steps)),
+        max(1, total_steps // 10),
+    )
+    learning_rate = float(config.learning_rate)
+    scheduler = str(config.scheduler).strip().lower()
+    if scheduler == "constant":
+        return learning_rate
+
+    decay_steps = max(1, total_steps - warmup_steps)
+    if scheduler == "cosine":
+        decay = optim.cosine_decay(
+            learning_rate,
+            decay_steps,
+            end=learning_rate * 0.01,
+        )
+    elif scheduler == "linear":
+        decay = optim.linear_schedule(
+            learning_rate,
+            learning_rate * 0.01,
+            decay_steps,
+        )
+    else:
+        raise ValueError(
+            f"Unsupported ACE learning-rate scheduler {config.scheduler!r}; "
+            "expected cosine, linear, or constant."
+        )
+    if warmup_steps <= 0:
+        return decay
+    warmup = optim.linear_schedule(
+        learning_rate * 0.1,
+        learning_rate,
+        warmup_steps,
+    )
+    return optim.join_schedules([warmup, decay], [warmup_steps])
+
+
+def ace_loss_and_grad(
     model,
-    optimizer,
     batch: dict[str, tp.Any],
     *,
     null_condition_emb=None,
@@ -226,7 +269,7 @@ def ace_adamw_update_step(
     noise=None,
     timesteps=None,
 ):
-    """Run one AdamW update step for an ACE MLX decoder/module."""
+    """Compute one ACE flow-matching loss and its trainable gradients."""
     _require_mlx()
     config = config or ACEFlowMatchingConfig()
 
@@ -240,10 +283,48 @@ def ace_adamw_update_step(
             timesteps=timesteps,
         )
 
-    loss_and_grad = nn.value_and_grad(model, loss_fn)
-    loss, grads = loss_and_grad(model)
-    optimizer.update(model, grads)
-    mx.eval(model.parameters(), optimizer.state, loss)
+    return nn.value_and_grad(model, loss_fn)(model)
+
+
+def ace_apply_gradients(model, optimizer, grads, *, max_grad_norm: float = 1.0):
+    """Clip and apply one accumulated ACE optimizer update."""
+    _require_mlx()
+    if max_grad_norm <= 0:
+        raise ValueError("max_grad_norm must be greater than zero.")
+    clipped_grads, grad_norm = optim.clip_grad_norm(grads, float(max_grad_norm))
+    optimizer.update(model, clipped_grads)
+    mx.eval(model.parameters(), optimizer.state, grad_norm)
+    return grad_norm
+
+
+def ace_adamw_update_step(
+    model,
+    optimizer,
+    batch: dict[str, tp.Any],
+    *,
+    null_condition_emb=None,
+    config: ACEFlowMatchingConfig | None = None,
+    noise=None,
+    timesteps=None,
+    max_grad_norm: float = 1.0,
+):
+    """Run one AdamW update step for an ACE MLX decoder/module."""
+    _require_mlx()
+    loss, grads = ace_loss_and_grad(
+        model,
+        batch,
+        null_condition_emb=null_condition_emb,
+        config=config,
+        noise=noise,
+        timesteps=timesteps,
+    )
+    ace_apply_gradients(
+        model,
+        optimizer,
+        grads,
+        max_grad_norm=max_grad_norm,
+    )
+    mx.eval(loss)
     return loss
 
 

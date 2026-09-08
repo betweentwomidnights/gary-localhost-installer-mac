@@ -54,6 +54,27 @@ def test_model_family_defaults_are_resolved_from_variant() -> None:
         )
         == 20.0
     )
+    assert base_args.learning_rate == 1e-4
+    assert base_args.gradient_accumulation == 4
+    assert base_args.lr_scheduler == "cosine"
+    assert base_args.warmup_steps == 100
+    assert base_args.max_grad_norm == 1.0
+    assert base_args.loss_weighting == "none"
+
+
+def test_optimizer_step_count_flushes_partial_accumulation_per_epoch() -> None:
+    assert training_job._optimizer_step_count(
+        example_count=13,
+        epochs=30,
+        gradient_accumulation=4,
+        max_steps=0,
+    ) == 120
+    assert training_job._optimizer_step_count(
+        example_count=13,
+        epochs=30,
+        gradient_accumulation=4,
+        max_steps=15,
+    ) == 5
 
 
 def _write_tensor(path: Path, *, value: float = 0.0) -> None:
@@ -230,6 +251,17 @@ def test_fake_decoder_training_job_writes_peft_adapter(tmp_path: Path, capsys) -
     assert run_config["weight_decay"] == 0.01
     assert run_config["save_best"] is True
     assert run_config["save_best_after"] == 1
+    assert run_config["gradient_accumulation"] == 4
+    assert run_config["optimizer_steps"] == 2
+    assert run_config["lr_scheduler"] == "cosine"
+    assert run_config["warmup_steps"] == 100
+    assert run_config["max_grad_norm"] == 1.0
+    loss_rows = [
+        json.loads(line)
+        for line in (output_dir / "loss.jsonl").read_text().splitlines()
+    ]
+    assert [row["optimizer_updated"] for row in loss_rows] == [False, True, False, True]
+    assert [row["optimizer_step"] for row in loss_rows] == [0, 1, 1, 2]
     config = json.loads((output_dir / "final" / "adapter_config.json").read_text())
     assert config["peft_type"] == "LORA"
     assert config["use_dora"] is False

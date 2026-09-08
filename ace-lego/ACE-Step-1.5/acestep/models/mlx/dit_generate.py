@@ -10,6 +10,8 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 from tqdm import tqdm
 
+from .dit_cache_policy import should_create_cross_attention_cache
+
 logger = logging.getLogger(__name__)
 
 # Pre-defined timestep schedules (from modeling_acestep_v15_turbo.py)
@@ -320,7 +322,11 @@ def mlx_generate_diffusion(
                 "[MLX-DiT] mx.compile() failed (%s); using uncompiled path.", exc
             )
 
-    cache = MLXCrossAttentionCache() if (_compiled_step is None and not do_cfg) else None
+    use_cross_attention_cache = should_create_cross_attention_cache(
+        compiled=_compiled_step is not None,
+        do_cfg=do_cfg,
+    )
+    cache = MLXCrossAttentionCache() if use_cross_attention_cache else None
     diff_start = time.time()
     switched_to_non_cover = False
 

@@ -9,6 +9,12 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.nn.utils import checkpoint as mlx_checkpoint
 
+from .grouped_sliding_attention import (
+    grouped_sliding_attention,
+    grouped_sliding_attention_enabled,
+    grouped_sliding_block_size,
+)
+
 
 # ---------------------------------------------------------------------------
 # Utility helpers
@@ -198,6 +204,14 @@ class MLXAttention(nn.Module):
         self.layer_idx = layer_idx
         self.is_cross_attention = is_cross_attention
         self.sliding_window = sliding_window
+        self.use_grouped_sliding_attention = bool(
+            sliding_window is not None and grouped_sliding_attention_enabled()
+        )
+        self.grouped_sliding_block_size = (
+            grouped_sliding_block_size(sliding_window)
+            if self.use_grouped_sliding_attention
+            else None
+        )
 
         self.q_proj = nn.Linear(hidden_size, num_attention_heads * head_dim, bias=attention_bias)
         self.k_proj = nn.Linear(hidden_size, num_key_value_heads * head_dim, bias=attention_bias)
@@ -266,9 +280,19 @@ class MLXAttention(nn.Module):
         v = self._repeat_kv(v, self.n_rep)
 
         # Scaled dot-product attention
-        attn_out = mx.fast.scaled_dot_product_attention(
-            q, k, v, scale=self.scale, mask=attention_mask
-        )
+        if self.use_grouped_sliding_attention and attention_mask is None:
+            attn_out = grouped_sliding_attention(
+                q,
+                k,
+                v,
+                scale=self.scale,
+                window_size=self.sliding_window,
+                block_size=self.grouped_sliding_block_size,
+            )
+        else:
+            attn_out = mx.fast.scaled_dot_product_attention(
+                q, k, v, scale=self.scale, mask=attention_mask
+            )
 
         # Merge heads and project output: [B, n_heads, L, D] -> [B, L, hidden]
         attn_out = attn_out.transpose(0, 2, 1, 3).reshape(B, L, -1)
@@ -550,6 +574,7 @@ class MLXDiTDecoder(nn.Module):
         self._sliding_masks: dict[int, mx.array] = {}
         self._sliding_window = sliding_window
         self._layer_types = layer_types
+        self.use_grouped_sliding_attention = grouped_sliding_attention_enabled()
 
     def _get_sliding_mask(self, seq_len: int, dtype: mx.Dtype) -> mx.array:
         if seq_len not in self._sliding_masks:
@@ -627,7 +652,7 @@ class MLXDiTDecoder(nn.Module):
         # Cross-attention: use encoder padding mask when provided by preprocessing.
         sliding_mask = None
         has_sliding = any(lt == "sliding_attention" for lt in self._layer_types)
-        if has_sliding:
+        if has_sliding and not self.use_grouped_sliding_attention:
             sliding_mask = self._get_sliding_mask(seq_len, dtype)
         cross_attn_mask = None
         if encoder_attention_mask is not None:

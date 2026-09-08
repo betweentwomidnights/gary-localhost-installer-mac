@@ -23,17 +23,20 @@ from acestep.models.mlx.lora_training import (
 from acestep.models.mlx.training_core import (
     ACEAdamWConfig,
     ACEFlowMatchingConfig,
-    ace_adamw_update_step,
+    ace_apply_gradients,
     ace_flow_matching_loss,
+    ace_loss_and_grad,
     create_adamw_optimizer,
 )
 
 try:
     import mlx.core as mx
     import mlx.nn as nn
+    from mlx.utils import tree_map
 except ModuleNotFoundError:  # pragma: no cover - exercised by non-MLX shells.
     mx = None  # type: ignore[assignment]
     nn = None  # type: ignore[assignment]
+    tree_map = None  # type: ignore[assignment]
 
 
 @dataclass(frozen=True)
@@ -61,21 +64,33 @@ def parse_args(argv: tp.Sequence[str] | None = None) -> argparse.Namespace:
         choices=("attention", "balanced"),
         default=BALANCED_PROFILE,
     )
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument(
+        "--lr-scheduler",
+        choices=("cosine", "linear", "constant"),
+        default="cosine",
+    )
+    parser.add_argument("--warmup-steps", type=int, default=100)
+    parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--save-every", type=int, default=25)
     parser.add_argument("--save-best", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-best-after", type=int, default=25)
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--gradient-accumulation", type=int, default=1)
+    parser.add_argument("--gradient-accumulation", type=int, default=4)
     parser.add_argument("--cfg-ratio", type=float, default=0.15)
-    parser.add_argument("--loss-weighting", choices=("none", "min_snr"), default="min_snr")
+    parser.add_argument("--loss-weighting", choices=("none", "min_snr"), default="none")
     parser.add_argument("--snr-gamma", type=float, default=5.0)
     parser.add_argument("--timestep-mu", type=float, default=-0.4)
     parser.add_argument("--timestep-sigma", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=20260620)
     parser.add_argument("--dtype", choices=("fp32", "fp16", "bf16"), default="bf16")
+    parser.add_argument(
+        "--artifact-storage-upcast",
+        action="store_true",
+        help="Load an FP16 artifact, then upcast its floating weights for BF16 training.",
+    )
     parser.add_argument(
         "--gradient-checkpointing",
         action=argparse.BooleanOptionalAction,
@@ -270,6 +285,28 @@ def build_mlx_decoder(args: argparse.Namespace):
     config = load_model_config(model_dir)
     decoder = MLXDiTDecoder.from_config(config)
     decoder.gradient_checkpointing = _resolve_gradient_checkpointing(args)
+    from acestep.models.mlx.training_artifact import (
+        load_training_artifact_if_compatible,
+    )
+
+    artifact_result = load_training_artifact_if_compatible(
+        variant=args.model_variant,
+        training_dtype=args.dtype,
+        decoder=decoder,
+        allow_storage_upcast=getattr(args, "artifact_storage_upcast", False),
+    )
+    if artifact_result is not None:
+        null_condition_emb, artifact_path = artifact_result
+        if getattr(args, "artifact_storage_upcast", False):
+            target_dtype = _mlx_dtype(args.dtype)
+            decoder.set_dtype(target_dtype)
+            null_condition_emb = null_condition_emb.astype(target_dtype)
+            mx.eval(decoder.parameters(), null_condition_emb)
+            print("model_storage_dtype=fp16", flush=True)
+            print(f"model_compute_dtype={args.dtype}", flush=True)
+        print("model_loader=pinned_mlx_artifact", flush=True)
+        print(f"model_artifact={artifact_path}", flush=True)
+        return decoder, null_condition_emb, str(model_dir)
     null_condition_emb, report = load_decoder_safetensors(
         model_dir,
         decoder,
@@ -287,14 +324,18 @@ def run_training(args: argparse.Namespace) -> Path:
     _require_mlx()
     if args.batch_size != 1:
         raise ValueError("ACE MLX training currently supports --batch-size 1.")
-    if args.gradient_accumulation != 1:
-        raise ValueError("ACE MLX training currently supports --gradient-accumulation 1.")
+    if args.gradient_accumulation <= 0:
+        raise ValueError("--gradient-accumulation must be greater than zero.")
     if args.epochs <= 0:
         raise ValueError("--epochs must be greater than zero.")
     if args.save_best_after <= 0:
         raise ValueError("--save-best-after must be greater than zero.")
     if args.memory_limit_gb < 0:
         raise ValueError("--memory-limit-gb must be non-negative.")
+    if args.warmup_steps < 0:
+        raise ValueError("--warmup-steps must be non-negative.")
+    if args.max_grad_norm <= 0:
+        raise ValueError("--max-grad-norm must be greater than zero.")
 
     physical_memory = _physical_memory_bytes()
     is_xl_model = _is_xl_variant(args.model_variant)
@@ -329,10 +370,22 @@ def run_training(args: argparse.Namespace) -> Path:
     _clear_mlx_cache()
     _print_mlx_memory("adapters_injected")
 
+    total_steps = len(groups) * args.epochs
+    if args.max_steps > 0:
+        total_steps = min(total_steps, args.max_steps)
+    optimizer_steps = _optimizer_step_count(
+        example_count=len(groups),
+        epochs=args.epochs,
+        gradient_accumulation=args.gradient_accumulation,
+        max_steps=args.max_steps,
+    )
     optimizer = create_adamw_optimizer(
         ACEAdamWConfig(
             learning_rate=args.learning_rate,
             weight_decay=args.weight_decay,
+            scheduler=args.lr_scheduler,
+            warmup_steps=args.warmup_steps,
+            total_steps=optimizer_steps,
         )
     )
     flow_config = ACEFlowMatchingConfig(
@@ -342,9 +395,6 @@ def run_training(args: argparse.Namespace) -> Path:
         loss_weighting=args.loss_weighting,
         snr_gamma=args.snr_gamma,
     )
-    total_steps = len(groups) * args.epochs
-    if args.max_steps > 0:
-        total_steps = min(total_steps, args.max_steps)
     batch_cache_dir = tensor_dir / ".mlx-cache" / args.dtype
 
     run_config = {
@@ -356,6 +406,11 @@ def run_training(args: argparse.Namespace) -> Path:
         "module_profile": injection.module_profile,
         "learning_rate": args.learning_rate,
         "weight_decay": args.weight_decay,
+        "lr_scheduler": args.lr_scheduler,
+        "warmup_steps": args.warmup_steps,
+        "max_grad_norm": args.max_grad_norm,
+        "gradient_accumulation": args.gradient_accumulation,
+        "optimizer_steps": optimizer_steps,
         "epochs": args.epochs,
         "save_every": args.save_every,
         "save_best": args.save_best,
@@ -383,18 +438,23 @@ def run_training(args: argparse.Namespace) -> Path:
     print(f"batch_cache_dir={batch_cache_dir}", flush=True)
 
     global_step = 0
+    optimizer_step = 0
     best_loss = math.inf
     best_dir = output_dir / "best"
     loss_log_path = output_dir / "loss.jsonl"
     started = time.perf_counter()
     with loss_log_path.open("a", encoding="utf-8") as loss_log:
         for epoch in range(args.epochs):
-            for tensor_path in select_epoch_tensor_paths(
+            epoch_paths = select_epoch_tensor_paths(
                 groups,
                 epoch=epoch,
                 metadata=metadata,
                 seed=args.seed,
-            ):
+            )
+            accumulated_grads = None
+            accumulated_loss = 0.0
+            accumulation_count = 0
+            for sample_index, tensor_path in enumerate(epoch_paths):
                 if args.cancel_path is not None and args.cancel_path.exists():
                     raise KeyboardInterrupt("Training cancelled.")
                 if args.max_steps > 0 and global_step >= args.max_steps:
@@ -408,21 +468,55 @@ def run_training(args: argparse.Namespace) -> Path:
                 )
                 _print_mlx_memory("step_start")
                 step_started = time.perf_counter()
-                loss = ace_adamw_update_step(
+                loss, grads = ace_loss_and_grad(
                     decoder,
-                    optimizer,
                     batch,
                     null_condition_emb=null_condition_emb,
                     config=flow_config,
                 )
                 global_step += 1
-                mx.eval(loss)
+                mx.eval(loss, grads)
                 loss_value = float(loss)
                 if not math.isfinite(loss_value):
                     raise FloatingPointError(
                         f"Non-finite loss at step {global_step}: {loss_value}"
                     )
                 step_seconds = time.perf_counter() - step_started
+                accumulated_grads = (
+                    grads
+                    if accumulated_grads is None
+                    else tree_map(lambda left, right: left + right, accumulated_grads, grads)
+                )
+                mx.eval(accumulated_grads)
+                accumulation_count += 1
+                accumulated_loss += loss_value
+                reached_limit = args.max_steps > 0 and global_step >= args.max_steps
+                end_of_epoch = sample_index + 1 == len(epoch_paths)
+                should_update = (
+                    accumulation_count >= args.gradient_accumulation
+                    or end_of_epoch
+                    or reached_limit
+                )
+                grad_norm_value = None
+                update_loss = None
+                if should_update:
+                    averaged_grads = tree_map(
+                        lambda value: value / float(args.gradient_accumulation),
+                        accumulated_grads,
+                    )
+                    grad_norm = ace_apply_gradients(
+                        decoder,
+                        optimizer,
+                        averaged_grads,
+                        max_grad_norm=args.max_grad_norm,
+                    )
+                    mx.eval(grad_norm)
+                    grad_norm_value = float(grad_norm)
+                    update_loss = accumulated_loss / float(accumulation_count)
+                    optimizer_step += 1
+                    accumulated_grads = None
+                    accumulated_loss = 0.0
+                    accumulation_count = 0
                 loss_log.write(
                     json.dumps(
                         {
@@ -430,6 +524,10 @@ def run_training(args: argparse.Namespace) -> Path:
                             "total_steps": total_steps,
                             "epoch": epoch + 1,
                             "loss": loss_value,
+                            "optimizer_step": optimizer_step,
+                            "optimizer_updated": should_update,
+                            "update_loss": update_loss,
+                            "grad_norm": grad_norm_value,
                             "seconds": step_seconds,
                             "tensor_path": str(tensor_path),
                         }
@@ -445,11 +543,13 @@ def run_training(args: argparse.Namespace) -> Path:
                 _print_mlx_memory("step_complete")
 
                 if (
-                    args.save_best
+                    should_update
+                    and args.save_best
                     and epoch + 1 >= args.save_best_after
-                    and loss_value < best_loss
+                    and update_loss is not None
+                    and update_loss < best_loss
                 ):
-                    best_loss = loss_value
+                    best_loss = update_loss
                     save_trainable_lora_adapter(
                         decoder,
                         best_dir,
@@ -463,7 +563,7 @@ def run_training(args: argparse.Namespace) -> Path:
                         f"best_checkpoint={best_dir} loss={best_loss:.6f}",
                         flush=True,
                     )
-                del batch, loss
+                del batch, loss, grads
                 _clear_mlx_cache()
 
             if (
@@ -500,6 +600,29 @@ def run_training(args: argparse.Namespace) -> Path:
     print(f"training_seconds={elapsed:.3f}", flush=True)
     print(f"final_checkpoint={final_dir}", flush=True)
     return final_dir
+
+
+def _optimizer_step_count(
+    *,
+    example_count: int,
+    epochs: int,
+    gradient_accumulation: int,
+    max_steps: int,
+) -> int:
+    """Count optimizer updates, including each epoch's partial accumulation."""
+    available_microsteps = max(0, int(example_count)) * max(0, int(epochs))
+    microsteps = (
+        min(available_microsteps, int(max_steps))
+        if int(max_steps) > 0
+        else available_microsteps
+    )
+    if microsteps <= 0:
+        return 1
+    full_epochs, partial_epoch = divmod(microsteps, int(example_count))
+    updates_per_epoch = math.ceil(int(example_count) / int(gradient_accumulation))
+    return full_epochs * updates_per_epoch + math.ceil(
+        partial_epoch / int(gradient_accumulation)
+    )
 
 
 def main(argv: tp.Sequence[str] | None = None) -> int:

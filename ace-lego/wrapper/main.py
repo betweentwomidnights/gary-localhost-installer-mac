@@ -881,6 +881,8 @@ def _build_form_data(job: Job, req, send_path: str) -> dict:
 
 async def _run_generation(job: Job, req):
     """Background task: handles the full generation lifecycle for any task type."""
+    workflow_started = time.perf_counter()
+    stage_timings: dict[str, float] = {}
     raw_audio_path = None
     compressed_path = None
     session_id = f"acestep-{int(time.time() * 1000)}"
@@ -918,6 +920,7 @@ async def _run_generation(job: Job, req):
     async with _generation_semaphore:
         try:
             # --- Decode audio ---
+            stage_started = time.perf_counter()
             job.status = JobStatus.COMPRESSING
             job.progress_text = "preparing audio..."
             try:
@@ -946,6 +949,7 @@ async def _run_generation(job: Job, req):
             send_path = _compress_for_proxy(raw_audio_path)
             if send_path != raw_audio_path:
                 compressed_path = send_path
+            stage_timings["audio_prep"] = time.perf_counter() - stage_started
 
             async with httpx.AsyncClient() as client:
                 # --- GPU queue + model load (local mode) ---
@@ -960,8 +964,12 @@ async def _run_generation(job: Job, req):
 
                 try:
                     if MANAGE_MODEL_LIFECYCLE:
+                        stage_started = time.perf_counter()
                         await _ensure_required_model(client, job, req)
+                        stage_timings["model_load"] = time.perf_counter() - stage_started
+                    stage_started = time.perf_counter()
                     await _unload_lora(client)
+                    stage_timings["adapter_reset"] = time.perf_counter() - stage_started
 
                     if lora_config:
                         req_scale = getattr(req, "lora_scale", -1.0)
@@ -969,7 +977,9 @@ async def _run_generation(job: Job, req):
                         job.status = JobStatus.LOADING
                         job.progress = max(job.progress, 8)
                         job.progress_text = f"loading LoRA {lora_name}..."
+                        stage_started = time.perf_counter()
                         await _load_lora(client, str(lora_config["path"]), scale)
+                        stage_timings["adapter_load"] = time.perf_counter() - stage_started
 
                     # --- Submit to ace-step ---
                     job.status = JobStatus.SUBMITTING
@@ -983,6 +993,7 @@ async def _run_generation(job: Job, req):
                     # Build file uploads — ctx_audio always, ref_audio when use_src_as_ref
                     use_ref = getattr(req, 'use_src_as_ref', False)
 
+                    stage_started = time.perf_counter()
                     with open(send_path, "rb") as fh:
                         files = [("ctx_audio", (filename, fh, mime))]
 
@@ -1005,6 +1016,7 @@ async def _run_generation(job: Job, req):
 
                     body = resp.json()
                     job.ace_task_id = body["data"]["task_id"]
+                    stage_timings["submit"] = time.perf_counter() - stage_started
 
                     # --- Poll ace-step for progress ---
                     job.status = JobStatus.GENERATING
@@ -1146,8 +1158,10 @@ async def _run_generation(job: Job, req):
                         await asyncio.sleep(POLL_INTERVAL)
                     else:
                         raise RuntimeError("Generation timed out")
+                    stage_timings["generation_poll"] = time.perf_counter() - gen_start_time
 
                     # --- Download audio ---
+                    stage_started = time.perf_counter()
                     job.status = JobStatus.DOWNLOADING
                     job.progress = 95
                     job.progress_text = "downloading audio..."
@@ -1168,10 +1182,13 @@ async def _run_generation(job: Job, req):
                     job.status = JobStatus.COMPLETED
                     job.progress = 100
                     job.progress_text = "complete"
+                    stage_timings["download"] = time.perf_counter() - stage_started
 
                 finally:
                     if lora_config:
+                        stage_started = time.perf_counter()
                         await _unload_lora(client)
+                        stage_timings["adapter_unload"] = time.perf_counter() - stage_started
                     # Release the model after every job.
                     #
                     # Keeping it resident between jobs is faster, but this runs
@@ -1186,7 +1203,9 @@ async def _run_generation(job: Job, req):
                     # Set CAREY_KEEP_MODEL_LOADED=true to keep the old
                     # behaviour on a machine with memory to spare.
                     if MANAGE_MODEL_LIFECYCLE and not KEEP_MODEL_LOADED:
+                        stage_started = time.perf_counter()
                         await _unload_model(client)
+                        stage_timings["model_unload"] = time.perf_counter() - stage_started
                     if MANAGE_MODEL_LIFECYCLE and use_gpu_queue:
                         await _release_gpu_token(client, session_id)
 
@@ -1204,6 +1223,18 @@ async def _run_generation(job: Job, req):
             job.progress_text = f"failed: {error_text}"
 
         finally:
+            total_seconds = time.perf_counter() - workflow_started
+            timing_text = " ".join(
+                f"{name}={seconds:.3f}s" for name, seconds in stage_timings.items()
+            )
+            logger.info(
+                "Carey timing task_id=%s type=%s lora=%s total=%.3fs %s",
+                job.task_id,
+                job.task_type,
+                lora_name or "<none>",
+                total_seconds,
+                timing_text,
+            )
             for p in [raw_audio_path, compressed_path]:
                 if p:
                     try:

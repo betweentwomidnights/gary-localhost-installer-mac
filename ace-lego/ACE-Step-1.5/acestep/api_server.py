@@ -44,6 +44,8 @@ except ImportError:  # Optional dependency
 from fastapi import FastAPI, HTTPException, Request, Depends, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+from acestep.cache_paths import get_acestep_cache_root
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from acestep.api.train_api_service import (
     initialize_training_state,
@@ -1276,7 +1278,7 @@ def create_app() -> FastAPI:
         # Ensure compilation/temp caches do not fill up small default /tmp.
         # Triton/Inductor (and the system compiler) can create large temporary files.
         project_root = _get_project_root()
-        cache_root = os.path.join(project_root, ".cache", "acestep")
+        cache_root = get_acestep_cache_root(project_root)
         tmp_root = (os.getenv("ACESTEP_TMPDIR") or os.path.join(cache_root, "tmp")).strip()
         triton_cache_root = (os.getenv("TRITON_CACHE_DIR") or os.path.join(cache_root, "triton")).strip()
         inductor_cache_root = (os.getenv("TORCHINDUCTOR_CACHE_DIR") or os.path.join(cache_root, "torchinductor")).strip()
@@ -3386,16 +3388,30 @@ def create_app() -> FastAPI:
             if k in ("project_root", "config_path", "device", "use_flash_attention",
                      "compile_model", "offload_to_cpu", "offload_dit_to_cpu", "quantization")
         }
+        load_started = time.perf_counter()
         status_msg, ok = await asyncio.get_running_loop().run_in_executor(
             getattr(app.state, "executor", None),
             lambda: handler.initialize_service(**init_kwargs),
         )
+        load_seconds = time.perf_counter() - load_started
         if not ok:
             raise HTTPException(status_code=500, detail=f"Model load failed: {status_msg}")
         app.state._initialized = True
         app.state._soft_unloaded = False
         app.state._loaded_config_path = params.get("config_path")
-        return _wrap_response({"status": "loaded", "model": params.get("config_path")})
+        logger.info(
+            "[timing] lifecycle load model={} total={:.3f}s optimized_artifact={}",
+            params.get("config_path"),
+            load_seconds,
+            bool(getattr(handler, "_mlx_artifact_dir", None)),
+        )
+        return _wrap_response(
+            {
+                "status": "loaded",
+                "model": params.get("config_path"),
+                "load_seconds": load_seconds,
+            }
+        )
 
     @app.post("/v1/unload")
     async def unload_model(
@@ -3413,7 +3429,9 @@ def create_app() -> FastAPI:
                 # Keep model objects resident for fast subsequent /v1/load calls.
                 app.state._initialized = False
                 app.state._soft_unloaded = True
-                return _wrap_response({"status": "unloaded_soft", "mode": unload_mode})
+                return _wrap_response(
+                    {"status": "unloaded_soft", "mode": unload_mode, "unload_seconds": 0.0}
+                )
 
             # Also off the event loop: dropping the references is cheap, but
             # gc.collect() followed by an MPS synchronise and cache purge is
@@ -3431,6 +3449,8 @@ def create_app() -> FastAPI:
                     # MLX-side objects / compiled callables
                     "mlx_decoder",
                     "mlx_vae",
+                    "_mlx_native_adapter",
+                    "_mlx_null_condition_emb",
                     "_mlx_compiled_decode",
                     "_mlx_compiled_encode_sample",
                     "_mlx_compiled_encode_mean",
@@ -3449,8 +3469,20 @@ def create_app() -> FastAPI:
                     handler.use_mlx_dit = False
                 if hasattr(handler, "use_mlx_vae"):
                     handler.use_mlx_vae = False
+                handler.lora_loaded = False
+                handler.use_lora = False
+                handler.lora_scale = 1.0
+                handler._active_loras = {}
+                handler._lora_active_adapter = None
+                handler._adapter_type = None
 
                 gc.collect()
+                try:
+                    import mlx.core as mx
+
+                    mx.clear_cache()
+                except (ImportError, AttributeError):
+                    pass
                 import torch
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -3461,12 +3493,21 @@ def create_app() -> FastAPI:
                     if hasattr(torch.mps, "empty_cache"):
                         torch.mps.empty_cache()
 
+            unload_started = time.perf_counter()
             await asyncio.get_running_loop().run_in_executor(
                 getattr(app.state, "executor", None), _release
             )
+            unload_seconds = time.perf_counter() - unload_started
             app.state._initialized = False
             app.state._soft_unloaded = False
-            return _wrap_response({"status": "unloaded", "mode": unload_mode})
+            logger.info("[timing] lifecycle unload mode={} total={:.3f}s", unload_mode, unload_seconds)
+            return _wrap_response(
+                {
+                    "status": "unloaded",
+                    "mode": unload_mode,
+                    "unload_seconds": unload_seconds,
+                }
+            )
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Unload failed: {e}")
 

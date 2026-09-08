@@ -65,6 +65,7 @@ class InitServiceDownloadsMixin:
         checkpoint_path: Path,
         config_path: str,
         prefer_source: Optional[str],
+        require_dit: bool = True,
     ) -> Optional[Tuple[str, bool]]:
         """Ensure required checkpoint assets exist locally, downloading when missing."""
         required_shared_files = [
@@ -109,6 +110,9 @@ class InitServiceDownloadsMixin:
                     "ACESTEP_ALLOW_MAIN_AUTODOWNLOAD=true to permit full "
                     "main-model auto-download."
                 ), False
+
+        if not require_dit:
+            return None
 
         if config_path == "":
             logger.warning(

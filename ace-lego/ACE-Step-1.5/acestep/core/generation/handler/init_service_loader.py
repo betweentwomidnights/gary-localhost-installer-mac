@@ -81,6 +81,7 @@ class InitServiceLoaderMixin:
         else:
             self.model = self.model.to("cpu").to(self.dtype)
         self.model.eval()
+        self._conditioning_shell_active = False
 
         if compile_model:
             self._ensure_len_for_compile(self.model, "model")

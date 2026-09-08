@@ -9,6 +9,7 @@ from loguru import logger
 from acestep.constants import DEBUG_MODEL_LOADING
 from acestep.debug_utils import debug_log
 from acestep.training.configs import LoKRConfig
+from .native_mlx import add_native_mlx_lora, native_mlx_active, unload_native_mlx_lora
 
 LOKR_WEIGHTS_FILENAME = "lokr_weights.safetensors"
 
@@ -219,20 +220,28 @@ def add_lora(self, lora_path: str, adapter_name: str | None = None) -> str:
                 f"or LoKr artifact {LOKR_WEIGHTS_FILENAME} in {lora_path}"
             )
 
-    try:
-        from peft import PeftModel
-    except ImportError:
-        if lokr_weights_path is None:
-            return "❌ PEFT library not installed. Please install with: pip install peft"
-        PeftModel = None  # type: ignore[assignment]
-
-    effective_name = adapter_name.strip() if isinstance(adapter_name, str) and adapter_name.strip() else _default_adapter_name_from_path(lora_path)
+    effective_name = (
+        adapter_name.strip()
+        if isinstance(adapter_name, str) and adapter_name.strip()
+        else _default_adapter_name_from_path(lora_path)
+    )
     _active_loras = getattr(self, "_active_loras", None)
     if _active_loras is None:
         self._active_loras = {}
         _active_loras = self._active_loras
     if effective_name in _active_loras:
         return f"❌ Adapter name already in use: {effective_name}. Use a different name or remove it first."
+    if native_mlx_active(self):
+        if lokr_weights_path is not None:
+            return "❌ LoKr is not yet supported by the optimized MLX load path. Re-initialize without optimized loading."
+        return add_native_mlx_lora(self, lora_path, effective_name)
+
+    try:
+        from peft import PeftModel
+    except ImportError:
+        if lokr_weights_path is None:
+            return "❌ PEFT library not installed. Please install with: pip install peft"
+        PeftModel = None  # type: ignore[assignment]
 
     try:
         decoder = self.model.decoder
@@ -347,6 +356,8 @@ def remove_lora(self, adapter_name: str) -> str:
     _active_loras = getattr(self, "_active_loras", None) or {}
     if adapter_name not in _active_loras:
         return f"❌ Unknown adapter: {adapter_name}. Loaded: {list(_active_loras.keys())}"
+    if native_mlx_active(self):
+        return unload_native_mlx_lora(self)
 
     try:
         from peft import PeftModel
@@ -438,6 +449,8 @@ def unload_lora(self) -> str:
     """Unload all LoRA adapters and restore base decoder."""
     if not self.lora_loaded:
         return "⚠️ No LoRA adapter loaded."
+    if native_mlx_active(self):
+        return unload_native_mlx_lora(self)
 
     try:
         mem_before = None
