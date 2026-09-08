@@ -62,6 +62,8 @@ class StableAudioMLXPipeline:
     lora_paths: tuple[Path, ...] = ()
     lora_labels: tuple[str, ...] = ()
     lora_strengths: tuple[float, ...] = ()
+    decoder_lora_path: Path | None = None
+    decoder_lora_report: dict[str, object] | None = None
     _dit_lora_set: tp.Any | None = field(default=None, init=False, repr=False)
     _text_lora_set: tp.Any | None = field(default=None, init=False, repr=False)
     _number_lora_set: tp.Any | None = field(default=None, init=False, repr=False)
@@ -714,6 +716,40 @@ class StableAudioMLXPipeline:
             target_label="number_conditioner",
             names=labels,
         )
+        return self
+
+    def load_decoder_lora(
+        self,
+        lora_ckpt_path: str | Path,
+        *,
+        name: str = "SAME-L decoder squeak fix",
+    ) -> "StableAudioMLXPipeline":
+        """Merge one managed adapter into the native MLX SAME-L decoder."""
+        self._require_generation_ready()
+        from stable_audio_3.mlx.lora import MLXLoRASet
+
+        path = Path(lora_ckpt_path).expanduser().resolve()
+        lora_set = MLXLoRASet.from_checkpoints(
+            [path],
+            self.autoencoder.decoder,
+            target_label="decoder",
+            names=[name],
+        )
+        report = lora_set.apply_to(self.autoencoder.decoder, strength=1.0)
+        if report.loaded_layers == 0 or report.applied_layers == 0:
+            detail = "; ".join(
+                [
+                    *(f"missing target: {value}" for value in report.missing_targets[:5]),
+                    *report.skipped_layers[:5],
+                    *report.unsupported_adapters[:5],
+                ]
+            )
+            raise RuntimeError(
+                "decoder squeak-fix checkpoint matched no MLX decoder weights"
+                + (f": {detail}" if detail else "")
+            )
+        self.decoder_lora_path = path
+        self.decoder_lora_report = report.to_dict()
         return self
 
     def clear_lora(self) -> None:

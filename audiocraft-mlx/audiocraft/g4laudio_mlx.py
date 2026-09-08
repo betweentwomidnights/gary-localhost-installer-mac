@@ -1836,6 +1836,7 @@ def _generate_with_prompt(
     cfg_coef: float,
     text: str,
     progress_callback: Optional[Callable[[int, int], None]],
+    seed: Optional[int] = None,
 ) -> np.ndarray:
     """
     Returns full generated audio (prompt reconstruction + continuation) at model.sampling_rate.
@@ -1851,6 +1852,8 @@ def _generate_with_prompt(
 
     # Serialize generation for stability.
     with _GEN_LOCK:
+        if seed is not None:
+            mx.random.seed(seed)
         full_audio, _ = model.generate_continuation(
             prompt_tokens=prompt_tokens,
             max_new_steps=max_new_steps,
@@ -1879,6 +1882,7 @@ def process_audio(
     cfg_coef: float = 3.0,
     description: Optional[str] = None,
     quantization_mode: Optional[str] = None,
+    seed: Optional[int] = None,
     device_id: int = 0,  # unused (kept for API compatibility)
     download_progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> str:
@@ -1915,6 +1919,7 @@ def process_audio(
             cfg_coef=float(cfg_coef),
             text=final_text,
             progress_callback=progress_callback,
+            seed=seed,
         )
 
         # Resample back to input sample rate and match channels.
@@ -1939,6 +1944,7 @@ def continue_music(
     cfg_coef: float = 3.0,
     description: Optional[str] = None,
     quantization_mode: Optional[str] = None,
+    seed: Optional[int] = None,
     device_id: int = 0,  # unused (kept for API compatibility)
     download_progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> str:
@@ -1976,6 +1982,7 @@ def continue_music(
             cfg_coef=float(cfg_coef),
             text=final_text,
             progress_callback=progress_callback,
+            seed=seed,
         )
 
         # Resample back to input sample rate and match channels.

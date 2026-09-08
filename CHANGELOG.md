@@ -4,6 +4,34 @@ this is where the version history lives that used to sit at the top of the main
 README. the README should stay focused on what gary4local is now; this file gets
 to remember how we got here.
 
+## v0.2.1
+
+paired with
+[gary4juce v4.0.14-mac](https://github.com/betweentwomidnights/gary4juce/releases/tag/v4.0.14-mac).
+
+this is deliberately narrower than full windows parity. it is the minimum
+service update needed to pair the current mac build with the latest gary4juce
+without breaking gary, terry, or Stable Audio 3 workflows.
+
+- gary now accepts the shared seed contract on generate, continue, and retry:
+  missing, blank, or negative picks a short seed; submit responses return the
+  resolved seed; polls expose it as `generation_seed`.
+- terry now follows the same seed contract and seeds both MPS and MLX edits.
+  async responses and polls return the resolved seed, while the legacy WAV
+  response carries it in `X-Melodyflow-Seed`.
+- SA3 can optionally download and merge the SAME-L decoder squeak-fix LoRA into
+  the native MLX decoder when the service loads. it stays separate from user
+  LoRA indices and is off until explicitly enabled.
+- SA3 continuations regenerate a short overlap, restore the original source up
+  to the splice, optionally gain-match it, and use an equal-power crossfade at
+  the seam. these defaults match the windows v0.3.1 behavior.
+
+### intentionally deferred
+
+custom runtime storage, storage cleanup/migration, and custom ACE-Step MLX
+model work remain on the broader mac-parity track. none of those changes are a
+dependency of this incremental compatibility release.
+
 ## v0.2.0
 
 paired with

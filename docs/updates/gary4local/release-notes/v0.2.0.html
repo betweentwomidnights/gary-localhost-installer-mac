@@ -48,32 +48,31 @@
 
     <h2>new</h2>
     <ul>
-      <li>auto-label a whole folder with ace-step's captioner, plus bpm and key
+      <li>auto-label a whole folder with ace-step's captioner, plus bpm/key
       suggestions from our own analysis helpers.</li>
-      <li><strong>layer scope</strong> defaults to 169 layers instead of 229.
-      faster, smaller file, no difference we could hear. "train everything" is
-      still there.</li>
-      <li>sa3 starts in under 4 seconds instead of ~25. converted weights are
-      cached now.</li>
-      <li>switching or adding a lora takes under a second instead of ~20.</li>
-      <li>the shared trigger word stays out of your sidecar files and dice
+      <li><strong>layer scope</strong> defaults to 169 layers instead of 229 —
+      faster, smaller file, no audible difference. "train everything" still
+      there.</li>
+      <li>sa3 starts in under 4 seconds now instead of ~25; converted weights
+      are cached.</li>
+      <li>switching or adding a lora is under a second now instead of ~20.</li>
+      <li>the shared trigger word stays out of sidecar files and dice
       prompts.</li>
       <li>experimental loudness fix for datasets with uneven volume.</li>
     </ul>
 
     <h2>heads up</h2>
-    <p>if you have an sa3 lora that hums or drones at higher strength, retrain
-    it. training pins to the stable audio 3 base model now and refuses anything
-    else — the wrong one is what caused that.</p>
+    <p>if an sa3 lora hums or drones at higher strength, retrain it — training
+    now pins to the real stable audio 3 base model and refuses anything
+    else.</p>
 
     <h2>not yet</h2>
     <ul>
-      <li>full-track training. mlx wants way more memory than the windows build
-      does and we want to know why first. 23-second crops still make loras that
-      generate several minutes fine.</li>
-      <li>hugging face's hosted mlx models. byte-identical to what we convert
-      locally, so it's only a smaller install — not worth a ~9 gb re-download
-      until we can clean up after ourselves properly.</li>
+      <li>full-track training, until we know why mlx needs so much more memory
+      than windows for it. 23-second crops still train loras that generate
+      several minutes fine.</li>
+      <li>hugging face's hosted mlx weights — byte-identical to what we convert
+      locally, so not worth a ~9gb re-download yet.</li>
     </ul>
 
     <p>compatible with

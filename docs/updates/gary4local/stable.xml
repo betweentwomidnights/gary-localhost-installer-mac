@@ -1,23 +1,37 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><!-- sparkle-sign-warning:
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- sparkle-sign-warning:
 IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
---><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">
-  <channel>
-    <title>gary4local stable updates</title>
-    <link>https://github.com/betweentwomidnights/gary-localhost-installer-mac</link>
-    <description>Stable Sparkle appcast for gary4local.</description>
-    <language>en</language>
-    <item>
-      <title>Version 0.1.11</title>
-      <pubDate>Sun, 28 Jun 2026 09:12:44 +0000</pubDate>
-      <sparkle:version>111</sparkle:version>
-      <sparkle:shortVersionString>0.1.11</sparkle:shortVersionString>
-      <sparkle:minimumSystemVersion>14.6</sparkle:minimumSystemVersion>
-      <sparkle:releaseNotesLink>https://betweentwomidnights.github.io/gary-localhost-installer-mac/updates/gary4local/release-notes/v0.1.11.html</sparkle:releaseNotesLink>
-      <description><![CDATA[now you can train an ace-step lora directly inside gary4local. done in MLX.]]></description>
-      <enclosure url="https://github.com/betweentwomidnights/gary-localhost-installer-mac/releases/download/v0.1.11/gary4local-v0.1.11-mac-arm64.dmg" sparkle:edSignature="WrzNcKrzD+dFFsIoNkG43BfdDSydHo9FWuolNuABUnIwMw5HQWSu3UN2Rof//YJykcSYr1McBDnDMeR7pJKzAg==" sparkle:os="macos" length="9579343" type="application/x-apple-diskimage"></enclosure>
-    </item>
-  </channel>
-</rss><!-- sparkle-signatures:
-edSignature: r58oXH6IWlDNNrFEuKuwNNcZRs8TFZP6s5zNebA+LaiV/PVwPqtBhn3mDQCtrse7zHDmhCVTgBtcQA1XRY2WAQ==
-length: 1625
+-->
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">
+    <channel>
+        <title>gary4local stable updates</title>
+        <link>https://github.com/betweentwomidnights/gary-localhost-installer-mac</link>
+        <description>Stable Sparkle appcast for gary4local.</description>
+        <language>en</language>
+        <item>
+            <title>Version 0.2.0</title>
+            <pubDate>Fri, 24 Jul 2026 20:52:08 -0700</pubDate>
+            <sparkle:version>200</sparkle:version>
+            <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.6</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <sparkle:releaseNotesLink>https://betweentwomidnights.github.io/gary-localhost-installer-mac/updates/gary4local/release-notes/v0.2.0.html</sparkle:releaseNotesLink>
+            <description><![CDATA[sa3 lora training gets dataset auto-labeling, a faster default layer scope, and much faster startup/lora switching.]]></description>
+            <enclosure url="https://github.com/betweentwomidnights/gary-localhost-installer-mac/releases/download/v0.2.0/gary4local-v0.2.0-mac-arm64.dmg" sparkle:edSignature="v9uSu+hNmUBxmDeGJT8Go8zP2IlxUNPSGu/Al/XEeE1SBzlwILpFbNTeeVPdXSLoJ3uVPywyqrqFX7I6DK0sAA==" sparkle:os="macos" length="9700708" type="application/x-apple-diskimage"/>
+        </item>
+        <item>
+            <title>Version 0.1.11</title>
+            <pubDate>Sun, 28 Jun 2026 09:12:44 +0000</pubDate>
+            <sparkle:version>111</sparkle:version>
+            <sparkle:shortVersionString>0.1.11</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.6</sparkle:minimumSystemVersion>
+            <sparkle:releaseNotesLink>https://betweentwomidnights.github.io/gary-localhost-installer-mac/updates/gary4local/release-notes/v0.1.11.html</sparkle:releaseNotesLink>
+            <description><![CDATA[now you can train an ace-step lora directly inside gary4local. done in MLX.]]></description>
+            <enclosure url="https://github.com/betweentwomidnights/gary-localhost-installer-mac/releases/download/v0.1.11/gary4local-v0.1.11-mac-arm64.dmg" sparkle:edSignature="WrzNcKrzD+dFFsIoNkG43BfdDSydHo9FWuolNuABUnIwMw5HQWSu3UN2Rof//YJykcSYr1McBDnDMeR7pJKzAg==" sparkle:os="macos" length="9579343" type="application/x-apple-diskimage"/>
+        </item>
+    </channel>
+</rss>
+<!-- sparkle-signatures:
+edSignature: SsG5l7JGEnN8RIhL1F99MmEPJt7dMmrH9U75U0+gozleKmfMblshQ+gdBjcRDTtGmPXWE6cgkdXXw/dhHN4VAw==
+length: 2795
 -->

@@ -766,6 +766,34 @@ struct ControlCenterView: View {
     private func sa3AdvancedSettingsPanel() -> some View {
         DisclosureGroup(isExpanded: $sa3AdvancedPanelExpanded) {
             VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("decoder")
+                        .font(.subheadline)
+                    Toggle(
+                        "use SAME-L decoder squeak fix",
+                        isOn: $viewModel.sa3UseDecoderLora
+                    )
+                    .disabled(!viewModel.canEnableSA3DecoderLora)
+                    Text(
+                        "optional decoder LoRA. it is merged once when sa3 loads, so rendering keeps the stock MLX decode path."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        Button("view decoder model") {
+                            guard let url = URL(string: "https://huggingface.co/thepatch/same-l-decoder-lora") else { return }
+                            NSWorkspace.shared.open(url)
+                        }
+                        .buttonStyle(.link)
+
+                        if !viewModel.isSA3DecoderLoraDownloaded {
+                            Text("download the decoder fix from sa3's model sheet before enabling it.")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                    }
+                }
+
                 Picker("sa3 advanced tab", selection: $sa3AdvancedTab) {
                     ForEach(SA3AdvancedTab.allCases) { tab in
                         Text(tab.displayName).tag(tab)
@@ -819,13 +847,39 @@ struct ControlCenterView: View {
                         )
                     }
                 } else if sa3AdvancedTab == .continuation {
-                    sa3AdvancedField(
-                        title: "continuation tail pad seconds",
-                        text: $viewModel.sa3ContinuationTailPad,
-                        placeholder: "6",
-                        helpText: "For continue mode: 0 ends at the cut, 6 keeps a natural tail, 20+ leans seamless.",
-                        caption: "For continue mode: 0 ends at the cut, 6 keeps a natural tail, 20+ leans seamless."
-                    )
+                    VStack(alignment: .leading, spacing: 10) {
+                        sa3AdvancedField(
+                            title: "continuation tail pad seconds",
+                            text: $viewModel.sa3ContinuationTailPad,
+                            placeholder: "6",
+                            helpText: "For continue mode: 0 ends at the cut, 6 keeps a natural tail, 20+ leans seamless.",
+                            caption: "For continue mode: 0 ends at the cut, 6 keeps a natural tail, 20+ leans seamless."
+                        )
+                        Toggle(
+                            "splice original source into continuation",
+                            isOn: $viewModel.sa3ContinuationSpliceSource
+                        )
+                        Toggle(
+                            "gain-match source at splice",
+                            isOn: $viewModel.sa3ContinuationSpliceGainMatch
+                        )
+                        HStack(alignment: .top, spacing: 12) {
+                            sa3AdvancedField(
+                                title: "splice crossfade seconds",
+                                text: $viewModel.sa3ContinuationSpliceXfade,
+                                placeholder: "0.03",
+                                helpText: "Equal-power crossfade where the preserved source meets regenerated audio.",
+                                caption: "30 ms matches the Windows seamless-continuation default."
+                            )
+                            sa3AdvancedField(
+                                title: "regeneration overlap seconds",
+                                text: $viewModel.sa3ContinuationMaskOverlap,
+                                placeholder: "0.2",
+                                helpText: "Regenerate this much audio before the source boundary, then splice at the regenerated overlap.",
+                                caption: "0.2 seconds gives the model context across the seam."
+                            )
+                        }
+                    }
                 } else {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 6) {
@@ -2110,7 +2164,7 @@ private struct ModelDownloadSheet: View {
 
     @ViewBuilder
     private var sa3SetupContent: some View {
-        Text("pre-download the required sa3 model repos for offline use in gary4juce.")
+        Text("pre-download the required sa3 model repos and optional decoder fix for offline use in gary4juce.")
             .font(.subheadline)
         Text("this service reuses the same keychain hugging face token as jerry.")
             .font(.caption)
@@ -2118,7 +2172,7 @@ private struct ModelDownloadSheet: View {
         Text("accept access for both upstream repos before testing the backend.")
             .font(.caption)
             .foregroundStyle(.secondary)
-        Text("if you skip this step, the first /load or generation request will still fetch the gated assets on demand.")
+        Text("the main model can still download on first use. the optional decoder fix must be downloaded here before it can be enabled.")
             .font(.caption)
             .foregroundStyle(.secondary)
 

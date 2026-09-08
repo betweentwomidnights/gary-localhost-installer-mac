@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>gary4local v0.2.1 release notes</title>
+    <style>
+      :root { color-scheme: light; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 24px;
+        line-height: 1.55;
+        color: #111;
+      }
+      h1 { margin-bottom: 0.25rem; }
+      h2 { font-size: 1.05rem; margin-bottom: 0.3rem; }
+      p { margin-top: 0; color: #444; }
+      ul { padding-left: 1.2rem; color: #444; }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.95em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>gary4local v0.2.1</h1>
+    <p>an incremental compatibility release for the newest mac gary4juce,
+    deliberately smaller than the ongoing full windows-parity work.</p>
+
+    <h2>new</h2>
+    <ul>
+      <li>gary and terry now accept a seed, return the seed they actually used,
+      and support repeatable requests from the new plugin controls.</li>
+      <li>sa3 continuations preserve the original source and crossfade into a
+      regenerated overlap, matching the smoother windows continuation path.</li>
+      <li>sa3 can optionally download and merge the SAME-L decoder squeak fix
+      into its native MLX decoder without taking a user LoRA slot.</li>
+    </ul>
+
+    <h2>not in this release</h2>
+    <p>custom runtime storage and cleanup, plus custom ACE-Step MLX model work,
+    remain on the broader mac-parity track.</p>
+
+    <p>compatible with
+    <a href="https://github.com/betweentwomidnights/gary4juce/releases/tag/v4.0.14-mac">gary4juce v4.0.14-mac</a>.
+    notarized DMG with sparkle signatures for the in-app updater.</p>
+  </body>
+</html>

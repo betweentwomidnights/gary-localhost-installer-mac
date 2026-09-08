@@ -5,6 +5,7 @@ import torchaudio
 import time
 import tempfile
 import os
+import random
 import json
 import inspect
 import threading
@@ -1227,6 +1228,7 @@ def _queue_transform_job(
     solver: str,
     custom_prompt: str,
     backend_engine: str,
+    seed: int,
 ) -> None:
     def worker():
         input_path = None
@@ -1262,6 +1264,7 @@ def _queue_transform_job(
                 session_id=session_id,
                 progress_callback=redis_progress_callback,
                 backend_engine=backend_engine,
+                seed=seed,
             )
 
             output_path = _shared_audio_file("output", session_id)
@@ -1498,6 +1501,18 @@ class AudioProcessingError(Exception):
         super().__init__(message)
         self.status_code = status_code
 
+
+def resolve_seed(value) -> int:
+    """Resolve Terry's shared seed contract to a concrete non-negative seed."""
+    if value in (None, ""):
+        seed = -1
+    else:
+        try:
+            seed = int(value)
+        except (TypeError, ValueError):
+            raise AudioProcessingError(f"Invalid seed: {value!r}")
+    return random.randint(0, 99999) if seed < 0 else seed
+
 @contextmanager
 def resource_cleanup():
     """Context manager to ensure proper cleanup of GPU resources."""
@@ -1621,6 +1636,7 @@ def process_audio(
     session_id: str = None,
     progress_callback=None,
     backend_engine: str = None,
+    seed: int = None,
 ) -> torch.Tensor:
     """Process audio with selected variation."""
 
@@ -1698,6 +1714,8 @@ def process_audio(
             if backend == BACKEND_MPS:
                 if model_progress_callback is not None:
                     current_model._progress_callback = model_progress_callback
+                if seed is not None:
+                    torch.manual_seed(seed)
                 edited_audio = current_model.edit(
                     prompt_tokens=tokens,
                     descriptions=[config['prompt']],
@@ -1708,6 +1726,8 @@ def process_audio(
                 return _normalize_waveform_for_save(edited_audio[0][0])
 
             native_prompt_mode = _mlx_native_prompt_mode()
+            if seed is not None:
+                torch.manual_seed(seed)
             edited_audio = mlx_module.edit_with_mlx(
                 current_model,
                 mlx_runtime,
@@ -1769,6 +1789,7 @@ def transform_audio():
             custom_prompt = request.form.get('prompt', request.form.get('custom_prompt'))
             session_id = request.form.get('session_id')
             request_backend_engine = request.form.get('backend_engine')
+            seed = resolve_seed(request.form.get('seed'))
 
             with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
                 audio_file.save(tmp_file.name)
@@ -1791,6 +1812,7 @@ def transform_audio():
             custom_prompt = data.get('custom_prompt')
             session_id = data.get('session_id')
             request_backend_engine = data.get('backend_engine')
+            seed = resolve_seed(data.get('seed'))
 
             if 'audio_file_path' in data and data['audio_file_path']:
                 audio_file_path = data['audio_file_path']
@@ -1828,6 +1850,7 @@ def transform_audio():
             session_id=session_id,
             progress_callback=redis_progress_callback,
             backend_engine=request_backend_engine,
+            seed=seed,
         )
 
         output_filename = f"output_{session_id}_{uuid.uuid4().hex[:8]}.wav"
@@ -1842,12 +1865,14 @@ def transform_audio():
         if session_id:
             finalize_progress_tracking(session_id)
 
-        return send_file(
+        response = send_file(
             output_file_path,
             as_attachment=True,
             download_name='transformed_audio.wav',
             mimetype='audio/wav'
         )
+        response.headers['X-Melodyflow-Seed'] = str(seed)
+        return response
 
     except AudioProcessingError as e:
         if session_id:
@@ -1889,6 +1914,10 @@ def juce_transform_audio():
 
     custom_prompt = data.get('custom_prompt')
     backend_engine = data.get('backend_engine')
+    try:
+        seed = resolve_seed(data.get('seed'))
+    except AudioProcessingError as error:
+        return jsonify({'success': False, 'error': str(error)}), error.status_code
 
     _upsert_juce_session(
         session_id,
@@ -1897,6 +1926,7 @@ def juce_transform_audio():
         variation=variation,
         status='queued',
         progress=0,
+        seed=seed,
         queue_status=_build_queue_status('queued', 'queued for transform', 0),
     )
 
@@ -1908,11 +1938,13 @@ def juce_transform_audio():
         solver=solver,
         custom_prompt=custom_prompt,
         backend_engine=backend_engine,
+        seed=seed,
     )
 
     return jsonify({
         'success': True,
         'session_id': session_id,
+        'seed': seed,
         'message': 'Audio transform started',
         'note': 'Poll /api/juce/poll_status/{session_id} for progress and results',
     })
@@ -1937,6 +1969,9 @@ def juce_poll_status(session_id):
         'progress': progress,
         'queue_status': queue_status,
     }
+
+    if session_data.get('seed') is not None:
+        response['seed'] = session_data['seed']
 
     if status in ('queued', 'warming', 'processing'):
         response['generation_in_progress'] = False

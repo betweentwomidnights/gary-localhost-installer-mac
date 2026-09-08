@@ -1448,6 +1448,11 @@ final class ServiceManager: ObservableObject {
             env["SA3_LATENT_SHIFT"] = sa3RuntimeSettings.latentShift
             env["SA3_LATENT_TARGET_STD"] = sa3RuntimeSettings.latentTargetStd
             env["SA3_CONTINUE_TAIL_PAD"] = sa3RuntimeSettings.continuationTailPad
+            env["SA3_CONTINUE_SPLICE_SOURCE"] = sa3RuntimeSettings.continuationSpliceSource ? "1" : "0"
+            env["SA3_CONTINUE_SPLICE_XFADE"] = sa3RuntimeSettings.continuationSpliceXfade
+            env["SA3_CONTINUE_SPLICE_GAIN_MATCH"] = sa3RuntimeSettings.continuationSpliceGainMatch ? "1" : "0"
+            env["SA3_CONTINUE_MASK_OVERLAP"] = sa3RuntimeSettings.continuationMaskOverlap
+            env["SA3_USE_DECODER_LORA"] = sa3RuntimeSettings.useDecoderLora ? "1" : "0"
             env["SA3_MLX_DIT_DTYPE"] = sa3RuntimeSettings.useFP32DiT ? "float32" : "float16"
         } else if service.id == "carey" {
             let useMlx = careyBackendEngine == "mlx"
