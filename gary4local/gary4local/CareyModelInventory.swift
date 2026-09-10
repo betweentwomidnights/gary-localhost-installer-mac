@@ -77,7 +77,8 @@ enum CareyOptimizedModelInventory {
     }
 
     private static func nonEmptyFileSize(_ url: URL) -> Int64? {
-        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+        let resolvedURL = url.resolvingSymlinksInPath()
+        guard let values = try? resolvedURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
               values.isRegularFile == true,
               let size = values.fileSize,
               size > 0 else {
