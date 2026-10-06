@@ -149,6 +149,7 @@ final class CareyAceTrainingManager: ObservableObject {
         service: ResolvedService,
         pythonURL: URL,
         checkpointDirectory: URL,
+        hubCacheDirectory: URL,
         loraCatalogURL: URL,
         loraRegistryURL: URL,
         captionsURL: URL,
@@ -199,7 +200,9 @@ final class CareyAceTrainingManager: ObservableObject {
                 trainingModel.requiredFiles,
                 in: checkpointDirectory
             )
-            guard missing.isEmpty else {
+            let optimizedReady = CareyOptimizedModelInventory.statuses(hubCacheDirectory: hubCacheDirectory)
+                .contains { $0.downloaded && $0.target.careyConfigName == trainingModel.rawValue }
+            guard missing.isEmpty || (optimizedReady && request.dtype == "bf16") else {
                 launchError = "\(trainingModel.menuLabel) isn't fully downloaded (\(missing.count) file\(missing.count == 1 ? "" : "s") missing, including \(missing[0])). download it from carey → models."
                 return
             }
@@ -321,6 +324,11 @@ final class CareyAceTrainingManager: ObservableObject {
                 for: service,
                 huggingFaceToken: huggingFaceToken
             )
+            // Training has its own automatic loader, independent of the
+            // generation backend picker, and never downloads missing weights.
+            process.environment?["ACESTEP_MLX_WEIGHT_SOURCE"] = "auto"
+            process.environment?["ACESTEP_TRAINING_USE_MLX_ARTIFACTS"] = "1"
+            process.environment?["HUGGINGFACE_HUB_CACHE"] = hubCacheDirectory.path
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
 

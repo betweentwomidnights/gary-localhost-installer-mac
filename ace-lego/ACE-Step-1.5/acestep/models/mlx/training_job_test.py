@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from unittest.mock import MagicMock, patch
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -19,6 +20,30 @@ pytest.importorskip("mlx.core")
 import mlx.core as mx  # noqa: E402
 
 from acestep.models.mlx import training_job  # noqa: E402
+
+
+def test_artifact_only_decoder_uses_artifact_config_without_legacy_directory():
+    """Build BF16-compute training from a pinned artifact on a fresh install."""
+    args = training_job.parse_args([
+        "--tensor-dir", "/missing/tensors", "--output-dir", "/missing/output",
+        "--checkpoint-dir", "/missing/checkpoints", "--model-variant", "base",
+        "--artifact-storage-upcast", "--dtype", "bf16",
+    ])
+    decoder = MagicMock()
+    null = MagicMock()
+    with patch("acestep.models.mlx.training_artifact.resolve_training_artifact", return_value=Path("/artifact")), \
+         patch("acestep.models.mlx.training_artifact.load_training_artifact_if_compatible", return_value=(null, "/artifact")), \
+         patch("acestep.models.mlx.dit_convert.resolve_model_dir") as legacy, \
+         patch("acestep.models.mlx.dit_convert.load_model_config", return_value="config") as config, \
+         patch("acestep.models.mlx.dit_model.MLXDiTDecoder.from_config", return_value=decoder), \
+         patch.object(training_job.mx, "eval"):
+        result = training_job.build_mlx_decoder(args)
+    legacy.assert_not_called()
+    config.assert_called_once_with(Path("/artifact"))
+    decoder.set_dtype.assert_called_once_with(mx.bfloat16)
+    null.astype.assert_called_once_with(mx.bfloat16)
+    assert result[0] is decoder
+    assert result[2] == "/artifact"
 
 
 def test_model_family_defaults_are_resolved_from_variant() -> None:

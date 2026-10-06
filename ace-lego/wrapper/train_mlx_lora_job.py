@@ -261,6 +261,8 @@ def run_step(
     if env.get("PYTHONPATH"):
         pythonpath_parts.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+    if phase == "preprocessing":
+        env["ACESTEP_TRAINING_USE_MLX_ARTIFACTS"] = "1"
 
     popen_kwargs: dict[str, Any] = {
         "cwd": str(cwd or SERVICE_DIR),
@@ -335,6 +337,18 @@ def require_training_environment(args: argparse.Namespace) -> None:
 
 
 def require_model_checkpoint(args: argparse.Namespace) -> None:
+    """Require a local compatible artifact or the selected legacy checkpoint."""
+    if str(ACE_ROOT) not in sys.path:
+        sys.path.insert(0, str(ACE_ROOT))
+    from acestep.models.mlx.training_artifact import resolve_training_artifact
+
+    artifact = resolve_training_artifact(
+        variant=MODEL_MAP[args.model]["folder"],
+        training_dtype=args.dtype,
+        allow_storage_upcast=getattr(args, "artifact_storage_upcast", True),
+    )
+    if artifact is not None:
+        return
     model = MODEL_MAP[args.model]
     model_dir = args.checkpoint_dir / model["folder"]
     if not model_dir.is_dir() or not (model_dir / "config.json").is_file():
@@ -461,6 +475,8 @@ def build_train_command(
         command.append("--allow-unsafe-xl")
     if args.fake_decoder:
         command.append("--fake-decoder")
+    if getattr(args, "artifact_storage_upcast", True):
+        command.append("--artifact-storage-upcast")
     return command
 
 
@@ -1443,6 +1459,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="fp32",
     )
     parser.add_argument("--dtype", choices=("fp32", "fp16", "bf16"), default="bf16")
+    parser.add_argument(
+        "--artifact-storage-upcast",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use local FP16 artifacts with BF16 training compute (no download).",
+    )
     parser.add_argument(
         "--gradient-checkpointing",
         action=argparse.BooleanOptionalAction,

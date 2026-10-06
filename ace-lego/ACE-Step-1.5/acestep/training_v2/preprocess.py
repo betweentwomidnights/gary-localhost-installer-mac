@@ -359,7 +359,6 @@ def _pass2_heavy(
         return 0, 0
 
     from acestep.training_v2.model_loader import (
-        load_decoder_for_training,
         unload_models,
         _resolve_dtype,
     )
@@ -369,7 +368,9 @@ def _pass2_heavy(
     dtype = _resolve_dtype(precision)
 
     logger.info("[Side-Step] Pass 2/2: Loading DIT model (variant=%s) ...", variant)
-    model = load_decoder_for_training(checkpoint_dir, variant, device, precision)
+    from acestep.training_v2.artifact_preprocess import load_preprocessing_conditioner
+
+    model = load_preprocessing_conditioner(checkpoint_dir, variant, device, precision)
 
     processed = 0
     failed = 0

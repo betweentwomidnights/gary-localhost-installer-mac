@@ -224,6 +224,21 @@ enum CareyTrainingModel: String, CaseIterable, Identifiable, Codable {
 // MARK: - Inventory
 
 enum CareyModelInventory {
+    /// Configs and silence latents may remain after migration. Only real DiT
+    /// weights keep the legacy catalog visible, including partial shard sets.
+    static func hasLegacyWeights(in checkpointDirectory: URL) -> Bool {
+        CareyDownloadTarget.ditTargets.contains { target in
+            guard let name = target.careyConfigName else { return false }
+            let directory = checkpointDirectory.appendingPathComponent(name, isDirectory: true)
+            let files = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+            return files.contains { filename in
+                (filename == "model.safetensors"
+                 || (filename.hasPrefix("model-") && filename.hasSuffix(".safetensors")))
+                && isFilePresent("\(name)/\(filename)", in: checkpointDirectory)
+            }
+        }
+    }
+
     /// A file counts as present only when it exists and is non-empty. An
     /// interrupted download can leave a zero-byte file behind, and treating
     /// that as downloaded is how you get a failure several minutes into a run.
@@ -231,6 +246,7 @@ enum CareyModelInventory {
         let url = checkpointDirectory
             .appendingPathComponent(relativePath)
             .standardizedFileURL
+            .resolvingSymlinksInPath()
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
               !isDirectory.boolValue,
@@ -262,6 +278,16 @@ enum CareyModelInventory {
 
     static func downloadedTrainingModels(in checkpointDirectory: URL) -> [CareyTrainingModel] {
         CareyTrainingModel.allCases.filter { isDownloaded($0, in: checkpointDirectory) }
+    }
+
+    static func downloadedTrainingModels(
+        in checkpointDirectory: URL,
+        optimizedModels: [CareyOptimizedModelStatus]
+    ) -> [CareyTrainingModel] {
+        CareyTrainingModel.allCases.filter { model in
+            isDownloaded(model, in: checkpointDirectory)
+                || optimizedModels.contains { $0.downloaded && $0.target.careyConfigName == model.rawValue }
+        }
     }
 
     /// Pick a model that is actually present, preferring the caller's choice.

@@ -86,6 +86,7 @@ class TrainMLXLoraJobTests(unittest.TestCase):
             self.assertIn("--save-best-after", train)
             self.assertIn("25", train)
             self.assertIn("--gradient-checkpointing", train)
+            self.assertIn("--artifact-storage-upcast", train)
             self.assertNotIn("--memory-limit-gb", train)
             self.assertEqual(train[train.index("--timestep-mu") + 1], "-0.4")
 
@@ -118,6 +119,23 @@ class TrainMLXLoraJobTests(unittest.TestCase):
             self.assertIn("--allow-unsafe-xl", train)
             self.assertIn("--max-steps", train)
             self.assertIn("1", train)
+
+    def test_storage_upcast_can_be_disabled_for_legacy_comparisons(self) -> None:
+        args = job.build_parser().parse_args(
+            _base_args(Path("/tmp"), Path("/tmp/dataset"))
+            + ["--no-artifact-storage-upcast"]
+        )
+        args.cancel_path = Path("/tmp/cancel")
+        command = job.build_train_command(args, Path("/tmp/tensors"), Path("/tmp/output"))
+        self.assertNotIn("--artifact-storage-upcast", command)
+
+    def test_checkpoint_preflight_accepts_artifact_without_legacy_directory(self) -> None:
+        args = job.build_parser().parse_args(_base_args(Path("/missing"), Path("/missing/dataset")))
+        with patch("acestep.models.mlx.training_artifact.resolve_training_artifact", return_value=Path("/artifact")) as resolve:
+            job.require_model_checkpoint(args)
+        resolve.assert_called_once_with(
+            variant="acestep-v15-base", training_dtype="bf16", allow_storage_upcast=True
+        )
 
     def test_timestep_mu_defaults_to_sidestep_schedule_unless_overridden(self) -> None:
         default_args = job.build_parser().parse_args(

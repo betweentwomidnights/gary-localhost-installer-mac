@@ -355,6 +355,11 @@ def _resolve_silence_latent_path(
     silently borrowed base's latent on a partial install.
     """
     ckpt = Path(checkpoint_dir)
+    from acestep.training_v2.artifact_preprocess import resolve_preprocessing_artifact
+
+    artifact = resolve_preprocessing_artifact(variant)
+    if artifact is not None:
+        return artifact / "conditioning" / "silence_latent.pt"
     candidates = [ckpt / "silence_latent.pt"]
 
     if variant is not None:

@@ -653,6 +653,10 @@ final class ControlCenterViewModel: ObservableObject {
     @Published var careyOptionalModels: [CareyRequiredModelStatus] = []
     @Published var careyCaptionerModels: [CareyRequiredModelStatus] = []
     @Published var careyOptimizedModels: [CareyOptimizedModelStatus] = []
+    @Published private(set) var hasCareyLegacyWeights = false
+    var availableCareyWeightSources: [CareyWeightSource] {
+        hasCareyLegacyWeights ? CareyWeightSource.allCases : [.automatic, .optimized]
+    }
     /// Which Carey models are complete on disk. Refreshed by
     /// refreshCareyModelAvailability(), never computed on read -- see there.
     @Published private(set) var downloadedCareyCaptioners: [CareyCaptionerModel] = []
@@ -1335,6 +1339,7 @@ final class ControlCenterViewModel: ObservableObject {
             manager.setCareyUseSampledMlxVaeEncode(careyUseSampledMlxVaeEncode, restartIfRunning: false)
             manager.setSA3RuntimeSettings(currentSA3RuntimeSettings().normalized, restartIfRunning: false)
             self.manager = manager
+            refreshCareyModelAvailability()
             bindManager(manager)
             startupError = nil
             selectedServiceID = manager.services.first?.id
@@ -1755,6 +1760,7 @@ final class ControlCenterViewModel: ObservableObject {
             )
             return
         }
+        if serviceID == "carey" { refreshCareyModelAvailability() }
         manager?.start(serviceID: serviceID)
     }
 
@@ -1777,16 +1783,17 @@ final class ControlCenterViewModel: ObservableObject {
             )
             return
         }
-        guard let service = currentCareyRuntime()?.service,
+        guard let runtime = currentCareyRuntime(),
               let pythonURL = careyPythonExecutableURL() else {
             careyAceTrainingManager.clearError()
             return
         }
         careyAceTrainingManager.start(
             request: request,
-            service: service,
+            service: runtime.service,
             pythonURL: pythonURL,
             checkpointDirectory: careyCheckpointDirectoryURL(),
+            hubCacheDirectory: resolveCareyHubCacheDirectory(for: runtime),
             loraCatalogURL: careyLoraCatalogURL(),
             loraRegistryURL: careyLoraRegistryURL(),
             captionsURL: careyCaptionsURL(),
@@ -1833,10 +1840,21 @@ final class ControlCenterViewModel: ObservableObject {
         guard let directory = careyCheckpointDirectory else {
             downloadedCareyCaptioners = []
             downloadedCareyTrainingModels = []
+            hasCareyLegacyWeights = false
             return
         }
+        hasCareyLegacyWeights = CareyModelInventory.hasLegacyWeights(in: directory)
+        if !hasCareyLegacyWeights, careyWeightSource == .legacy {
+            // Apply before auto-start and after removal of the final legacy model.
+            setCareyWeightSource(.automatic)
+        }
         downloadedCareyCaptioners = CareyModelInventory.downloadedCaptioners(in: directory)
-        downloadedCareyTrainingModels = CareyModelInventory.downloadedTrainingModels(in: directory)
+        let optimized = currentCareyRuntime().map {
+            CareyOptimizedModelInventory.statuses(hubCacheDirectory: resolveCareyHubCacheDirectory(for: $0))
+        } ?? []
+        downloadedCareyTrainingModels = CareyModelInventory.downloadedTrainingModels(
+            in: directory, optimizedModels: optimized
+        )
     }
 
     // MARK: - Storage maintenance
@@ -3204,7 +3222,9 @@ final class ControlCenterViewModel: ObservableObject {
             modelDownloadStatusMessage = "downloading carey model files..."
         } else if canRunCareyFocusedDownload {
             let familyDescription = careyUseXlModels ? "xl" : "regular"
-            modelDownloadStatusMessage = "Apple MLX is recommended for \(familyDescription) models. Existing checkpoints remain supported and ScragVAE is optional."
+            modelDownloadStatusMessage = "Apple MLX is recommended for \(familyDescription) models. "
+                + (hasCareyLegacyWeights ? "Existing checkpoints remain supported. " : "")
+                + "ScragVAE is optional."
         } else {
             modelDownloadStatusMessage = "focused download script not found (expected in runtime/scripts or workspace/scripts)."
         }
@@ -3227,7 +3247,7 @@ final class ControlCenterViewModel: ObservableObject {
                 let fileURL = Self.resolveCareyModelFileURL(
                     baseCheckpointDirectory: checkpointDirectory,
                     relativePath: row.relativePath
-                )
+                ).resolvingSymlinksInPath()
                 var isDirectory: ObjCBool = false
                 let exists = fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory) && !isDirectory.boolValue
                 let bytes: Int64
@@ -3268,19 +3288,19 @@ final class ControlCenterViewModel: ObservableObject {
         )
         refreshCareyModelAvailability()
         if !isCareyDownloadInProgress {
-            let downloadedCount = rows.filter(\.downloaded).count
-            let optionalReady = optionalRows.allSatisfy(\.downloaded)
-            if downloadedCount == rows.count {
-                modelDownloadStatusMessage = optionalReady
-                    ? "all required carey files are downloaded. ScragVAE is ready too."
-                    : "all required carey files are downloaded. ScragVAE is optional."
-            } else {
-                modelDownloadStatusMessage = "\(downloadedCount)/\(rows.count) required carey files are downloaded."
+            let sharedRows = rows.filter {
+                $0.relativePath.hasPrefix("checkpoints/Qwen3-Embedding-0.6B/")
+                    || $0.relativePath.hasPrefix("checkpoints/vae/")
             }
+            let readyCount = careyOptimizedModels.filter(\.downloaded).count
+            modelDownloadStatusMessage = "\(readyCount)/6 Apple MLX models downloaded. "
+                + (sharedRows.allSatisfy(\.downloaded)
+                   ? "Shared components are ready."
+                   : "\(sharedRows.filter(\.downloaded).count)/\(sharedRows.count) shared component files downloaded.")
         }
     }
 
-    func startCareyFocusedDownload(targets: [CareyDownloadTarget] = [.base, .sft, .turbo]) {
+    func startCareyFocusedDownload(targets: [CareyDownloadTarget]) {
         guard modelDownloadServiceID == "carey" else { return }
         guard !isModelDownloadInProgress else {
             modelDownloadStatusMessage = "a model download is already running."

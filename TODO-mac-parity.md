@@ -1,6 +1,6 @@
 # mac parity TODO
 
-Untracked scratch list. Things we know need doing to get the mac build as
+Working release checklist. Things we know need doing to get the mac build as
 robust as gary-localhost-installer's v0.3.0, captured as they come up rather
 than held in a conversation.
 
@@ -21,6 +21,52 @@ than held in a conversation.
 - [ ] Produce an unsigned/local release build for end-to-end upgrade testing,
       then exercise legacy-only, optimized-only, and mixed installs. Full custom
       runtime storage remains out of scope for this release.
+
+### Carey migration UX finish (2026-10-06)
+
+- [x] Hide the legacy download catalog when no non-empty legacy DiT weights
+      remain, including fresh and optimized-only installations. Metadata,
+      shared components, and custom adapters do not keep the catalog visible;
+      partial legacy shard sets do. Refresh after removal and at app startup.
+- [x] Give Qwen text encoder and stock VAE their own shared-components list;
+      stop presenting all six legacy checkpoints as required downloads.
+- [x] Hide the legacy weight-source choice after the last legacy removal and
+      reset a stale saved legacy selection to automatic before service startup.
+- [x] Wire optimized-only training availability, wrapper preflight, decoder
+      config, silence latent, and decoder-free preprocessing to pinned local
+      artifacts. Pass FP16-storage/BF16-compute explicitly; retain source loading
+      for legacy-only installs. No new long training run is required.
+- [x] Verify the new panel on this machine with no legacy weights, a synthetic
+      partial XL shard, and removal of that last shard with metadata retained.
+      The catalog disappears immediately on refresh; shared components remain.
+      The normal installed configuration also shows optimized-only downloads.
+- [ ] User acceptance test of the actual optional removal flow. Never delete
+      the user's weights automatically as part of testing.
+
+Local validation: 49 Python tests plus two subtests, Foundation-only Swift
+inventory fixtures, and a real XL-base artifact-only CPU conditioning smoke
+passed (finite encoder outputs and correct silence latent, decoder absent,
+legacy checkpoint directory absent). ARM64 Release `0.3.0-parity.22` / build
+222 is installed at `/Applications/gary4local.app`, ad-hoc signature verified;
+parity.21 is retained as `/Applications/gary4local.backup-parity21-before-parity22.app`.
+No user models were deleted and no new long training run was started. A full
+artifact-only preprocess/train/save/reload acceptance smoke remains part of
+release validation; the CPU smoke does not establish that full workflow.
+
+### Next PC parity target: Yuey native service
+
+- [ ] Port the PC service contract and UI behavior from
+      `origin/feature/yuey-native-service` at
+      `6b8d2557ed35cab572b689d5b61d018f606d4a40` (not PC `main` as of this audit).
+      Reuse the native `yue2-server` API/model tiers/download behavior rather
+      than introducing a Python wrapper or a separate Mac inference protocol.
+- [ ] Add Mac-native runtime install/verify/launch plumbing: pin the published
+      Apple Silicon package and SHA-256, Metal device selection, dynamic-library
+      layout, signing and quarantine checks. Windows CUDA/Vulkan package logic
+      is platform-specific even though the service contract is shared.
+- [ ] Preserve the model license notice (CC BY-NC 4.0), explicit GGUF downloads,
+      runtime/model inventory and removal, cancellation, unload-after-generation,
+      gary4juce compatibility, and end-to-end release-bundle testing.
 
 ## ACE-Step lifecycle audit — findings (2026-08-30)
 

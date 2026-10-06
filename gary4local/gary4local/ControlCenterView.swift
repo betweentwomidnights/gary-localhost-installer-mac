@@ -702,7 +702,7 @@ struct ControlCenterView: View {
                     get: { viewModel.careyWeightSource },
                     set: { viewModel.setCareyWeightSource($0) }
                 )) {
-                    ForEach(CareyWeightSource.allCases) { source in
+                    ForEach(viewModel.availableCareyWeightSources) { source in
                         Text(source.displayName).tag(source)
                     }
                 }
@@ -711,8 +711,9 @@ struct ControlCenterView: View {
                 .garyPickerAccent()
                 .disabled(viewModel.careyBackendEngine != .mlx)
                 Text(
-                    "automatic uses a downloaded Apple MLX model when available, otherwise it keeps using your existing ACE-Step files. "
-                    + "Apple MLX never downloads during generation. Existing always uses the previous checkpoint format."
+                    viewModel.hasCareyLegacyWeights
+                    ? "automatic uses a downloaded Apple MLX model when available, otherwise it keeps using your existing ACE-Step files. Apple MLX never downloads during generation. Existing always uses the previous checkpoint format."
+                    : "download Apple MLX models from carey → models before generating. Generation never starts a download."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -2585,7 +2586,9 @@ private struct ModelDownloadSheet: View {
         Text("carey uses ace-step lego mode with `acestep_init_llm=false`. lego uses the active base family only, while complete can use base, sft, or turbo from that same family.")
             .font(.caption)
             .foregroundStyle(.secondary)
-        Text("service startup is lazy. Apple MLX models load much faster and are recommended on this Mac. Existing checkpoint models remain supported.")
+        Text(viewModel.hasCareyLegacyWeights
+             ? "service startup is lazy. Apple MLX models load much faster and are recommended on this Mac. Existing checkpoint models remain supported."
+             : "service startup is lazy. Apple MLX models load much faster and are recommended on this Mac.")
             .font(.caption)
             .foregroundStyle(.secondary)
         Text("plain regular base is still the safer lego default without a LoRA. xl-base gets more interesting once you have a matching xl LoRA.")
@@ -2660,11 +2663,17 @@ private struct ModelDownloadSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         } else {
-            let groupedRows = careyGroupedRequiredModels(
+            let requiredGroups = careyGroupedRequiredModels(
                 from: viewModel.careyRequiredModels,
                 useXlModels: viewModel.careyUseXlModels
             )
-            let legacyCleanupRows = groupedRows.filter { row in
+            let legacyRows = viewModel.hasCareyLegacyWeights ? requiredGroups.filter {
+                $0.downloadTarget.map { CareyDownloadTarget.ditTargets.contains($0) } ?? false
+            } : []
+            let sharedRows = requiredGroups.filter {
+                $0.downloadTarget == .qwen || $0.downloadTarget == .vae
+            }
+            let legacyCleanupRows = legacyRows.filter { row in
                 guard let target = row.downloadTarget,
                       CareyDownloadTarget.ditTargets.contains(target),
                       row.isComplete else { return false }
@@ -2697,49 +2706,28 @@ private struct ModelDownloadSheet: View {
                         .fill(Color.orange.opacity(0.08))
                 )
             }
-            let downloadedFileCount = viewModel.careyRequiredModels.filter(\.downloaded).count
-            let totalFileCount = viewModel.careyRequiredModels.count
-            VStack(alignment: .leading, spacing: 6) {
-                Text("existing checkpoints + shared components (\(downloadedFileCount)/\(totalFileCount) files)")
-                    .font(.caption.weight(.semibold))
-                ForEach(groupedRows) { row in
-                    HStack(spacing: 8) {
-                        let indicatorColor: Color = row.isComplete
-                            ? .green
-                            : (row.downloadedFileCount > 0 ? .orange : Color.gray.opacity(0.5))
-                        Circle()
-                            .fill(indicatorColor)
-                            .frame(width: 8, height: 8)
-                        Text(row.label)
-                            .font(.caption.monospaced())
-                        Spacer()
-                        Text(
-                            row.isComplete
-                            ? formatByteCount(row.downloadedBytes)
-                            : "\(row.downloadedFileCount)/\(row.totalFileCount) files"
-                        )
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        if let downloadTarget = row.downloadTarget {
-                            Button(
-                                viewModel.isCareyDownloadTargetActive(downloadTarget)
-                                    ? "downloading..."
-                                    : (row.isComplete ? "downloaded" : "download")
-                            ) {
-                                viewModel.startCareyFocusedDownload(for: downloadTarget)
-                            }
-                            .disabled(
-                                row.isComplete
-                                || !viewModel.canRunCareyFocusedDownload
-                                || viewModel.isModelDownloadInProgress
-                                || viewModel.isCareyLifecycleActionInProgress
-                            )
-                        }
-                        careyRemoveButton(for: row)
-                    }
-                    Text(row.relativePrefix)
-                        .font(.caption2.monospaced())
+            if !legacyRows.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("existing ACE-Step checkpoints")
+                        .font(.caption.weight(.semibold))
+                    Text("supported while legacy weights are installed. Removing the last legacy checkpoint hides this list; Apple MLX becomes the download path.")
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
+                    ForEach(legacyRows) { row in
+                        careyRequiredModelRow(row)
+                    }
+                }
+                .padding(.vertical, 2)
+                Divider()
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("shared components")
+                    .font(.caption.weight(.semibold))
+                Text("Qwen text encoder and VAE are used by both Apple MLX and existing checkpoints. Keep these when removing legacy DiT models.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                ForEach(sharedRows) { row in
+                    careyRequiredModelRow(row)
                 }
             }
             .padding(.vertical, 2)
@@ -2865,6 +2853,32 @@ private struct ModelDownloadSheet: View {
     private func formatByteCount(_ bytes: Int64) -> String {
         guard bytes > 0 else { return "missing" }
         return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private func careyRequiredModelRow(_ row: CareyRequiredGroupStatus) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(row.isComplete ? Color.green : (row.downloadedFileCount > 0 ? Color.orange : Color.gray.opacity(0.5)))
+                    .frame(width: 8, height: 8)
+                Text(row.label)
+                    .font(.caption.monospaced())
+                Spacer()
+                Text(row.isComplete ? formatByteCount(row.downloadedBytes) : "\(row.downloadedFileCount)/\(row.totalFileCount) files")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if let target = row.downloadTarget {
+                    Button(viewModel.isCareyDownloadTargetActive(target) ? "downloading..." : (row.isComplete ? "downloaded" : "download")) {
+                        viewModel.startCareyFocusedDownload(for: target)
+                    }
+                    .disabled(row.isComplete || !viewModel.canRunCareyFocusedDownload || viewModel.isModelDownloadInProgress || viewModel.isCareyLifecycleActionInProgress)
+                }
+                careyRemoveButton(for: row)
+            }
+            Text(row.relativePrefix)
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+        }
     }
 
     private func careyGroupedRequiredModels(

@@ -281,7 +281,14 @@ def build_mlx_decoder(args: argparse.Namespace):
     )
     from acestep.models.mlx.dit_model import MLXDiTDecoder
 
-    model_dir = resolve_model_dir(args.checkpoint_dir, args.model_variant)
+    from acestep.models.mlx.training_artifact import resolve_training_artifact
+
+    artifact_dir = resolve_training_artifact(
+        variant=args.model_variant,
+        training_dtype=args.dtype,
+        allow_storage_upcast=getattr(args, "artifact_storage_upcast", False),
+    )
+    model_dir = artifact_dir or resolve_model_dir(args.checkpoint_dir, args.model_variant)
     config = load_model_config(model_dir)
     decoder = MLXDiTDecoder.from_config(config)
     decoder.gradient_checkpointing = _resolve_gradient_checkpointing(args)
