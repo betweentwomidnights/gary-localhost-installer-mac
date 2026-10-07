@@ -722,7 +722,7 @@ def require_hf_download_support() -> None:
         )
 
 
-def perform_predownload_target(target: dict[str, Any], *, token: str) -> None:
+def perform_predownload_target(target: dict[str, Any], *, token: str | bool | None) -> None:
     require_hf_download_support()
     repo_id = str(target["repo_id"])
     if target["type"] == "files":
@@ -765,27 +765,27 @@ def perform_predownload_target(target: dict[str, Any], *, token: str) -> None:
 
 def run_sa3_predownload_task(session_id: str, payload: dict[str, Any]) -> None:
     target_type = str(payload.get("target_type", "required")).strip().lower()
-    if target_type not in {"required", "repo"}:
+    if target_type not in {"required", "repo", "decoder"}:
         upsert_predownload_session(
             session_id,
             status="failed",
             progress=0,
             queue_status=build_predownload_queue_status(
                 status="failed",
-                message="target_type must be 'required' or 'repo'",
+                message="target_type must be 'required', 'repo' or 'decoder'",
                 target="sa3",
                 stage_name="prepare",
                 stage_index=0,
                 stage_total=0,
                 download_percent=0,
             ),
-            error="target_type must be 'required' or 'repo'",
+            error="target_type must be 'required', 'repo' or 'decoder'",
             target="sa3",
         )
         return
 
     token = (os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or "").strip()
-    if not token:
+    if not token and target_type != "decoder":
         error = "HF_TOKEN is not configured. Save your Hugging Face token in gary4local first."
         upsert_predownload_session(
             session_id,
@@ -805,7 +805,10 @@ def run_sa3_predownload_task(session_id: str, payload: dict[str, Any]) -> None:
         )
         return
 
-    if target_type == "repo":
+    if target_type == "decoder":
+        targets = [dict(SA3_DECODER_LORA_TARGET)]
+        target_label = "SAME-L decoder squeak fix"
+    elif target_type == "repo":
         repo_id = str(payload.get("repo_id", "")).strip()
         if not repo_id:
             error = "repo_id is required when target_type is 'repo'."
@@ -840,7 +843,8 @@ def run_sa3_predownload_task(session_id: str, payload: dict[str, Any]) -> None:
         target_label = "required sa3 models"
 
     try:
-        configure_hf_auth()
+        if target_type != "decoder":
+            configure_hf_auth()
         stage_total = len(targets)
         for offset, target in enumerate(targets, start=1):
             label = str(target["display_label"])
@@ -860,7 +864,7 @@ def run_sa3_predownload_task(session_id: str, payload: dict[str, Any]) -> None:
                 error=None,
                 target=target_label,
             )
-            perform_predownload_target(target, token=token)
+            perform_predownload_target(target, token=False if target_type == "decoder" else token)
             upsert_predownload_session(
                 session_id,
                 status="processing",
@@ -895,7 +899,7 @@ def run_sa3_predownload_task(session_id: str, payload: dict[str, Any]) -> None:
             target=target_label,
         )
     except Exception as exc:
-        error = friendly_load_error(exc)
+        error = f"Decoder fix download failed: {exc}" if target_type == "decoder" else friendly_load_error(exc)
         upsert_predownload_session(
             session_id,
             status="failed",
@@ -2172,7 +2176,9 @@ def predownload_inventory():
 @app.route("/models/predownload", methods=["POST"])
 @app.route("/api/models/predownload", methods=["POST"])
 def start_model_predownload():
-    if not hf_token_configured():
+    payload = request.get_json(silent=True) or {}
+    target_type = str(payload.get("target_type", "required")).strip().lower()
+    if not hf_token_configured() and target_type != "decoder":
         return jsonify(
             {
                 "success": False,
@@ -2181,13 +2187,12 @@ def start_model_predownload():
             }
         ), 400
 
-    payload = request.get_json(silent=True) or {}
-    target_type = str(payload.get("target_type", "required")).strip().lower()
-    target_label = (
-        str(payload.get("repo_id", "")).strip()
-        if target_type == "repo"
-        else "required sa3 models"
-    )
+    if target_type == "decoder":
+        target_label = "SAME-L decoder squeak fix"
+    elif target_type == "repo":
+        target_label = str(payload.get("repo_id", "")).strip()
+    else:
+        target_label = "required sa3 models"
     if not target_label:
         target_label = "required sa3 models"
 

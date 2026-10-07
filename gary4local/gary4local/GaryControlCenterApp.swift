@@ -118,7 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if runtime.isBootstrapping {
             item = NSMenuItem(
-                title: "rebuilding \(name)...",
+                title: "\(runtime.service.nativeRuntime == nil ? "rebuilding" : "installing") \(name)...",
                 action: nil,
                 keyEquivalent: ""
             )
@@ -184,10 +184,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func dockStatusSummary(for runtime: ServiceRuntime) -> String {
         if runtime.bootstrapState == .running {
-            return "rebuilding environment..."
+            return runtime.service.nativeRuntime == nil ? "rebuilding environment..." : "installing runtime..."
         }
         if runtime.bootstrapState == .failed {
-            return "environment rebuild failed"
+            return runtime.service.nativeRuntime == nil ? "environment rebuild failed" : "runtime install failed"
         }
 
         switch runtime.processState {

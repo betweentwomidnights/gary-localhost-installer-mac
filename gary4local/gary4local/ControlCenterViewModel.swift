@@ -719,6 +719,7 @@ final class ControlCenterViewModel: ObservableObject {
 
     let sa3TrainingManager = SA3LoraTrainingManager()
     let careyAceTrainingManager = CareyAceTrainingManager()
+    let yuey = YueyController()
     let sa3AutolabelManager = SA3AutolabelManager()
 
     private var logRefreshTask: Task<Void, Never>?
@@ -982,6 +983,8 @@ final class ControlCenterViewModel: ObservableObject {
     }
 
     init() {
+        yuey.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
         let savedBackend = UserDefaults.standard.string(forKey: Self.stableAudioBackendDefaultsKey) ?? StableAudioBackendEngine.mps.rawValue
         stableAudioBackendEngine = StableAudioBackendEngine.from(rawValue: savedBackend)
         let savedMelodyFlowBackend = UserDefaults.standard.string(
@@ -1067,6 +1070,8 @@ final class ControlCenterViewModel: ObservableObject {
             return canRunStableAudioOfflineDownloads
         case "carey":
             return canRunCareyFocusedDownload
+        case "yuey":
+            return true
         default:
             return false
         }
@@ -1293,6 +1298,7 @@ final class ControlCenterViewModel: ObservableObject {
     }
 
     func loadManifest() {
+        yuey.cancel()
         modelDownloadPollTask?.cancel()
         modelDownloadPollTask = nil
         garyLocalDownloadTask?.cancel()
@@ -1339,6 +1345,13 @@ final class ControlCenterViewModel: ObservableObject {
             manager.setCareyUseSampledMlxVaeEncode(careyUseSampledMlxVaeEncode, restartIfRunning: false)
             manager.setSA3RuntimeSettings(currentSA3RuntimeSettings().normalized, restartIfRunning: false)
             self.manager = manager
+            yuey.configure(service: manager.services.first(where: { $0.id == "yuey" })?.service)
+            yuey.canMutate = { [weak manager] in
+                guard let runtime = manager?.services.first(where: { $0.id == "yuey" }) else { return false }
+                return !runtime.isRunning && !runtime.isBootstrapping
+            }
+            yuey.operationChanged = { [weak manager] active in manager?.setNativeModelOperationInProgress(active) }
+            manager.setNativeModelOperationInProgress(yuey.isBusy)
             refreshCareyModelAvailability()
             bindManager(manager)
             startupError = nil
@@ -2608,12 +2621,20 @@ final class ControlCenterViewModel: ObservableObject {
             prepareSA3PredownloadState()
         } else if serviceID == "carey" {
             prepareCareyPredownloadState()
+        } else if serviceID == "yuey" {
+            yuey.refresh()
+            isModelCatalogLoading = false
         } else {
             refreshModelCatalogAndStatuses()
         }
     }
 
     func refreshModelCatalogAndStatuses() {
+        if modelDownloadServiceID == "yuey" {
+            yuey.refresh()
+            isModelCatalogLoading = false
+            return
+        }
         if modelDownloadServiceID == "stable_audio" {
             modelDownloadStatusMessage = "stable audio uses repo/checkpoint pre-download controls below."
             isModelCatalogLoading = false
@@ -3008,15 +3029,23 @@ final class ControlCenterViewModel: ObservableObject {
     }
 
     func startSA3PredownloadRequiredModels() {
+        startSA3Predownload(target: .required)
+    }
+
+    func startSA3PredownloadDecoderFix() {
+        startSA3Predownload(target: .decoder)
+    }
+
+    private func startSA3Predownload(target: SA3PredownloadTarget) {
         let serviceID = modelDownloadServiceID
         guard serviceID == "sa3" else { return }
-        guard stableAudioTokenConfigured else {
+        guard !target.requiresToken || stableAudioTokenConfigured else {
             modelDownloadStatusMessage = "save your hugging face token first."
             return
         }
         guard let baseURL = modelDownloadAPIBaseURL(for: serviceID) else {
             if canRunSA3OfflineDownloads {
-                startSA3OfflinePredownloadRequiredModels()
+                startSA3OfflinePredownload(target: target)
                 return
             }
             modelDownloadStatusMessage = "start \(modelDownloadServiceDisplayName) to pre-download models."
@@ -3030,11 +3059,11 @@ final class ControlCenterViewModel: ObservableObject {
         modelDownloadPollTask?.cancel()
         modelDownloadPollTask = nil
         activeModelDownloadSessionID = nil
-        activeModelDownloadPath = "required sa3 models"
-        sa3PredownloadTargetLabel = "required sa3 models"
+        activeModelDownloadPath = target.label
+        sa3PredownloadTargetLabel = target.label
         sa3PredownloadProgress = 0
         isModelDownloadInProgress = true
-        modelDownloadStatusMessage = "starting required sa3 models..."
+        modelDownloadStatusMessage = "starting \(target.label)..."
 
         Task { [weak self] in
             guard let self else { return }
@@ -3042,9 +3071,7 @@ final class ControlCenterViewModel: ObservableObject {
                 var request = URLRequest(url: baseURL.appendingPathComponent("models/predownload"))
                 request.httpMethod = "POST"
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                request.httpBody = try JSONSerialization.data(withJSONObject: [
-                    "target_type": "required"
-                ])
+                request.httpBody = try JSONSerialization.data(withJSONObject: target.payload)
 
                 let (data, response) = try await URLSession.shared.data(for: request)
                 try self.ensureHTTP200(response: response, body: data)
@@ -3058,10 +3085,10 @@ final class ControlCenterViewModel: ObservableObject {
                 }
 
                 self.activeModelDownloadSessionID = startResponse.sessionID
-                self.modelDownloadStatusMessage = startResponse.message ?? "downloading required sa3 models..."
+                self.modelDownloadStatusMessage = startResponse.message ?? "downloading \(target.label)..."
                 self.startModelDownloadPolling(
                     sessionID: startResponse.sessionID,
-                    modelPath: "required sa3 models",
+                    modelPath: target.label,
                     serviceID: serviceID,
                     baseURL: baseURL,
                     statusPathPrefix: "models/predownload_status"
@@ -4967,7 +4994,7 @@ final class ControlCenterViewModel: ObservableObject {
         }
     }
 
-    private func startSA3OfflinePredownloadRequiredModels() {
+    private func startSA3OfflinePredownload(target: SA3PredownloadTarget) {
         guard let runtime = currentSA3Runtime(),
               let helperURL = sa3PredownloadHelperURL(for: runtime)
         else {
@@ -4984,11 +5011,11 @@ final class ControlCenterViewModel: ObservableObject {
         sa3LocalDownloadTask?.cancel()
         sa3LocalDownloadTask = nil
         activeModelDownloadSessionID = nil
-        activeModelDownloadPath = "required sa3 models"
-        sa3PredownloadTargetLabel = "required sa3 models"
+        activeModelDownloadPath = target.label
+        sa3PredownloadTargetLabel = target.label
         sa3PredownloadProgress = 0
         isModelDownloadInProgress = true
-        modelDownloadStatusMessage = "starting required sa3 models..."
+        modelDownloadStatusMessage = "starting \(target.label)..."
 
         let executableURL = runtime.service.executable
         let workingDirectory = runtime.service.workingDirectory
@@ -4999,14 +5026,14 @@ final class ControlCenterViewModel: ObservableObject {
             let result = await Task.detached(priority: .userInitiated) {
                 Self.runStreamingLocalProcess(
                     executableURL: executableURL,
-                    arguments: [helperURL.path, "download-required"],
+                    arguments: [helperURL.path, target.helperCommand],
                     currentDirectory: workingDirectory,
                     environment: environment,
                     onOutputLine: { line in
                         Task { @MainActor [weak self] in
                             self?.handleOfflineHelperDownloadOutputLine(
                                 line,
-                                modelPath: "required sa3 models"
+                                modelPath: target.label
                             )
                         }
                     }
@@ -5021,7 +5048,7 @@ final class ControlCenterViewModel: ObservableObject {
                 self.activeModelDownloadSessionID = nil
                 if result.exitCode == 0 {
                     self.sa3PredownloadProgress = 1
-                    self.modelDownloadStatusMessage = "sa3 required models downloaded."
+                    self.modelDownloadStatusMessage = "\(target.label) downloaded."
                     self.refreshSA3OfflinePredownloadInventory()
                 } else {
                     self.sa3PredownloadProgress = 0
@@ -5058,7 +5085,7 @@ final class ControlCenterViewModel: ObservableObject {
         }
         let statusMessage = queueMessage.isEmpty ? fallbackMessage : queueMessage
 
-        if modelPath == "required sa3 models" {
+        if modelDownloadServiceID == "sa3" {
             sa3PredownloadTargetLabel = modelPath
             sa3PredownloadProgress = progress
             modelDownloadStatusMessage = statusMessage
@@ -6564,6 +6591,7 @@ final class ControlCenterViewModel: ObservableObject {
                 self?.stableAudioLocalDownloadTask?.cancel()
                 self?.sa3LocalDownloadTask?.cancel()
                 self?.careyDownloadTask?.cancel()
+                self?.yuey.cancel()
                 self?.manager?.shutdownForApplicationTermination()
             }
             .store(in: &cancellables)

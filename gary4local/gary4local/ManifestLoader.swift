@@ -179,7 +179,8 @@ struct ManifestLoader {
                 bootstrap: resolvedBootstrap,
                 autoStart: service.autoStart,
                 restartOnCrash: service.restartOnCrash,
-                gracefulShutdownSeconds: max(1, service.gracefulShutdownSeconds)
+                gracefulShutdownSeconds: max(1, service.gracefulShutdownSeconds),
+                nativeRuntime: service.nativeRuntime
             )
         }
 

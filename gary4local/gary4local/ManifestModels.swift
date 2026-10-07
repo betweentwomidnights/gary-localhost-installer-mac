@@ -26,6 +26,7 @@ struct ServiceDefinition: Decodable, Identifiable {
     let logFile: String
     let healthCheck: HealthCheckConfig
     let bootstrap: ServiceBootstrapConfig?
+    let nativeRuntime: NativeRuntimeDefinition?
     let autoStart: Bool
     let restartOnCrash: Bool
     let gracefulShutdownSeconds: Int
@@ -40,6 +41,7 @@ struct ServiceDefinition: Decodable, Identifiable {
         case logFile = "log_file"
         case healthCheck = "health_check"
         case bootstrap
+        case nativeRuntime = "native_runtime"
         case autoStart = "auto_start"
         case restartOnCrash = "restart_on_crash"
         case gracefulShutdownSeconds = "graceful_shutdown_seconds"
@@ -56,6 +58,7 @@ struct ServiceDefinition: Decodable, Identifiable {
         logFile = try container.decodeIfPresent(String.self, forKey: .logFile) ?? "\(id).log"
         healthCheck = try container.decode(HealthCheckConfig.self, forKey: .healthCheck)
         bootstrap = try container.decodeIfPresent(ServiceBootstrapConfig.self, forKey: .bootstrap)
+        nativeRuntime = try container.decodeIfPresent(NativeRuntimeDefinition.self, forKey: .nativeRuntime)
         autoStart = try container.decodeIfPresent(Bool.self, forKey: .autoStart) ?? false
         restartOnCrash = try container.decodeIfPresent(Bool.self, forKey: .restartOnCrash) ?? false
         gracefulShutdownSeconds = try container.decodeIfPresent(Int.self, forKey: .gracefulShutdownSeconds) ?? 8
@@ -129,6 +132,7 @@ struct ResolvedService: Identifiable {
     let autoStart: Bool
     let restartOnCrash: Bool
     let gracefulShutdownSeconds: Int
+    var nativeRuntime: NativeRuntimeDefinition? = nil
 }
 
 struct ResolvedHealthCheck {
@@ -180,7 +184,7 @@ struct ServiceRuntime: Identifiable {
 
     init(service: ResolvedService) {
         self.service = service
-        self.bootstrapState = service.bootstrap == nil ? .notConfigured : .ready
+        self.bootstrapState = service.bootstrap == nil && service.nativeRuntime == nil ? .notConfigured : .ready
     }
 
     var id: String { service.id }

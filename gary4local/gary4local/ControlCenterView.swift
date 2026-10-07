@@ -190,7 +190,7 @@ struct ControlCenterView: View {
                     onStart: { viewModel.startManagedService(runtime.id) },
                     onStop: { manager.stop(serviceID: runtime.id) },
                     onRebuildEnv: { manager.rebuildEnvironment(serviceID: runtime.id) },
-                    onDownloadModels: (runtime.id == "audiocraft_mlx" || runtime.id == "melodyflow" || runtime.id == "sa3" || runtime.id == "stable_audio" || runtime.id == "carey" || runtime.id == "foundation") ? {
+                    onDownloadModels: (runtime.id == "audiocraft_mlx" || runtime.id == "melodyflow" || runtime.id == "sa3" || runtime.id == "stable_audio" || runtime.id == "carey" || runtime.id == "foundation" || runtime.id == "yuey") ? {
                         viewModel.openModelDownloadSheet(for: runtime.id)
                     } : nil,
                     onManageLoras: runtime.id == "carey" ? {
@@ -210,7 +210,8 @@ struct ControlCenterView: View {
                             && !viewModel.stableAudioTokenConfigured)
                         || (runtime.id == "carey" && viewModel.isSA3AutolabelActive),
                     workloadExtraDisabled:
-                        runtime.id == "carey" && viewModel.isSA3AutolabelActive
+                        (runtime.id == "carey" && viewModel.isSA3AutolabelActive)
+                        || (runtime.id == "yuey" && viewModel.yuey.isBusy)
                 )
             }
             .listStyle(.inset)
@@ -388,7 +389,12 @@ struct ControlCenterView: View {
         VStack(alignment: .leading, spacing: 10) {
             if let selectedID = viewModel.selectedServiceID,
                let runtime = manager.services.first(where: { $0.id == selectedID }) {
-                if runtime.id == "stable_audio" {
+                if runtime.id == "yuey" {
+                    YueyRuntimePanel(controller: viewModel.yuey, manager: manager, runtime: runtime) {
+                        viewModel.openModelDownloadSheet(for: "yuey")
+                    }
+                    Divider()
+                } else if runtime.id == "stable_audio" {
                     stableAudioAuthPanel()
                     Divider()
                 } else if runtime.id == "sa3" {
@@ -2095,6 +2101,8 @@ private struct ModelDownloadSheet: View {
                         sa3SetupContent
                     } else if viewModel.modelDownloadServiceID == "carey" {
                         careyPredownloadContent
+                    } else if viewModel.modelDownloadServiceID == "yuey" {
+                        YueyModelsView(controller: viewModel.yuey)
                     } else {
                         standardPredownloadContent
                     }
@@ -2201,7 +2209,7 @@ private struct ModelDownloadSheet: View {
             .foregroundStyle(.secondary)
 
         if !viewModel.stableAudioTokenConfigured {
-            Text("hugging face token is required. save it in sa3 or jerry setup first.")
+            Text("base models require a hugging face token. save it in sa3 or jerry setup first; the public decoder fix below does not need one.")
                 .font(.caption)
                 .foregroundStyle(.red)
         }
@@ -2224,11 +2232,34 @@ private struct ModelDownloadSheet: View {
                 .controlSize(.small)
         }
 
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("SAME-L decoder squeak fix · optional").font(.caption.weight(.semibold))
+                Spacer()
+                Text(viewModel.isSA3DecoderLoraDownloaded ? "downloaded" : "not downloaded")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Button(viewModel.isSA3DecoderLoraDownloaded ? "verify" : "download") {
+                    viewModel.startSA3PredownloadDecoderFix()
+                }
+                .disabled(!viewModel.canManageModelDownloads || viewModel.isModelDownloadInProgress)
+                if let row = viewModel.sa3InventoryModels.first(where: {
+                    $0.repoID == SA3PredownloadTarget.decoderRepository
+                }) {
+                    sa3RemoveButton(for: row)
+                }
+            }
+            Text("Downloads only squeakfix_v3.safetensors. No gated-model access or token is needed. Enable it in sa3's decoder settings after downloading.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
+
         if !viewModel.sa3InventoryModels.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
-                Text("downloaded models")
+                Text("base and shared models")
                     .font(.caption.weight(.semibold))
-                ForEach(viewModel.sa3InventoryModels) { row in
+                ForEach(viewModel.sa3InventoryModels.filter {
+                    $0.repoID != SA3PredownloadTarget.decoderRepository
+                }) { row in
                     HStack(spacing: 8) {
                         Circle()
                             .fill(row.downloaded ? Color.green : Color.gray.opacity(0.5))
@@ -3579,13 +3610,15 @@ private struct ServiceRow: View {
                 Button(startStopTitle, action: startStopAction)
                     .disabled(startStopDisabled)
                 Button(
-                    runtime.isBootstrapping ? "rebuilding..." : "rebuild env",
+                    runtime.service.nativeRuntime != nil
+                        ? (runtime.isBootstrapping ? "installing..." : NativeRuntimeReceipt.read(for: runtime.service) == nil ? "install runtime" : "repair runtime")
+                        : (runtime.isBootstrapping ? "rebuilding..." : "rebuild env"),
                     action: onRebuildEnv
                 )
                 .disabled(
                     runtime.isRunning
                         || runtime.isBootstrapping
-                        || runtime.bootstrapState == .notConfigured
+                        || (runtime.bootstrapState == .notConfigured && runtime.service.nativeRuntime == nil)
                         || workloadExtraDisabled
                 )
                 if let onManageLoras {
@@ -3602,7 +3635,7 @@ private struct ServiceRow: View {
                 }
                 Spacer()
                 Text(
-                    "proc: \(runtime.processState.rawValue) / health: \(runtime.healthState.rawValue) / env: \(runtime.bootstrapState.rawValue)"
+                    "proc: \(runtime.processState.rawValue) / health: \(runtime.healthState.rawValue) / \(runtime.service.nativeRuntime == nil ? "env" : "runtime"): \(runtime.bootstrapState.rawValue)"
                 )
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)

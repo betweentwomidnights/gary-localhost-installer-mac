@@ -15,6 +15,33 @@
   "default_log_directory": "${HOME}/Library/Logs/GaryLocalhost",
   "services": [
     {
+      "id": "yuey",
+      "name": "yuey (yue2)",
+      "working_directory": "${APP_SUPPORT_DIR}/native/yuey/v0.2.2",
+      "executable": "${APP_SUPPORT_DIR}/native/yuey/v0.2.2/yue2-server",
+      "arguments": ["--host", "127.0.0.1", "--port", "8007", "--force-unload"],
+      "environment": {
+        "YUE2_MODELS_DIR": "${APP_SUPPORT_DIR}/models/yuey",
+        "YUE2_PORT": "8007"
+      },
+      "native_runtime": {
+        "version": "v0.2.2",
+        "package_url": "https://github.com/betweentwomidnights/yuey.cpp/releases/download/v0.2.2/yuey-v0.2.2-macos-universal.zip",
+        "sha256": "9a7b6d132cfa5d4d0d0b44a52ca7d8e35ee719b266e528f2f0f815b293376088",
+        "signing_team": "P8L4LGS728"
+      },
+      "log_file": "yuey.log",
+      "health_check": {
+        "url": "http://127.0.0.1:8007/health",
+        "expected_status": 200,
+        "interval_seconds": 15,
+        "timeout_seconds": 5
+      },
+      "auto_start": false,
+      "restart_on_crash": false,
+      "graceful_shutdown_seconds": 15
+    },
+    {
       "id": "audiocraft_mlx",
       "name": "Audiocraft MLX",
       "working_directory": "${WORKSPACE_ROOT}/audiocraft-mlx/audiocraft",

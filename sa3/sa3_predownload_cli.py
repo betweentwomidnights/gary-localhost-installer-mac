@@ -48,9 +48,13 @@ def session_response(session_id: str) -> dict | None:
 
 
 def download_required_command() -> int:
+    return download_command("required")
+
+
+def download_command(target_type: str) -> int:
     session_id = "local-sa3-predownload"
-    target_label = "required sa3 models"
-    payload = {"target_type": "required"}
+    target_label = "SAME-L decoder squeak fix" if target_type == "decoder" else "required sa3 models"
+    payload = {"target_type": target_type}
     upsert_predownload_session(
         session_id,
         status="warming",
@@ -123,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("inventory")
     subparsers.add_parser("download-required")
+    subparsers.add_parser("download-decoder")
     return parser
 
 
@@ -134,6 +139,8 @@ def main(argv: list[str] | None = None) -> int:
         return inventory_command()
     if args.command == "download-required":
         return download_required_command()
+    if args.command == "download-decoder":
+        return download_command("decoder")
 
     parser.error(f"Unsupported command {args.command!r}")
     return 2

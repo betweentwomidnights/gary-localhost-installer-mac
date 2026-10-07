@@ -78,6 +78,11 @@ final class ServiceManager: ObservableObject {
     private var bootstrapTasks: [String: Task<Void, Never>] = [:]
     private var rebuildAllTask: Task<Void, Never>?
     private var isShuttingDown = false
+    private var nativeModelOperationInProgress = false
+
+    func setNativeModelOperationInProgress(_ active: Bool) {
+        nativeModelOperationInProgress = active
+    }
 
     init(manifest: ResolvedManifest) {
         self.manifest = manifest
@@ -318,6 +323,18 @@ final class ServiceManager: ObservableObject {
         services[index].healthState = .unknown
 
         do {
+            if service.nativeRuntime != nil {
+                guard !nativeModelOperationInProgress else {
+                    throw NativeServiceError.invalid("Finish the Yuey model download before starting the service.")
+                }
+                guard NativeRuntimeReceipt.read(for: service) != nil else {
+                    throw NativeServiceError.invalid("Install the verified Yuey runtime first.")
+                }
+                let missing = YueyModelCatalog.missing(in: YueyModelCatalog.modelDirectory(for: service))
+                guard missing.isEmpty else {
+                    throw NativeServiceError.invalid("Download Yuey models first. Missing: \(missing.joined(separator: ", ")).")
+                }
+            }
             let environment = makeEnvironment(for: service)
             if Self.sharedHuggingFaceTokenServiceIDs.contains(service.id),
                environment["HF_TOKEN"]?.isEmpty != false {
@@ -447,6 +464,11 @@ final class ServiceManager: ObservableObject {
         guard bootstrapTasks[serviceID] == nil else { return }
         latestRebuildFailure = nil
 
+        if services[index].service.nativeRuntime != nil {
+            installNativeRuntime(serviceID: serviceID, index: index)
+            return
+        }
+
         guard processes[serviceID]?.isRunning != true else {
             services[index].bootstrapState = .failed
             services[index].bootstrapMessage = "stop the service before rebuilding its environment."
@@ -499,6 +521,50 @@ final class ServiceManager: ObservableObject {
         bootstrapTasks[serviceID] = task
     }
 
+    private func installNativeRuntime(serviceID: String, index: Int) {
+        guard !services[index].isRunning, !nativeModelOperationInProgress else {
+            services[index].bootstrapMessage = "stop Yuey and finish its model download before installing the runtime."
+            return
+        }
+        let service = services[index].service
+        services[index].bootstrapState = .running
+        services[index].bootstrapMessage = "installing verified native runtime..."
+        services[index].lastError = nil
+        bootstrapTasks[serviceID] = Task { [weak self] in
+            defer {
+                if Task.isCancelled, let self, let row = self.indexForService(serviceID) {
+                    self.services[row].bootstrapState = .ready
+                    self.services[row].bootstrapMessage = "runtime install cancelled."
+                }
+                self?.bootstrapTasks[serviceID] = nil
+            }
+            do {
+                let owner = self
+                _ = try await NativeRuntimeInstaller.install(service: service) { message in
+                    Task { @MainActor in
+                        guard let owner, let row = owner.indexForService(serviceID), owner.services[row].isBootstrapping else { return }
+                        owner.services[row].bootstrapMessage = message
+                    }
+                }
+                guard !Task.isCancelled, let self, let row = self.indexForService(serviceID) else { return }
+                self.services[row].bootstrapState = .succeeded
+                self.services[row].bootstrapMessage = "Yuey runtime installed and verified; download models before starting."
+            } catch {
+                if let self, let row = self.indexForService(serviceID) {
+                    self.services[row].bootstrapState = .failed
+                    self.services[row].bootstrapMessage = Task.isCancelled ? "runtime install cancelled." : error.localizedDescription
+                    self.services[row].lastError = self.services[row].bootstrapMessage
+                }
+            }
+        }
+    }
+
+    func cancelNativeRuntimeInstall(serviceID: String) {
+        guard let row = indexForService(serviceID), services[row].service.nativeRuntime != nil else { return }
+        bootstrapTasks[serviceID]?.cancel()
+        services[row].bootstrapMessage = "cancelling runtime install; a running backend probe may take up to 45 seconds to finish."
+    }
+
     private func makeRebuildFailureReport(
         service: ResolvedService,
         summary: String
@@ -525,7 +591,7 @@ final class ServiceManager: ObservableObject {
     func rebuildAllEnvironments() {
         guard rebuildAllTask == nil else { return }
 
-        let serviceIDs = services.map(\.id)
+        let serviceIDs = services.filter { $0.service.bootstrap != nil }.map(\.id)
         rebuildAllTask = Task { [weak self] in
             await MainActor.run {
                 guard let self else { return }
@@ -1451,7 +1517,15 @@ final class ServiceManager: ObservableObject {
                 env["HUGGING_FACE_HUB_TOKEN"] = token
             }
         }
-        if service.id == "stable_audio" {
+        if service.id == "yuey" {
+            let directory = YueyModelCatalog.modelDirectory(for: service)
+            let settings = YueySettings.load().environment(
+                installed: YueyModelCatalog.installedTiers(in: directory),
+                recommended: NativeRuntimeReceipt.read(for: service)?.recommendedEncoding ?? "Q4_K_M")
+            env.merge(settings) { _, new in new }
+            // --force-unload in the manifest also overrides request keep_models.
+            env["YUE2_KEEP_MODELS"] = "0"
+        } else if service.id == "stable_audio" {
             env["STABLE_AUDIO_BACKEND_ENGINE"] = stableAudioBackendEngine
         } else if service.id == "melodyflow" {
             env["MELODYFLOW_BACKEND_ENGINE"] = melodyFlowBackendEngine
