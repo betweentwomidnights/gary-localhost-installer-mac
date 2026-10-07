@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>gary4local v0.4.0 release notes</title>
+    <style>
+      :root { color-scheme: light; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 24px;
+        line-height: 1.55;
+        color: #111;
+      }
+      h1 { margin-bottom: 0.25rem; }
+      h2 { font-size: 1.05rem; margin-bottom: 0.3rem; }
+      p { margin-top: 0; color: #444; }
+      ul { padding-left: 1.2rem; color: #444; }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.95em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>gary4local v0.4.0</h1>
+    <p>version jumps from <code>0.2.0</code> to line up with the windows build,
+    and pairs with gary4juce v5.0.0-mac.</p>
+
+    <h2>likely the last mac-specific installer update</h2>
+    <p>we're moving toward one cross-platform gary4local backed by fully native
+    C++ services, so this separate mac app probably won't get many more
+    releases. the replacement and its migration steps aren't out yet. keep
+    using this app for now.</p>
+
+    <h2>new</h2>
+    <ul>
+      <li><strong>YuE2 is here</strong>, through
+      <a href="https://github.com/betweentwomidnights/yuey.cpp">yuey.cpp</a>
+      v0.2.2's native Metal/CPU runtime. no python environment to build:
+      install the runtime and a GGUF model from yuey's row. the model unloads
+      after each generation.</li>
+      <li>sa3 honors gary4juce's ending choice on generate and continue:
+      <strong>ends here</strong> or <strong>keeps going</strong> for another
+      continuation. returned audio keeps the length you asked for.</li>
+      <li>local sa3 and carey accept up to 380 seconds. sa3 continuation counts
+      the source plus the added audio within that total.</li>
+      <li>foundation's <code>gary_fallback</code> and <code>royalcities</code>
+      profiles now reach the MLX sampler for generation and audio-to-audio.</li>
+      <li>carey offers optimized MLX model downloads. existing models keep
+      working, and cleaning up the old ones is optional.</li>
+      <li>cached sa3 models load without an online login check. the SAME-L
+      decoder squeak fix has its own download and stays opt-in.</li>
+    </ul>
+
+    <h2>also from the unreleased v0.2.1</h2>
+    <ul>
+      <li>gary and terry accept a seed and return the one they used.</li>
+      <li>sa3 continuations crossfade into a regenerated overlap instead of
+      hard-splicing.</li>
+    </ul>
+
+    <h2>your existing installation</h2>
+    <p>nothing is deleted or moved automatically. legacy carey models keep
+    working, and custom runtime storage is not part of this mac release.</p>
+
+    <p>compatible with
+    <a href="https://github.com/betweentwomidnights/gary4juce/releases/tag/v5.0.0-mac">gary4juce v5.0.0-mac</a>.
+    notarized DMG with sparkle signatures for the in-app updater.</p>
+  </body>
+</html>

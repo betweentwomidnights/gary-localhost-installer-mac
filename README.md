@@ -13,7 +13,7 @@ if you want the Windows version, that's here:
 
 ## planned final mac-specific release
 
-the upcoming compatibility release is likely to be the **last update of this
+v0.4.0 is likely to be the **last update of this
 separate macOS installer repo**. we're moving toward fully native C++ services
 and one unified gary4local application for macOS and Windows, so the two
 installers no longer need parallel maintenance.
@@ -68,7 +68,7 @@ older Sparkle release notes live under
   building, continuation, adapter registration, and the related UI inside
   `gary4local`.
 - Yuey through its native universal Metal/CPU runtime, with explicit GGUF
-  downloads and unload-after-generation behavior (in the upcoming release).
+  downloads and unload-after-generation behavior.
 
 the main localhost endpoints in the production manifest are:
 
