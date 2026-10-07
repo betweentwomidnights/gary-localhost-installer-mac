@@ -1,7 +1,8 @@
 import Foundation
 
 enum GaryAppReleaseInfo {
-    static let recommendedGary4JuceVersion = "v4.0.14-mac"
+    // Published v5 test companion; switch to the final tag at release preflight.
+    static let recommendedGary4JuceVersion = "v5.0.0-rc.4"
     // Derived so the link and the displayed version cannot drift apart.
     static let recommendedGary4JuceReleaseURL = URL(
         string: "https://github.com/betweentwomidnights/gary4juce/releases/tag/"

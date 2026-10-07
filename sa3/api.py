@@ -62,11 +62,13 @@ DEFAULT_STEPS = int(os.environ.get("SA3_DEFAULT_STEPS", "8"))
 DEFAULT_CFG = float(os.environ.get("SA3_DEFAULT_CFG", "1.0"))
 DEFAULT_NEGATIVE = os.environ.get("SA3_DEFAULT_NEGATIVE", "low quality")
 DEFAULT_DURATION = float(os.environ.get("SA3_DEFAULT_DURATION", "30"))
-MAX_DURATION = float(os.environ.get("SA3_MAX_DURATION", "300"))
+MAX_DURATION = float(os.environ.get("SA3_MAX_DURATION", "380"))
 DEFAULT_SAMPLER = os.environ.get("SA3_DEFAULT_SAMPLER", "pingpong")
 DEFAULT_LOOP_BARS = int(os.environ.get("SA3_DEFAULT_LOOP_BARS", "8"))
 LOOP_PAD_SECONDS = float(os.environ.get("SA3_LOOP_PAD_SECONDS", "2.0"))
 DEFAULT_CONTINUATION_SECONDS = float(os.environ.get("SA3_DEFAULT_CONTINUATION_SECONDS", "8.0"))
+TAIL_PAD_SECONDS = float(os.environ.get("SA3_TAIL_PAD_SECONDS", os.environ.get("SA3_CONTINUE_TAIL_PAD", "6.0")))
+TAIL_PAD_MAX = float(os.environ.get("SA3_TAIL_PAD_MAX", os.environ.get("SA3_CONTINUE_TAIL_PAD_MAX", "60.0")))
 CONTINUE_TAIL_MODE = os.environ.get("SA3_CONTINUE_TAIL_MODE", "regen_past").lower()
 CONTINUE_TAIL_PAD = float(os.environ.get("SA3_CONTINUE_TAIL_PAD", "6.0"))
 CONTINUE_TAIL_PAD_MAX = float(os.environ.get("SA3_CONTINUE_TAIL_PAD_MAX", "60.0"))
@@ -124,7 +126,7 @@ LIMITER_KNEE = float(os.environ.get("SA3_LIMITER_KNEE", "0.8"))
 # A ceiling, not a fixed allocation: the pipeline adapts this down to the
 # requested duration. It prevents the upstream 120s default cap from clipping
 # legitimate longer local requests.
-MAX_SAMPLE_SIZE = int((MAX_DURATION + CONTINUE_TAIL_PAD_MAX + 40.0) * OUTPUT_SAMPLE_RATE)
+MAX_SAMPLE_SIZE = int((MAX_DURATION + max(TAIL_PAD_MAX, CONTINUE_TAIL_PAD_MAX) + 40.0) * OUTPUT_SAMPLE_RATE)
 
 SA3_MODEL_LINKS = {
     "stable-audio-3-medium": "https://huggingface.co/stabilityai/stable-audio-3-medium",
@@ -373,16 +375,15 @@ def hf_token_configured() -> bool:
 
 
 def configure_hf_auth() -> None:
+    # Like the PC API, expose credentials without an online login/validation.
+    # Fully cached inference must not fail just because a saved token expired.
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if not token:
         return
-    os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", token)
-    if login is None:
-        return
-    try:
-        login(token=token, add_to_git_credential=False)
-    except TypeError:
-        login(token=token)
+    if not os.environ.get("HF_TOKEN"):
+        os.environ["HF_TOKEN"] = token
+    if not os.environ.get("HUGGING_FACE_HUB_TOKEN"):
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = token
 
 
 def normalize_lora_name(raw: str) -> str:
@@ -1172,6 +1173,21 @@ def parse_int(data: dict[str, Any], key: str, default: int) -> int:
     return int(raw)
 
 
+def parse_tail_pad(data: dict[str, Any], default: float = TAIL_PAD_SECONDS) -> float:
+    # Match PC alias precedence; explicit zero must override the app default.
+    value = default
+    for key in ("tail_pad_seconds", "tail_pad", "continuation_tail_pad"):
+        raw = data.get(key)
+        if raw not in (None, ""):
+            if isinstance(raw, bool):
+                raise ValueError("tail pad must be a finite number")
+            value = float(raw)
+            break
+    if not math.isfinite(value):
+        raise ValueError("tail pad must be a finite number")
+    return min(TAIL_PAD_MAX, max(0.0, value))
+
+
 def parse_optional_float(data: dict[str, Any], key: str, default: float | None) -> float | None:
     raw = data.get(key, default)
     if raw in (None, ""):
@@ -1352,10 +1368,15 @@ def validate_common(data: dict[str, Any], require_duration: bool = True) -> list
     if require_duration:
         try:
             duration = parse_float(data, "duration", DEFAULT_DURATION)
-            if duration <= 0 or duration > MAX_DURATION:
+            if not math.isfinite(duration) or duration <= 0 or duration > MAX_DURATION:
                 errors.append(f"duration must be in (0, {MAX_DURATION}] seconds")
         except (TypeError, ValueError):
             errors.append("duration must be a number")
+
+    try:
+        parse_tail_pad(data)
+    except (TypeError, ValueError):
+        errors.append("tail pad must be a finite number")
 
     try:
         steps = parse_int(data, "steps", DEFAULT_STEPS)
@@ -2038,7 +2059,7 @@ def generation_worker(session_id: str, params: dict[str, Any]) -> None:
             ],
             "loudness": loudness_meta,
         }
-        for key in ("loop", "transform", "continue"):
+        for key in ("generate", "loop", "transform", "continue"):
             if params.get(key):
                 meta[key] = params[key]
 
@@ -2116,6 +2137,8 @@ def health():
                 "limiter_ceiling_db": LIMITER_CEILING_DB,
                 "limiter_knee": LIMITER_KNEE,
                 "continuation_tail_mode": CONTINUE_TAIL_MODE,
+                "tail_pad_seconds": TAIL_PAD_SECONDS,
+                "tail_pad_max": TAIL_PAD_MAX,
                 "continuation_tail_pad": CONTINUE_TAIL_PAD,
                 "continuation_splice_source": CONTINUE_SPLICE_SOURCE,
                 "continuation_splice_xfade": CONTINUE_SPLICE_XFADE,
@@ -2395,13 +2418,23 @@ def generate():
     if errors:
         return jsonify({"success": False, "errors": errors}), 400
 
-    params = common_params(data)
+    duration = parse_float(data, "duration", DEFAULT_DURATION)
+    tail_pad = parse_tail_pad(data)
+    gen_duration = duration + tail_pad
+    params = common_params(data, duration=gen_duration)
+    params["target_samples"] = round(duration * OUTPUT_SAMPLE_RATE)
+    params["generate"] = {
+        "duration": round(duration, 6),
+        "tail_pad": round(tail_pad, 6),
+        "gen_duration": round(gen_duration, 6),
+        "target_samples": params["target_samples"],
+    }
     session_id = create_session(
         {
             "mode": "generate",
             "prompt": params["prompt"],
             "steps": params["steps"],
-            "duration": params["duration"],
+            "duration": duration,
         }
     )
     threading.Thread(target=generation_worker, args=(session_id, params), daemon=True).start()
@@ -2411,7 +2444,7 @@ def generate():
             "session_id": session_id,
             "seed": params["seed"],
             "prompt": params["prompt"],
-            "duration": params["duration"],
+            **params["generate"],
         }
     )
 
@@ -2528,10 +2561,13 @@ def continue_audio():
         return jsonify({"success": False, "error": f"could not decode audio_data: {exc}"}), 400
 
     source_duration = waveform.shape[-1] / float(input_sr)
-    continuation_seconds = parse_float(data, "continuation_seconds", DEFAULT_CONTINUATION_SECONDS)
-    tail_pad = min(CONTINUE_TAIL_PAD_MAX, max(0.0, parse_float(data, "continuation_tail_pad", CONTINUE_TAIL_PAD)))
+    try:
+        continuation_seconds = parse_float(data, "continuation_seconds", DEFAULT_CONTINUATION_SECONDS)
+        tail_pad = min(CONTINUE_TAIL_PAD_MAX, parse_tail_pad(data, CONTINUE_TAIL_PAD))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "continuation seconds and tail pad must be finite numbers"}), 400
     total_duration = source_duration + continuation_seconds
-    if source_duration <= 0 or continuation_seconds <= 0 or total_duration > MAX_DURATION:
+    if not math.isfinite(total_duration) or source_duration <= 0 or continuation_seconds <= 0 or total_duration > MAX_DURATION:
         return jsonify({"success": False, "error": f"source + continuation must be in (0, {MAX_DURATION}] seconds"}), 400
 
     if CONTINUE_TAIL_MODE == "exact":

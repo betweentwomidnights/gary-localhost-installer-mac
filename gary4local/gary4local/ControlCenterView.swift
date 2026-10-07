@@ -882,8 +882,8 @@ struct ControlCenterView: View {
                             title: "continuation tail pad seconds",
                             text: $viewModel.sa3ContinuationTailPad,
                             placeholder: "6",
-                            helpText: "For continue mode: 0 ends at the cut, 6 keeps a natural tail, 20+ leans seamless.",
-                            caption: "For continue mode: 0 ends at the cut, 6 keeps a natural tail, 20+ leans seamless."
+                            helpText: "Fallback when the client does not send an ending choice. gary4juce overrides this per request: ends here = 0, keeps going = 6.",
+                            caption: "Client ending choices override this default: ends here = 0 seconds, keeps going = 6 seconds."
                         )
                         Toggle(
                             "splice original source into continuation",

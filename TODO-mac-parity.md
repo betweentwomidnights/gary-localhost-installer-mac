@@ -1,8 +1,47 @@
 # mac parity TODO
 
 Working release checklist. Things we know need doing to get the mac build as
-robust as gary-localhost-installer's v0.3.0, captured as they come up rather
+robust as gary-localhost-installer's v0.4.0, captured as they come up rather
 than held in a conversation.
+
+## gary4juce v5 final compatibility pass (2026-10-07)
+
+- [x] Safely fast-forward the clean sibling PC checkout to `origin/main`
+      `2ffd8db` (v0.4.0-rc.4 preparation). Audit plugin `main` `e11811b`
+      against the local APIs, including the full-track import change `aca208c`.
+- [x] Honor SA3's client ending choices on generate and continue: explicit
+      0/6-second overrides, PC alias precedence, internal padding with exact
+      requested output trimming, and applied metadata. Preserve loop behavior.
+- [x] Accept 380-second SA3 outputs/transform inputs/continuation totals and
+      Carey completion targets. Reject malformed/non-finite duration/tail
+      requests before starting generation; preserve `SA3_MAX_DURATION` overrides.
+- [x] Port Foundation's named inference profiles to both MLX routes, validate
+      requests and echo effective settings. Reject samplers absent from saomlx
+      before queueing; no new sampler or model conversion work.
+- [x] Port cached SA3 checkpoint resolution and non-networking auth setup.
+      Public decoder download remains separate from gated model access.
+- [x] Add explicit likely-final-Mac-repo notice to README, changelog and draft
+      release notes. No retirement date or automatic model removal implied.
+- [ ] Accept the built candidate through the running standalone plugin:
+      SA3 generate/continue with both ending choices (including LoRA + fixed
+      seed), long-duration boundaries, loop/transform, Foundation both profiles,
+      and Carey complete/cover/lego with model switching and native adapters.
+- [ ] Finish optional Carey removal and artifact-only train/save/reload acceptance,
+      Yuey model download/removal and short MIDI v0.2.2 acceptance.
+- [ ] Post-release follow-up (not a v0.4.0 gate): after Yuey PR #29 merges,
+      publish a signed native runtime and re-pin both manifests. Ship the
+      verified v0.2.2 for now; progress weighting is explicitly deferred.
+- [x] Select v0.4.0 for the final Intel-built DMG, matching PC versioning.
+- [ ] Set final Mac build number and the published final v5 companion tag
+      (local candidate recommends published `v5.0.0-rc.4`); finalize/rename the
+      draft release notes and validate a signed/notarized Sparkle upgrade.
+
+Acceptance handoff: ARM64 `0.3.0-parity.25` / build 225 is installed for the
+user's Carey adapter training/inference, SA3 ending-choice and Foundation
+audio-to-audio profile tests. Four backup apps and the replaced parity.23
+app were moved to Trash; models, environments and preferences were preserved.
+After acceptance, build the final signed/notarized v0.4.0 DMG on the Intel Mac
+and validate it once more on this machine. Local audit notes are not published.
 
 ## Release-candidate sequence
 
@@ -55,18 +94,52 @@ release validation; the CPU smoke does not establish that full workflow.
 
 ### Next PC parity target: Yuey native service
 
-- [ ] Port the PC service contract and UI behavior from
+- [x] Port the PC service contract and UI behavior from
       `origin/feature/yuey-native-service` at
-      `6b8d2557ed35cab572b689d5b61d018f606d4a40` (not PC `main` as of this audit).
+      `00ba59436ab28a74e513a3b2461283bf55a4ec8f` (not PC `main` as of this audit).
       Reuse the native `yue2-server` API/model tiers/download behavior rather
       than introducing a Python wrapper or a separate Mac inference protocol.
-- [ ] Add Mac-native runtime install/verify/launch plumbing: pin the published
-      Apple Silicon package and SHA-256, Metal device selection, dynamic-library
+- [x] Add Mac-native runtime install/verify/launch plumbing: pin the published
+      universal Mac package and SHA-256, Metal/CPU device selection, dynamic-library
       layout, signing and quarantine checks. Windows CUDA/Vulkan package logic
       is platform-specific even though the service contract is shared.
 - [ ] Preserve the model license notice (CC BY-NC 4.0), explicit GGUF downloads,
       runtime/model inventory and removal, cancellation, unload-after-generation,
       gary4juce compatibility, and end-to-end release-bundle testing.
+
+Implemented the native installer, shared/tier GGUF model sheet, signed-runtime
+probe, persistent PC generation defaults, forced unloading, model mutation/start
+guards and confirmed Trash removal. Real Metal/Q4 managed API generation and
+cancellation passed; 49 existing Carey tests and its Swift inventory fixtures
+passed. Remaining: actual client/download/removal UI acceptance,
+Intel hardware and signed auto-update validation. Native progress publication
+is a post-release follow-up, not a v0.4.0 blocker.
+The existing
+Q4/shared Yuey files were verified and cloned into app storage; no user model
+was removed. Start Yuey explicitly for standalone gary4juce acceptance testing.
+
+- [x] Audit the exact shipped Yuey/GGML Metal flow implementation and measure
+      realistic 800-frame flow tensors. Flash attention is active; all 1,030
+      flow nodes stay on Metal. Quantized matrix multiplication is the primary
+      measured target. Neither FP16 NAR weight expansion, wider matrix tiles,
+      nor a corrected larger attention tile showed a convincing speed win.
+      No shared-GGML or sibling submodule bump made. Kernel exploration is
+      follow-up work, not a release gate.
+- [ ] Follow up with hardware GPU profiling and targeted Q4_K/Q6_K GEMM tuning;
+      require an interleaved performance win, numerical regression coverage,
+      full-generation listening, and shared-backend tests before changing pins.
+      Treat the progress weighting (80–92% for the dominant flow stage) and
+      normal-mode log verbosity as separate Yuey UX work, not kernel fixes.
+
+Release UX follow-up: v0.2.2 is published; both manifest pins and the installer
+are verified. The quieter Yuey license link and explicit optional SA3 decoder
+download are implemented. Tokenless public decoder download succeeded; SA3
+regressions and native progress tests passed. Progress reweights flow to
+20–97% in [Yuey PR #29](https://github.com/betweentwomidnights/yuey.cpp/pull/29),
+**not yet in the published runtime**. Merge, native package publication and
+downstream manifest re-pinning remain pending.
+ARM64 parity.25/build 225 supersedes the earlier parity.24 candidate and is
+installed for acceptance testing. Native progress publication is deferred.
 
 ## ACE-Step lifecycle audit — findings (2026-08-30)
 

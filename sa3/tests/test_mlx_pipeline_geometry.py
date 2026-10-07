@@ -109,6 +109,14 @@ def test_adapt_sample_size_accounts_for_duration_padding():
     assert _adapt(30, padding=6.0) >= _adapt(30, padding=0.0)
 
 
+def test_local_380_second_output_with_internal_tail_is_not_clipped():
+    from api import MAX_SAMPLE_SIZE
+    for seconds in (380, 386):
+        samples = _adapt(seconds, sample_size=MAX_SAMPLE_SIZE, padding=6)
+        assert samples >= (seconds + 6) * 44100
+        assert samples % 8192 == 0
+
+
 def test_sampling_shift_does_not_fall_back_to_the_training_schedule():
     """The inference default is LogSNR, not the training 'full' shift.
 

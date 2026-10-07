@@ -82,7 +82,25 @@ comparison tool than as the primary solution.
 Use `off` for dB fields to disable that stage. A positive peak-normalize target
 is intended to be paired with the limiter.
 
-`continuation_tail_pad` is about how the end of a continuation should feel:
-lower values lean toward a more song-like ending, while higher values lean
-toward stopping "inside" the music so repeated continuations chain more
-naturally. The effect is subtle and still experimental.
+### gary4juce v5 ending choices and local duration
+
+`POST /generate` accepts `tail_pad`; `POST /continue` accepts
+`continuation_tail_pad`. Both also accept the aliases `tail_pad_seconds`,
+`tail_pad`, and `continuation_tail_pad`, in that precedence order. Explicit
+zero is an override, not a missing value. gary4juce's **ends here** sends `0`;
+**keeps going** sends `6`, generating six extra seconds internally and cutting
+them off so the returned audio stops inside the music. The returned generate
+duration, or continuation's source + added duration, remains unchanged.
+
+Requests without an ending choice use the service defaults. Generate uses
+`SA3_TAIL_PAD_SECONDS`, falling back to the saved `SA3_CONTINUE_TAIL_PAD` (`6`);
+continue uses `SA3_CONTINUE_TAIL_PAD`. The app's advanced continuation setting
+does not override an explicit plugin choice. Loop mode keeps its separate
+bar-based padding, and transform keeps its existing length behavior.
+
+The default local output ceiling is **380 seconds** (`SA3_MAX_DURATION` can
+still override it). Continuation counts the source toward that ceiling; tail
+padding is internal and may extend generation beyond it. Submit responses and
+completed `meta.generate` / `meta.continue` report the effective tail pad and
+internal generation duration. Cached model resolution no longer performs
+online login validation; missing gated assets still require valid access.

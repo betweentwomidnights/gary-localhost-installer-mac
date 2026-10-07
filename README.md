@@ -11,6 +11,18 @@ checks from a normal desktop app instead of a pile of terminal tabs.
 if you want the Windows version, that's here:
 [gary-localhost-installer](https://github.com/betweentwomidnights/gary-localhost-installer).
 
+## planned final mac-specific release
+
+the upcoming compatibility release is likely to be the **last update of this
+separate macOS installer repo**. we're moving toward fully native C++ services
+and one unified gary4local application for macOS and Windows, so the two
+installers no longer need parallel maintenance.
+
+this is a roadmap notice, not a retirement announcement: the replacement and
+its migration instructions are not released yet. keep using this app for now.
+this update does not automatically delete legacy models or move your runtime
+storage; Carey's optimized MLX downloads and legacy cleanup remain optional.
+
 ## version history
 
 version history moved to [`CHANGELOG.md`](CHANGELOG.md) so this file can stay
@@ -55,6 +67,8 @@ older Sparkle release notes live under
 - Stable Audio 3 on Apple Silicon, including local LoRA training, prompt-pool
   building, continuation, adapter registration, and the related UI inside
   `gary4local`.
+- Yuey through its native universal Metal/CPU runtime, with explicit GGUF
+  downloads and unload-after-generation behavior (in the upcoming release).
 
 the main localhost endpoints in the production manifest are:
 
@@ -62,6 +76,7 @@ the main localhost endpoints in the production manifest are:
 - `melodyflow`: `http://127.0.0.1:8002`
 - `carey`: `http://127.0.0.1:8003`
 - `sa3`: `http://127.0.0.1:8006`
+- `yuey`: `http://127.0.0.1:8007`
 - `foundation-1`: `http://127.0.0.1:8015`
 
 ## repo layout notes

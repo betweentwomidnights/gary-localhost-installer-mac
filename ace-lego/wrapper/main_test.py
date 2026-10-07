@@ -35,6 +35,36 @@ class CareyWrapperModelSelectionTest(unittest.IsolatedAsyncioTestCase):
         wrapper.LORA_REGISTRY.clear()
         wrapper.LORA_REGISTRY.update(self._original_lora_registry)
 
+    async def test_complete_accepts_380_seconds_without_starting_generation(self):
+        request = wrapper.CompleteRequest(audio_data="audio", bpm=120, audio_duration=380)
+        def close_task(coroutine):
+            coroutine.close()
+        with patch.object(wrapper.asyncio, "create_task", side_effect=close_task) as task:
+            response = await wrapper.complete_submit(request)
+        payload = json.loads(response.body)
+        self.assertTrue(payload["success"])
+        job = wrapper._jobs.pop(payload["task_id"])
+        self.assertEqual(job.target_duration, 380)
+        task.assert_called_once()
+
+    async def test_complete_rejects_above_380_before_starting_generation(self):
+        request = wrapper.CompleteRequest(audio_data="audio", bpm=120, audio_duration=380.01)
+        with patch.object(wrapper.asyncio, "create_task") as task:
+            with self.assertRaises(wrapper.HTTPException) as error:
+                await wrapper.complete_submit(request)
+        self.assertEqual(error.exception.status_code, 400)
+        task.assert_not_called()
+
+    async def test_complete_rejects_nonfinite_duration(self):
+        for duration in (float("nan"), float("inf")):
+            with self.subTest(duration=duration):
+                request = wrapper.CompleteRequest(audio_data="audio", bpm=120, audio_duration=duration)
+                with patch.object(wrapper.asyncio, "create_task") as task:
+                    with self.assertRaises(wrapper.HTTPException) as error:
+                        await wrapper.complete_submit(request)
+                self.assertEqual(error.exception.status_code, 400)
+                task.assert_not_called()
+
     def test_cover_form_data_uses_turbo_generation_defaults_and_cover_nofsq(self):
         job = wrapper.Job(task_id="job-1", task_type="cover", bpm=120, duration=42.0)
         req = SimpleNamespace(

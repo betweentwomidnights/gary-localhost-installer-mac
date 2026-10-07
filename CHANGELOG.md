@@ -4,6 +4,30 @@ this is where the version history lives that used to sit at the top of the main
 README. the README should stay focused on what gary4local is now; this file gets
 to remember how we got here.
 
+## v0.4.0 — unreleased, gary4juce v5 localhost compatibility
+
+this is likely the last update of the separate macOS installer repository.
+we plan to move to fully native C++ services in one unified cross-platform
+gary4local application. the replacement is not released yet; this release
+does not retire existing installations or automatically remove their models.
+
+- Yuey joins the localhost stack through the published native Metal/CPU runtime.
+- SA3 honors the plugin's **ends here** (`0`) and **keeps going** (`6`) ending
+  choices on generate and continue, overriding the saved tail-pad default.
+  Padding stays internal; returned audio keeps the requested length.
+- SA3 outputs and Carey completion now accept up to 380 seconds locally.
+  SA3 continuation includes its source duration in that total.
+- Foundation's `gary_fallback` and `royalcities` inference profiles now reach
+  the MLX sampler on generation and audio-to-audio, rather than being ignored.
+- Fully cached SA3 model resolution avoids online login validation; the optional
+  SAME-L decoder fix has its own download action and remains opt-in.
+- Carey offers the hosted, provenance-pinned MLX artifacts, shared components,
+  and optional legacy cleanup without forcing existing users to re-download.
+
+Release validation remains in `TODO-mac-parity.md`. Yuey's progress-only PR
+requires a new native runtime publication before that improvement can ship.
+It is deferred and will not block v0.4.0, which uses the published v0.2.2 runtime.
+
 ## v0.2.1
 
 paired with

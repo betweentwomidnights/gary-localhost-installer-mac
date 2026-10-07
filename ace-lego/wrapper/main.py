@@ -30,6 +30,7 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -1408,10 +1409,12 @@ async def lego_status(task_id: str):
 @app.post("/complete")
 async def complete_submit(req: CompleteRequest):
     """Submit a continuation/completion generation. Returns task_id immediately."""
+    if not math.isfinite(req.audio_duration):
+        raise HTTPException(400, "audio_duration must be a finite number")
     if req.audio_duration < 5:
         raise HTTPException(400, "audio_duration must be at least 5 seconds")
-    if req.audio_duration > 300:
-        raise HTTPException(400, "audio_duration must be at most 300 seconds (5 min)")
+    if req.audio_duration > 380:
+        raise HTTPException(400, "audio_duration must be at most 380 seconds")
     _validate_lora_request("complete", req)
 
     _cleanup_old_jobs()

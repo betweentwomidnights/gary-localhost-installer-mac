@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>gary4local mac v0.4.0 — draft release notes</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 24px; line-height: 1.55; }
+      h2 { font-size: 1.1rem; }
+    </style>
+  </head>
+  <body>
+    <h1>gary4local mac v0.4.0 — draft release notes</h1>
+    <p>Draft compatibility notes for gary4juce v5. Not published to the updater.</p>
+    <h2>Likely the last Mac-specific installer update</h2>
+    <p>We plan to unify gary4local into one cross-platform application backed by
+    fully native C++ services. This is likely the last update of the separate
+    gary-localhost-installer-mac repository. The replacement and migration
+    instructions are not released yet; keep using this app for now.</p>
+    <h2>Localhost compatibility</h2>
+    <ul>
+      <li>Yuey is available through its native Metal/CPU runtime and GGUF model downloads.</li>
+      <li>SA3 generate and continue honor gary4juce's ending choice: ends here (0 seconds)
+      or keeps going (6 seconds of internal tail padding). Returned audio retains
+      the requested length, and the client choice overrides the saved default.</li>
+      <li>SA3 and Carey completion allow up to 380 seconds locally. SA3 continuation
+      counts the original source toward that total.</li>
+      <li>Foundation's gary_fallback and royalcities profiles now select the corresponding
+      MLX sampler settings for generate and audio-to-audio.</li>
+      <li>Cached SA3 checkpoints resolve without online login validation. The optional
+      SAME-L decoder squeak fix has a separate download action.</li>
+      <li>Carey's optimized hosted MLX models, shared components and optional legacy
+      cleanup are separated clearly. Existing users can keep their legacy models.</li>
+    </ul>
+    <h2>Your existing installation</h2>
+    <p>This update does not automatically delete models or relocate runtime storage.
+    Legacy Carey checkpoints remain supported. Full custom runtime storage is not
+    part of this Mac release.</p>
+    <p>Release preflight is still pending. Signing, notarization, updater validation,
+    final version numbers and final companion links must be verified before publication.</p>
+  </body>
+</html>
