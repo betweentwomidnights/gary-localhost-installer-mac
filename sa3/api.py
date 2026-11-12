@@ -42,6 +42,7 @@ except Exception:  # pragma: no cover - import diagnostics are surfaced at load 
     snapshot_download = None
     try_to_load_from_cache = None
 
+from stable_audio_3.mlx import lora_lanes
 from stable_audio_3.mlx.pipeline import StableAudioMLXPipeline, adapt_sample_size
 from stable_audio_3.mlx.runtime import (
     MLXRuntimeUnavailableError,
@@ -1477,8 +1478,58 @@ def resolve_loras(data: dict[str, Any]) -> list[dict[str, Any]]:
     return resolved
 
 
+def lane_request(data: dict[str, Any]) -> dict[str, Any]:
+    return {key: data[key] for key in lora_lanes.LANE_FIELDS if data.get(key) is not None}
+
+
+def validate_lanes(data: dict[str, Any]) -> str | None:
+    """Request-time check of the LoRA automation fields, before a session exists.
+
+    The registry is only indexed once the model is loaded, so until then names are checked
+    against the configured LoRAs. The worker parses again against the loaded registry.
+    """
+    if not lora_lanes.wants_lanes(data):
+        return None
+    known = set(lora_name_to_index) if model_loaded else {name for name, _ in configured_loras()}
+
+    def resolve(raw: str) -> str:
+        name = normalize_lora_name(str(raw))
+        if name not in known:
+            raise ValueError(f"unknown LoRA '{name}'. available: {sorted(known)}")
+        return name
+
+    try:
+        shared = []
+        entries = data.get("loras")
+        if entries is None and normalize_lora_name(str(data.get("lora") or "")) not in ("", "none"):
+            selected = normalize_lora_name(str(data.get("lora")))
+            if selected == "default":
+                selected = DEFAULT_LORA_NAME or next(iter(sorted(known)), "")
+            entries = [{"name": selected, "strength": data.get("lora_strength", 1.0)}] if selected else []
+        if not isinstance(entries or [], list):
+            return "loras must be a list"
+        for entry in entries or []:
+            if not isinstance(entry, dict):
+                return "each loras entry must be an object"
+            name = resolve(entry.get("name") or "")
+            shared.append(
+                {
+                    "lora_index": name,
+                    "name": name,
+                    "strength": float(entry.get("strength", 1.0)),
+                    "interval": (float(entry.get("interval_min", 0.0)), float(entry.get("interval_max", 1.0))),
+                    "layer_filter": str(entry.get("layer_filter", "") or ""),
+                }
+            )
+        lora_lanes.parse_lane_plan(data, shared, resolve, str(data.get("prompt") or "").strip())
+    except (TypeError, ValueError) as exc:
+        return str(exc)
+    return None
+
+
 def common_params(data: dict[str, Any], duration: float | None = None) -> dict[str, Any]:
     return {
+        "lane_request": lane_request(data),
         "prompt": data["prompt"].strip(),
         "negative_prompt": (data.get("negative_prompt", DEFAULT_NEGATIVE) or "").strip(),
         "duration": duration if duration is not None else parse_float(data, "duration", DEFAULT_DURATION),
@@ -1863,6 +1914,12 @@ def generation_worker(session_id: str, params: dict[str, Any]) -> None:
                 phase="preparing",
                 progress=GENERATION_PROGRESS_PREPARING,
             )
+            lane_plan = lora_lanes.parse_lane_plan(
+                params.get("lane_request") or {},
+                loras,
+                lambda name: resolve_loras({"loras": [{"name": name}]})[0]["lora_index"],
+                params["prompt"],
+            )
             loaded_lora_count = len(getattr(local_pipe, "lora_paths", ()))
             requested_loras = {config["lora_index"]: config for config in loras}
             for idx in range(loaded_lora_count):
@@ -1924,7 +1981,12 @@ def generation_worker(session_id: str, params: dict[str, Any]) -> None:
                 "decode_chunk_batch_size": params["decode_chunk_batch_size"],
                 "callback": on_step,
             }
-            if lora_configs is not None:
+            if lane_plan is not None:
+                # The lanes drive every DiT adapter per pass. The strengths set above (the
+                # request loras) are what the conditioners see, as in sa3.cpp.
+                gen_kwargs["lora_lanes"] = lane_plan
+                print(f"[{session_id}] lora lanes: {json.dumps(lane_plan.describe())}")
+            elif lora_configs is not None:
                 gen_kwargs["lora_configs"] = lora_configs
 
             if params.get("init_audio") is not None:
@@ -2057,6 +2119,7 @@ def generation_worker(session_id: str, params: dict[str, Any]) -> None:
                 }
                 for config in loras
             ],
+            "lora_lanes": lane_plan.describe() if lane_plan is not None else None,
             "loudness": loudness_meta,
         }
         for key in ("generate", "loop", "transform", "continue"):
@@ -2103,6 +2166,16 @@ def health():
             "last_load_seconds": last_load_seconds,
             "decoder_lora_enabled": USE_DECODER_LORA,
             "decoder_lora_active": decoder_lora_active,
+            # The names sa3-server and the remote service use, so gary4juce detects LoRA
+            # automation the same way everywhere. lora_lanes_forwarded is what it also asks
+            # of a gary4local backend (0.7.0 on Windows advertised lanes but dropped them).
+            "capabilities": {
+                "lora_lanes": True,
+                "lora_envelope_modes": ["velocity"],
+                "max_lanes": lora_lanes.MAX_LANES,
+                "max_lane_points": lora_lanes.MAX_ENVELOPE_POINTS,
+            },
+            "lora_lanes_forwarded": True,
             "loras": lora_payload(lora_registry if model_loaded else configured_loras()),
             "hf_token_configured": hf_token_configured(),
             "gate_links": SA3_MODEL_LINKS,
@@ -2415,8 +2488,10 @@ def generate():
     if not data:
         return jsonify({"success": False, "error": "JSON body required"}), 400
     errors = validate_common(data)
+    if not errors and (lane_error := validate_lanes(data)):
+        errors = [lane_error]
     if errors:
-        return jsonify({"success": False, "errors": errors}), 400
+        return jsonify({"success": False, "error": errors[0], "errors": errors}), 400
 
     duration = parse_float(data, "duration", DEFAULT_DURATION)
     tail_pad = parse_tail_pad(data)
@@ -2456,8 +2531,10 @@ def generate_loop():
     if not data:
         return jsonify({"success": False, "error": "JSON body required"}), 400
     errors = validate_common(data)
+    if not errors and (lane_error := validate_lanes(data)):
+        errors = [lane_error]
     if errors:
-        return jsonify({"success": False, "errors": errors}), 400
+        return jsonify({"success": False, "error": errors[0], "errors": errors}), 400
 
     prompt = data["prompt"].strip()
     bpm = data.get("bpm")
@@ -2505,8 +2582,10 @@ def transform():
     if not data:
         return jsonify({"success": False, "error": "JSON body required"}), 400
     errors = validate_common(data, require_duration=False)
+    if not errors and (lane_error := validate_lanes(data)):
+        errors = [lane_error]
     if errors:
-        return jsonify({"success": False, "errors": errors}), 400
+        return jsonify({"success": False, "error": errors[0], "errors": errors}), 400
     try:
         input_sr, waveform = decode_audio_data(data)
     except Exception as exc:
@@ -2543,8 +2622,10 @@ def continue_audio():
     if not data:
         return jsonify({"success": False, "error": "JSON body required"}), 400
     errors = validate_common(data, require_duration=False)
+    if not errors and (lane_error := validate_lanes(data)):
+        errors = [lane_error]
     if errors:
-        return jsonify({"success": False, "errors": errors}), 400
+        return jsonify({"success": False, "error": errors[0], "errors": errors}), 400
 
     mode = (data.get("continuation_mode") or "inpaint").lower()
     if mode not in VALID_CONTINUATION_MODES:

@@ -4,6 +4,22 @@ this is where the version history lives that used to sit at the top of the main
 README. the README should stay focused on what gary4local is now; this file gets
 to remember how we got here.
 
+## unreleased
+
+paired with gary4juce v5.0.3. two service changes, so the current plugin behaves
+on a Mac the way it does against gary4local on Windows.
+
+- Carey speaks ace-server's job API (`POST /synth`, `GET`/`POST /job`,
+  `GET /props`), which is the only Carey contract gary4juce v5.0.2 and later
+  use. It runs on the same ACE-Step MLX service as before. `/props` lists every
+  DiT whose weights are installed, 2B and XL, and each request loads the model
+  it names. Progress reports real diffusion steps. The older `/lego`,
+  `/complete` and `/cover` routes are unchanged for plugin builds that call
+  them.
+- SA3 accepts LoRA automation lanes (`lora_lanes`, `lora_envelope` and the lane
+  blend settings) on generate, loop, transform and continue, with the request
+  shape and semantics of sa3.cpp. Each lane is one more DiT pass per step.
+
 ## v0.4.0
 
 paired with

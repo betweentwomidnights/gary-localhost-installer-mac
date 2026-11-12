@@ -1611,10 +1611,23 @@ async def health():
         "active_model_family": _primary_runtime_family(),
         "loras": len(LORA_REGISTRY),
         "caption_pools": {name: len(entries) for name, entries in sorted(_caption_pools.items())},
-        "active_jobs": active_jobs,
+        "active_jobs": active_jobs + sum(1 for j in app.state.native_jobs.values() if j.active),
+        "native_job_api": True,
         "max_concurrent": EFFECTIVE_MAX_CONCURRENT,
         "configured_max_concurrent": MAX_CONCURRENT,
     }
+
+
+# ---------------------------------------------------------------------------
+# ace-server job API (/synth, /job, /props): what gary4juce v5.0.2+ speaks.
+# The routes above stay for plugin builds that still call them.
+# ---------------------------------------------------------------------------
+
+import sys  # noqa: E402
+
+from native_api import install_native_routes  # noqa: E402
+
+install_native_routes(app, sys.modules[__name__])
 
 
 # ---------------------------------------------------------------------------
