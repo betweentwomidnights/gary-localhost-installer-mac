@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+
 import json
 import math
 import secrets
@@ -907,6 +909,7 @@ class StableAudioMLXPipeline:
         apg_scale: float = 0.0,
         lora_configs: tp.Sequence[dict[str, tp.Any]] | None = None,
         lora_strengths: float | tp.Sequence[float] | None = None,
+        lora_lanes=None,
         chunked_decode: bool = False,
         decode_chunk_size: int = 128,
         decode_overlap: int = 32,
@@ -1002,10 +1005,15 @@ class StableAudioMLXPipeline:
                 len(self.lora_paths),
             )
             active_lora_configs = _normalize_lora_configs(lora_configs, len(self.lora_paths))
-            sampling_model, dit_lora_runtime, static_dit_report = self._prepare_dit_lora(
-                active_lora_strengths,
-                active_lora_configs,
-            )
+            if lora_lanes is not None:
+                # Automation lanes merge the DiT adapters themselves, one weight set per pass.
+                # The conditioners below still see the request strengths, as in sa3.cpp.
+                self._clear_applied_dit_lora()
+            else:
+                sampling_model, dit_lora_runtime, static_dit_report = self._prepare_dit_lora(
+                    active_lora_strengths,
+                    active_lora_configs,
+                )
             lora_reports.extend(self._apply_text_number_loras(active_lora_strengths, active_lora_configs))
 
         init_latents = None
@@ -1082,6 +1090,37 @@ class StableAudioMLXPipeline:
                 )
             )
 
+        lane_runner = None
+        if lora_lanes is not None:
+            from stable_audio_3.mlx.lora_lanes import LaneRunner
+
+            lane_cross = {}
+            for lane in lora_lanes.lanes:
+                if not lane.prompt or lane.prompt in lane_cross:
+                    continue
+                lane_tensors = build_mlx_conditioning_tensors(
+                    self.model_config,
+                    [{**item, "prompt": lane.prompt} for item in conditioning],
+                    text_conditioners={"prompt": self.text_conditioner},
+                    number_conditioners={"seconds_total": self.number_conditioner},
+                )
+                lane_cross[lane.prompt] = assemble_conditioning_inputs_from_tensors(
+                    self.model_config,
+                    lane_tensors,
+                    negative=False,
+                    latent_length=latent_length,
+                    dtype_name=self.dtype_name,
+                )["cross_attn_cond"]
+            lane_runner = LaneRunner(
+                self.mlx_dit,
+                self._dit_lora_set,
+                lora_lanes,
+                batch_size=batch_size,
+                lane_cross=lane_cross,
+                samples_per_frame=downsampling_ratio,
+                sample_rate=float(sample_rate),
+            )
+
         io_channels = int(self.latent_channels)
         noise = mx.random.normal((batch_size, io_channels, latent_length), dtype=mlx_dtype)
         diffusion_objective = extract_diffusion_objective(self.model_config)
@@ -1094,28 +1133,30 @@ class StableAudioMLXPipeline:
             effective_seq_len=effective_seq_len,
             fallback_seq_len=latent_length,
         )
-        latents = sample_rf_latents_mlx(
-            sampling_model,
-            noise,
-            cond_inputs=cond_inputs,
-            diffusion_objective=diffusion_objective,
-            steps=steps,
-            cfg_scale=cfg_scale,
-            sampler_type=sampler_type,
-            init_data=init_latents,
-            init_noise_level=init_noise_level,
-            dist_shift=dist_shift_spec,
-            effective_seq_len=effective_seq_len,
-            padding_mask=padding_mask,
-            cfg_interval=cfg_interval,
-            scale_phi=scale_phi,
-            cfg_norm_threshold=cfg_norm_threshold,
-            apg_scale=apg_scale,
-            callback=callback,
-            fixed_prefix_data=fixed_prefix_data,
-            fixed_prefix_mask=fixed_prefix_mask,
-            fixed_prefix_noise=fixed_prefix_noise,
-        )
+        with lane_runner if lane_runner is not None else contextlib.nullcontext():
+            latents = sample_rf_latents_mlx(
+                sampling_model,
+                noise,
+                cond_inputs=cond_inputs,
+                diffusion_objective=diffusion_objective,
+                steps=steps,
+                cfg_scale=cfg_scale,
+                sampler_type=sampler_type,
+                init_data=init_latents,
+                init_noise_level=init_noise_level,
+                dist_shift=dist_shift_spec,
+                effective_seq_len=effective_seq_len,
+                padding_mask=padding_mask,
+                cfg_interval=cfg_interval,
+                scale_phi=scale_phi,
+                cfg_norm_threshold=cfg_norm_threshold,
+                apg_scale=apg_scale,
+                callback=callback,
+                fixed_prefix_data=fixed_prefix_data,
+                fixed_prefix_mask=fixed_prefix_mask,
+                fixed_prefix_noise=fixed_prefix_noise,
+            )
+            mx.eval(latents)
         audio = None
         if not return_latents:
             decode_latents = (
@@ -1195,6 +1236,7 @@ class StableAudioMLXPipeline:
             "decode_chunk_size": int(decode_chunk_size) if chunked_decode else None,
             "decode_overlap": int(decode_overlap) if chunked_decode else None,
             "decode_chunk_batch_size": int(decode_chunk_batch_size) if chunked_decode else None,
+            "lora_lanes": lane_runner.report() if lane_runner is not None else None,
             "lora": {
                 "paths": [str(path) for path in self.lora_paths],
                 "labels": list(self.lora_labels),

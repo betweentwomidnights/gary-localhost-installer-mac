@@ -28,6 +28,7 @@ _LORA_KEY_RE = re.compile(
     r"(?P<param>lora_A|lora_B|M_xs|magnitude|magnitude_r|magnitude_c|U|V)$"
 )
 _XS_ADAPTERS = {"lora-xs", "dora-rows-xs", "dora-cols-xs", "bora-xs"}
+_MX_ADAPTERS = {"lora", "dora", "dora-rows", "dora-cols"}
 _SUPPORTED_ADAPTERS = {
     "lora",
     "dora",
@@ -108,6 +109,41 @@ class _MLXLoRALayer:
             return self._apply_lora_family(target_weight, strength=float(strength))
         raise ValueError(f"Unsupported MLX LoRA adapter type: {self.adapter_type!r}")
 
+    def apply_mx(self, target_weight, *, strength: float):
+        """The same merge on the GPU, in float32. None when this layer needs the numpy path.
+
+        Covers what trained SA3 adapters are in practice: lora and DoRA on a linear weight whose
+        layout already matches the checkpoint's. Merging the whole DiT in numpy takes tens of
+        seconds per adapter on Apple Silicon; here it is about a second.
+        """
+        if float(strength) == 0.0:
+            return target_weight
+        if self.adapter_type not in _MX_ADAPTERS or target_weight.ndim != 2:
+            return None
+        a = self.params.get("lora_A")
+        b = self.params.get("lora_B")
+        if a is None or b is None or a.ndim != 2 or b.ndim != 2 or b.shape[1] != a.shape[0]:
+            return None
+        if (int(b.shape[0]), int(a.shape[1])) != tuple(int(x) for x in target_weight.shape):
+            return None
+        magnitude = None
+        if self.adapter_type != "lora":
+            magnitude = self.params.get("magnitude")
+            norm_axis = 0 if self.adapter_type == "dora-cols" else 1
+            if magnitude is None or magnitude.size != target_weight.shape[1 - norm_axis]:
+                return None
+        delta = mx.array(b.astype(np.float32, copy=False)) @ mx.array(a.astype(np.float32, copy=False))
+        if not mx.all(mx.isfinite(delta)).item():
+            raise ValueError(f"LoRA delta contains non-finite values for shapes A={a.shape}, B={b.shape}")
+        scaling = float(self.alpha) / float(int(a.shape[0]))
+        v = target_weight.astype(mx.float32) + (scaling * float(strength)) * delta
+        if magnitude is None:
+            return v
+        norms = mx.sqrt(mx.sum(v * v, axis=norm_axis, keepdims=True))
+        scale = mx.array(magnitude.reshape(-1).astype(np.float32, copy=False))
+        scale = scale[:, None] if norm_axis == 1 else scale[None, :]
+        return v / mx.maximum(norms, 1e-12) * scale
+
     def _apply_lora_family(self, target_weight: np.ndarray, *, strength: float) -> np.ndarray:
         if self.adapter_type in _XS_ADAPTERS:
             source_shape = _source_shape_for_xs(tuple(target_weight.shape), self.params)
@@ -152,7 +188,24 @@ class MLXLoRASet:
     missing_targets: tuple[str, ...] = ()
     unsupported_adapters: tuple[str, ...] = ()
     skipped_layers: tuple[str, ...] = ()
-    _base_params: dict[str, np.ndarray] | None = field(default=None, init=False, repr=False)
+    # The module's own unadapted arrays, kept by reference so restoring them costs nothing.
+    _base_params: dict[str, tp.Any] | None = field(default=None, init=False, repr=False)
+
+    def _capture_base(self, params: dict[str, tp.Any]) -> dict[str, tp.Any]:
+        if self._base_params is None:
+            self._base_params = {
+                key: params[key]
+                for key in sorted({layer.target_key for layer in self.layers})
+                if key in params
+            }
+        return self._base_params
+
+    @staticmethod
+    def _merge_layer(layer: "_MLXLoRALayer", current, strength: float):
+        merged = layer.apply_mx(current, strength=strength)
+        if merged is None:
+            merged = mx.array(layer.apply(np.asarray(current, dtype=np.float32), strength=strength))
+        return merged
 
     @classmethod
     def from_checkpoints(
@@ -262,6 +315,32 @@ class MLXLoRASet:
             skipped_layers=tuple(skipped_layers),
         )
 
+    def adapted_weights(
+        self,
+        module,
+        pairs: tp.Sequence[tuple[int, float]],
+        *,
+        base: dict[str, tp.Any] | None = None,
+    ) -> dict[str, tp.Any]:
+        """Merged weights for the given (lora_index, strength) adapters, without touching module.
+
+        Only the keys those adapters reach are returned. The module must hold its unadapted
+        weights the first time this (or apply_to) runs, since that is when they are captured.
+        """
+        params = base if base is not None else dict(tree_flatten(module.parameters()))
+        base_params = self._capture_base(params)
+        strengths = {int(index): float(strength) for index, strength in pairs if float(strength) != 0.0}
+        adapted: dict[str, tp.Any] = {}
+        for layer in self.layers:
+            strength = strengths.get(layer.lora_index)
+            if strength is None or layer.target_key not in base_params:
+                continue
+            current = adapted.get(layer.target_key, base_params[layer.target_key])
+            adapted[layer.target_key] = self._merge_layer(layer, current, strength)
+        weights = {key: value.astype(base_params[key].dtype) for key, value in adapted.items()}
+        mx.eval(list(weights.values()))
+        return weights
+
     def apply_to(
         self,
         module,
@@ -274,14 +353,8 @@ class MLXLoRASet:
         target_keys = sorted({layer.target_key for layer in self.layers})
         strengths = _normalize_lora_strengths(strength, len(self.paths))
         configs = _normalize_lora_configs(lora_configs, len(self.paths))
-        if self._base_params is None:
-            self._base_params = {
-                key: np.asarray(params[key], dtype=np.float32).copy()
-                for key in target_keys
-                if key in params
-            }
-
-        adapted_by_key = {key: value.copy() for key, value in self._base_params.items()}
+        base_params = self._capture_base(params)
+        adapted_by_key: dict[str, tp.Any] = {}
         applied = 0
         loaded_by_index = [0 for _ in self.paths]
         applied_by_index = [0 for _ in self.paths]
@@ -291,7 +364,7 @@ class MLXLoRASet:
         for layer in self.layers:
             loaded_by_index[layer.lora_index] += 1
         for layer in self.layers:
-            if layer.target_key not in adapted_by_key:
+            if layer.target_key not in base_params:
                 skipped.append(f"{layer.source_name}: target missing at apply time")
                 continue
             config = configs[layer.lora_index]
@@ -303,9 +376,10 @@ class MLXLoRASet:
                 filtered_layers.append(layer.source_name)
                 continue
             try:
-                adapted_by_key[layer.target_key] = layer.apply(
-                    adapted_by_key[layer.target_key],
-                    strength=float(strengths[layer.lora_index]),
+                adapted_by_key[layer.target_key] = self._merge_layer(
+                    layer,
+                    adapted_by_key.get(layer.target_key, base_params[layer.target_key]),
+                    float(strengths[layer.lora_index]),
                 )
             except ValueError as exc:
                 skipped.append(f"{layer.source_name}: {exc}")
@@ -315,12 +389,9 @@ class MLXLoRASet:
             active_by_index[layer.lora_index] += 1
 
         updates = []
-        for key, adapted in adapted_by_key.items():
-            target_dtype = params[key].dtype
-            arr = mx.array(adapted.astype(np.float32, copy=False))
-            if arr.dtype != target_dtype:
-                arr = arr.astype(target_dtype)
-            updates.append((key, arr))
+        for key, original in base_params.items():
+            adapted = adapted_by_key.get(key)
+            updates.append((key, original if adapted is None else adapted.astype(original.dtype)))
 
         if updates:
             module.update(tree_unflatten(updates))
