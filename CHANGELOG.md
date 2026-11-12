@@ -4,10 +4,12 @@ this is where the version history lives that used to sit at the top of the main
 README. the README should stay focused on what gary4local is now; this file gets
 to remember how we got here.
 
-## unreleased
+## v0.4.1
 
-paired with gary4juce v5.0.3. two service changes, so the current plugin behaves
-on a Mac the way it does against gary4local on Windows.
+paired with
+[gary4juce v5.0.4-mac](https://github.com/betweentwomidnights/gary4juce/releases/tag/v5.0.4-mac).
+two service changes, so the current plugin behaves on a Mac the way it does
+against gary4local on Windows, and faster LoRA loading.
 
 - Carey speaks ace-server's job API (`POST /synth`, `GET`/`POST /job`,
   `GET /props`), which is the only Carey contract gary4juce v5.0.2 and later
@@ -19,6 +21,9 @@ on a Mac the way it does against gary4local on Windows.
 - SA3 accepts LoRA automation lanes (`lora_lanes`, `lora_envelope` and the lane
   blend settings) on generate, loop, transform and continue, with the request
   shape and semantics of sa3.cpp. Each lane is one more DiT pass per step.
+- LoRA merging moved from numpy to MLX, so every SA3 LoRA request, with or
+  without lanes, waits a few seconds before its first sampling step instead of
+  about 35.
 
 ## v0.4.0
 
