@@ -31,9 +31,14 @@ it's signed and notarized. this repo won't get any more updates.
 
 ### jerry and gary4juce
 
-gary4juce v5.0.7 is built for the new gary4local. if you update gary4juce but
-keep running this app, jerry won't work on localhost. the older Mac builds of
-gary4juce were built for this app, so pair the new gary4local with v5.0.7.
+gary4juce v5.0.7 is built for the new gary4local, but this app's last update,
+v0.4.2, keeps local jerry working with it too: generate and smart loops, on the
+base model and on finetunes. Sparkle offers v0.4.2 from inside the app.
+
+- v0.4.1 and earlier don't work with v5.0.7's jerry. they were built for the
+  older Mac gary4juce (v5.0.4-mac and before).
+- finetunes still load here: pick one in jerry's model panel and press
+  `use model`. gary4juce v5.0.7 lists whatever this app has loaded.
 
 ### cleaning up
 
@@ -61,7 +66,19 @@ to do it by hand instead, quit this app and move these to the Trash:
 - `~/Library/Application Support/gary4local` (this app's copy of `uv`)
 - `~/Library/Logs/GaryLocalhost`
 - `~/Library/Caches/thecollabagepatch.gary4local`
+- `~/Library/Caches/com.apple.python/Applications/gary4local.app`
+- `~/Library/HTTPStorages/thecollabagepatch.gary4local`
+- `~/Library/WebKit/thecollabagepatch.gary4local`
+- `~/Library/Saved Application State/thecollabagepatch.gary4local.savedState`
 - `~/Library/Preferences/thecollabagepatch.gary4local.plist`
+
+if you gave this app a hugging face token, it's still in your keychain. the
+script leaves it alone. to remove it, open Keychain Access, search for
+`gary.localhost.controlcenter`, and delete `stable-audio-hf-token`, or run:
+
+```sh
+security delete-generic-password -s com.betweentwomidnights.gary.localhost.controlcenter -a stable-audio-hf-token
+```
 
 don't touch `~/Library/Application Support/com.betweentwomidnights.gary4local`.
 that's the new app.

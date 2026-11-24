@@ -41,7 +41,9 @@ candidates=(
   "$SUPPORT/gary4local"
   "$HOME/Library/Logs/GaryLocalhost"
   "$HOME/Library/Caches/$OLD_ID"
+  "$HOME/Library/Caches/com.apple.python/Applications/gary4local.app"
   "$HOME/Library/HTTPStorages/$OLD_ID"
+  "$HOME/Library/WebKit/$OLD_ID"
   "$HOME/Library/Saved Application State/$OLD_ID.savedState"
   "$HOME/Library/Preferences/$OLD_ID.plist"
 )
@@ -57,6 +59,16 @@ found=()
 for path in "${candidates[@]}"; do
   [ -e "$path" ] && found+=("$path")
 done
+
+# The hugging face token stays in the keychain; that's for you to remove.
+KEYCHAIN_SERVICE="com.betweentwomidnights.gary.localhost.controlcenter"
+KEYCHAIN_ACCOUNT="stable-audio-hf-token"
+if security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" >/dev/null 2>&1; then
+  echo "your hugging face token from the old gary4local is still in the keychain. this script leaves it."
+  echo "to remove it: security delete-generic-password -s $KEYCHAIN_SERVICE -a $KEYCHAIN_ACCOUNT"
+  echo
+fi
+
 if [ ${#found[@]} -eq 0 ]; then
   echo "nothing from the old gary4local is left. you're done."
   exit 0
