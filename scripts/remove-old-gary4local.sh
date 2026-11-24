@@ -20,9 +20,46 @@ DRY_RUN=false
 [ "$(uname -s)" = "Darwin" ] || { echo "this script is for macOS." >&2; exit 1; }
 
 to_trash() {  # path, name in the Trash
-  mv "$1" "$HOME/.Trash/$2" 2>/dev/null && return 0
+  # Several folders share a name (Caches, HTTPStorages and WebKit all use the
+  # bundle id), and mv would nest one inside another, so number repeats.
+  local dest="$HOME/.Trash/$2" n=2
+  while [ -e "$dest" ] || [ -L "$dest" ]; do
+    dest="$HOME/.Trash/$2 $n"
+    n=$((n + 1))
+  done
+  mv "$1" "$dest" 2>/dev/null && return 0
   # Without Full Disk Access, Terminal may not write to ~/.Trash; ask Finder.
-  osascript -e 'on run argv' -e 'tell application "Finder" to delete (POSIX file (item 1 of argv) as alias)' -e 'end run' "$1" >/dev/null
+  # A big folder can take Finder longer than AppleScript's 2-minute default.
+  osascript -e 'on run argv' -e 'with timeout of 3600 seconds' \
+    -e 'tell application "Finder" to delete (POSIX file (item 1 of argv) as alias)' \
+    -e 'end timeout' -e 'end run' "$1" >/dev/null
+}
+
+# This app saved SA3 LoRAs with DiT names like "transformer.layers.0...". The
+# new gary4local's converter wants the upstream export's "model." prefix, and
+# without it imports little or nothing of the LoRA. Rewrite only the header;
+# the tensor data is copied as it is.
+sa3_lora_for_new_app() {  # source.safetensors, destination.safetensors
+  /usr/bin/perl -MJSON::PP -e '
+    open(my $in, "<:raw", $ARGV[0]) or die "$ARGV[0]: $!\n";
+    read($in, my $size, 8) == 8 or die "$ARGV[0]: not a safetensors file\n";
+    my $n = unpack("Q<", $size);
+    read($in, my $header, $n) == $n or die "$ARGV[0]: truncated header\n";
+    my $json = JSON::PP->new->utf8->canonical;
+    my $tensors = $json->decode($header);
+    my %renamed;
+    for my $key (keys %$tensors) {
+      my $new = ($key eq "__metadata__" || $key =~ /^(model|conditioners)\./) ? $key : "model.$key";
+      $renamed{$new} = $tensors->{$key};
+    }
+    $header = $json->encode(\%renamed);
+    $header .= " " x ((8 - length($header) % 8) % 8);
+    open(my $out, ">:raw", $ARGV[1]) or die "$ARGV[1]: $!\n";
+    print $out pack("Q<", length $header), $header;
+    local $/ = \(1 << 20);
+    print $out $_ while <$in>;
+    close($out) or die "$ARGV[1]: $!\n";
+  ' "$1" "$2"
 }
 
 if lsappinfo list 2>/dev/null | grep -q "\"$OLD_ID\""; then
@@ -100,8 +137,25 @@ if [ ${#loras[@]} -gt 0 ]; then
       mv "$dir" "$KEEP/"
     done
     # SA3's MLX cache is rebuilt from the checkpoint; it isn't worth keeping.
-    [ -d "$KEEP/sa3/mlx-cache" ] && to_trash "$KEEP/sa3/mlx-cache" "sa3 mlx-cache (old gary4local)"
+    if [ -d "$KEEP/sa3/mlx-cache" ]; then
+      to_trash "$KEEP/sa3/mlx-cache" "sa3 mlx-cache (old gary4local)" ||
+        echo "couldn't move $KEEP/sa3/mlx-cache to the Trash; you can delete it yourself." >&2
+    fi
     echo "kept in $KEEP"
+    if [ -d "$KEEP/sa3/loras" ]; then
+      ready="$KEEP/sa3-for-new-gary4local"
+      mkdir -p "$ready"
+      for lora in "$KEEP/sa3/loras"/*.safetensors; do
+        [ -f "$lora" ] || continue
+        if sa3_lora_for_new_app "$lora" "$ready/$(basename "$lora")"; then
+          echo "  ready for the new gary4local: $ready/$(basename "$lora")"
+        else
+          rm -f "$ready/$(basename "$lora")"
+          echo "  couldn't prepare $(basename "$lora"); the original is still in $KEEP/sa3/loras" >&2
+        fi
+      done
+      echo "add SA3 LoRAs to the new gary4local from $ready, not from sa3/loras."
+    fi
   fi
 fi
 
@@ -112,9 +166,15 @@ if [ "$answer" != "y" ] && [ "$answer" != "Y" ]; then
 fi
 
 stamp="$(date +%Y%m%d-%H%M%S)"
+failed=()
 for path in "${found[@]}"; do
   [ -e "$path" ] || continue
-  to_trash "$path" "$(basename "$path") (old gary4local $stamp)"
+  to_trash "$path" "$(basename "$path") (old gary4local $stamp)" || failed+=("$path")
 done
 defaults delete "$OLD_ID" >/dev/null 2>&1 || true
+if [ ${#failed[@]} -gt 0 ]; then
+  echo "couldn't move these to the Trash. move them yourself in Finder:" >&2
+  printf '  %s\n' "${failed[@]}" >&2
+  exit 1
+fi
 echo "done. empty the Trash to get the disk space back."

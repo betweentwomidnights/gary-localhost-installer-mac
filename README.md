@@ -57,10 +57,26 @@ bash remove-old-gary4local.sh --dry-run   # only lists
 bash remove-old-gary4local.sh
 ```
 
-nothing is deleted until you empty the Trash. we haven't tested whether LoRAs
-trained in this app load in the new one.
+nothing is deleted until you empty the Trash.
 
-to do it by hand instead, quit this app and move these to the Trash:
+### bringing your LoRAs to the new gary4local
+
+LoRAs trained in this app work in the new one. add them from each service's
+LoRA panel in the new app:
+
+- **SA3**: add the `.safetensors` files from
+  `~/Documents/gary4local-mac-loras/sa3-for-new-gary4local`. the script writes
+  these copies because this app named the LoRA's layers differently. the
+  originals in `sa3/loras` import without an error but barely change the sound,
+  so don't use those.
+- **carey**: add the `output/final` folder of a training run, under
+  `~/Documents/gary4local-mac-loras/carey/training/jobs/`. those load as they
+  are.
+
+if you clean up by hand instead, keep `GaryLocalhost/sa3` and run the script
+afterwards to make the SA3 copies.
+
+to do it by hand, quit this app and move these to the Trash:
 
 - `~/Library/Application Support/GaryLocalhost`
 - `~/Library/Application Support/gary4local` (this app's copy of `uv`)
