@@ -9,6 +9,17 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
         <description>Stable Sparkle appcast for gary4local.</description>
         <language>en</language>
         <item>
+            <title>Version 0.4.2</title>
+            <pubDate>Tue, 24 Nov 2026 08:24:46 -0800</pubDate>
+            <sparkle:version>402</sparkle:version>
+            <sparkle:shortVersionString>0.4.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.6</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <sparkle:releaseNotesLink>https://betweentwomidnights.github.io/gary-localhost-installer-mac/updates/gary4local/release-notes/v0.4.2.html</sparkle:releaseNotesLink>
+            <description><![CDATA[the last update for this app: local jerry keeps working with gary4juce v5.0.7-mac. the replacement is the unified gary4local v0.7.6.]]></description>
+            <enclosure url="https://github.com/betweentwomidnights/gary-localhost-installer-mac/releases/download/v0.4.2/gary4local-v0.4.2-mac-arm64.dmg" sparkle:edSignature="TIERNdzJbSZvX20GUtpE1kXjhogLPiY3UC6YGJ8H2urS9ZVKKF50ovyDxhwpc8dnPuOVJ0xF0qC52i/WRUuZDQ==" sparkle:os="macos" length="10008789" type="application/x-apple-diskimage"/>
+        </item>
+        <item>
             <title>Version 0.4.1</title>
             <pubDate>Thu, 12 Nov 2026 02:07:17 -0800</pubDate>
             <sparkle:version>401</sparkle:version>
@@ -54,6 +65,6 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: B64vEjfUGDKAOBHJGJf7bPuYC4EPwLi6hQmO7A5qO868n66EWf61m7d2pnIL5GtcbSy8y7f+N+H+fLuqA3nuCA==
-length: 4975
+edSignature: oCS9dm5pae3osEqlySNYe6V6y9qqLad+17clMD8JKDXyy351Ec9E+qp+CueMRsmJ8JwjZK7XxZpTJczx1vrmBQ==
+length: 6095
 -->
