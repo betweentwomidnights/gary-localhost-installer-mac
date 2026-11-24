@@ -23,7 +23,7 @@ it's signed and notarized. this repo won't get any more updates.
    and drag gary4local into Applications. both apps are called gary4local, so
    Finder asks to replace this one. that's expected.
 3. update gary4juce to
-   [v5.0.7](https://github.com/betweentwomidnights/gary4juce/releases/tag/v5.0.7)
+   [v5.0.7](https://github.com/betweentwomidnights/gary4juce/releases/tag/v5.0.7-mac)
    at the same time.
 4. in the new app, press `set up all runtimes`, then download models from each
    service's Models panel. models don't carry over: the C++ runtimes use their

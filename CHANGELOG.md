@@ -7,7 +7,7 @@ to remember how we got here.
 ## v0.4.2
 
 the last update. paired with
-[gary4juce v5.0.7](https://github.com/betweentwomidnights/gary4juce/releases/tag/v5.0.7),
+[gary4juce v5.0.7](https://github.com/betweentwomidnights/gary4juce/releases/tag/v5.0.7-mac),
 the first Mac build of the unified gary4juce, so local jerry keeps working for
 anyone who stays on this app. the replacement is
 [gary4local v0.7.6](https://github.com/betweentwomidnights/gary-localhost-installer/releases/tag/v0.7.6).
