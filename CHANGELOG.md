@@ -4,6 +4,23 @@ this is where the version history lives that used to sit at the top of the main
 README. the README should stay focused on what gary4local is now; this file gets
 to remember how we got here.
 
+## v0.4.2
+
+the last update. paired with
+[gary4juce v5.0.7](https://github.com/betweentwomidnights/gary4juce/releases/tag/v5.0.7),
+the first Mac build of the unified gary4juce, so local jerry keeps working for
+anyone who stays on this app. the replacement is
+[gary4local v0.7.6](https://github.com/betweentwomidnights/gary-localhost-installer/releases/tag/v0.7.6).
+
+- jerry's `/generate` and `/generate/loop` return their base64 JSON as a
+  stream, with a space every 5 seconds until the audio is ready. the unified
+  gary4juce waits on that synchronous call with a 30 second timeout that macOS
+  counts from the last byte, so a cold load or a slow Mac no longer drops the
+  request. the work runs on the same worker lock as the async routes.
+- an SAO 1.0 finetune that's sent a rectified-flow sampler (`pingpong`,
+  `euler`, `dpmpp`, which is all the unified gary4juce offers) samples with
+  `dpmpp-3m-sde` instead, the default the old Mac gary4juce picked for it.
+
 ## v0.4.1
 
 paired with

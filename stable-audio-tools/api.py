@@ -4,7 +4,7 @@ Stable Audio API - Enhanced with Style Transfer capabilities
 Designed to be called alongside existing websockets backend
 """
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, Response, request, jsonify, send_file
 from dotenv import load_dotenv
 import torch
 import torchaudio
@@ -2318,6 +2318,63 @@ def sampler_kwargs_for_objective(model, config, client_overrides=None):
 
     return kw
 
+
+# The unified gary4juce (v5.0.7 on mac) only sends SAOS samplers: pingpong
+# for the base model, dpmpp or euler for finetunes. Those are rectified-flow
+# samplers, so an SAO 1.0 (v-objective) finetune gets the k-diffusion default
+# the old mac build of gary4juce picked for it instead.
+_RECTIFIED_FLOW_ONLY_SAMPLERS = {"pingpong", "euler", "dpmpp"}
+
+
+def _sampler_for_model_family(sampler_type, model_family):
+    if model_family == "sao1.0" and str(sampler_type or "").strip().lower() in _RECTIFIED_FLOW_ONLY_SAMPLERS:
+        print(f"   Sampler {sampler_type!r} is rectified-flow only; using 'dpmpp-3m-sde' for this SAO 1.0 model")
+        return "dpmpp-3m-sde"
+    return sampler_type
+
+
+# The unified gary4juce posts /generate and /generate/loop on localhost and waits
+# for the JSON with a 30 s timeout, which on macOS counts from the last byte
+# received. A cold model load or a slow Mac can take longer than that before
+# the first byte, so stream a space every few seconds until the result is
+# ready. JSON parsers skip leading whitespace, and gary4juce reads errors from
+# the body rather than the HTTP status.
+SYNC_KEEPALIVE_SECONDS = 5.0
+
+
+def _json_with_keepalive(run_job):
+    outcome = {}
+    done = threading.Event()
+
+    def worker():
+        try:
+            with jerry_generation_worker_lock:
+                result = run_job()
+            outcome["body"] = {
+                "success": True,
+                "audio_base64": result["audio_base64"],
+                "metadata": result["metadata"],
+            }
+        except ValueError as e:
+            outcome["body"] = {"success": False, "error": str(e)}
+        except Exception as e:
+            print(f"❌ Generation error: {str(e)}")
+            import traceback; traceback.print_exc()
+            outcome["body"] = {"success": False, "error": str(e)}
+        finally:
+            done.set()
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def stream():
+        yield b" "
+        while not done.wait(SYNC_KEEPALIVE_SECONDS):
+            yield b" "
+        yield json.dumps(outcome["body"]).encode("utf-8")
+
+    return Response(stream(), mimetype="application/json")
+
+
 def _report_generation_progress(progress_callback, progress, stage):
     if progress_callback is None:
         return
@@ -2801,7 +2858,7 @@ def _run_generate_request_mlx(data, progress_callback=None):
     except Exception as exc:
         raise ValueError("seed must be an integer") from exc
 
-    sampler_type = data.get("sampler_type")
+    sampler_type = _sampler_for_model_family(data.get("sampler_type"), model_family)
     if not sampler_type and model_family == "sao1.0":
         sampler_type = "k-heun"
 
@@ -3043,7 +3100,7 @@ def _run_generate_loop_request_mlx(data, progress_callback=None):
         negative_prompt = "drums, percussion, kick, snare, hi-hat"
 
     seconds_total = max(1.0, min(max_duration, float(calculated_loop_duration)))
-    sampler_type = data.get("sampler_type")
+    sampler_type = _sampler_for_model_family(data.get("sampler_type"), model_family)
     if not sampler_type and model_family == "sao1.0":
         sampler_type = "k-heun"
 
@@ -3273,7 +3330,7 @@ def _run_generate_request(data, progress_callback=None):
 
     client_sampler_overrides = {}
     if "sampler_type" in data:
-        client_sampler_overrides["sampler_type"] = data["sampler_type"]
+        client_sampler_overrides["sampler_type"] = _sampler_for_model_family(data["sampler_type"], model_family)
 
     _report_generation_progress(progress_callback, 35, "configuring_sampler")
     skw = sampler_kwargs_for_objective(model, config, client_sampler_overrides)
@@ -3564,7 +3621,7 @@ def _run_generate_loop_request(data, progress_callback=None):
 
     client_sampler_overrides = {}
     if "sampler_type" in data:
-        client_sampler_overrides["sampler_type"] = data["sampler_type"]
+        client_sampler_overrides["sampler_type"] = _sampler_for_model_family(data["sampler_type"], model_family)
 
     _report_generation_progress(progress_callback, 35, "configuring_sampler")
     skw = sampler_kwargs_for_objective(model, config, client_sampler_overrides)
@@ -3731,18 +3788,14 @@ def generate_audio():
         if return_format not in ["file", "base64"]:
             return jsonify({"error": "return_format must be 'file' or 'base64'"}), 400
 
-        result = _run_generate_request(data)
-        if return_format == "file":
-            filename = f"stable_audio_{result['metadata'].get('seed', 'na')}_{int(time.time())}.wav"
-            buffer = io.BytesIO(result["wav_bytes"])
-            buffer.seek(0)
-            return send_file(buffer, mimetype="audio/wav", as_attachment=True, download_name=filename)
+        if return_format == "base64":
+            return _json_with_keepalive(lambda: _run_generate_request(data))
 
-        return jsonify({
-            "success": True,
-            "audio_base64": result["audio_base64"],
-            "metadata": result["metadata"]
-        })
+        result = _run_generate_request(data)
+        filename = f"stable_audio_{result['metadata'].get('seed', 'na')}_{int(time.time())}.wav"
+        buffer = io.BytesIO(result["wav_bytes"])
+        buffer.seek(0)
+        return send_file(buffer, mimetype="audio/wav", as_attachment=True, download_name=filename)
 
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -4222,24 +4275,20 @@ def generate_loop():
             if return_format not in ['file', 'base64']:
                 return jsonify({"error": "return_format must be 'file' or 'base64'"}), 400
 
+            if return_format == "base64":
+                return _json_with_keepalive(lambda: _run_generate_loop_request(data))
+
             result = _run_generate_loop_request(data)
-            if return_format == "file":
-                metadata = result.get("metadata", {})
-                loop_type = metadata.get("loop_type", "auto")
-                detected_bpm = metadata.get("detected_bpm", "na")
-                bars = metadata.get("bars", "na")
-                seed = metadata.get("seed", "na")
-                filename = f"loop_{loop_type}_{detected_bpm}bpm_{bars}bars_{seed}.wav"
+            metadata = result.get("metadata", {})
+            loop_type = metadata.get("loop_type", "auto")
+            detected_bpm = metadata.get("detected_bpm", "na")
+            bars = metadata.get("bars", "na")
+            seed = metadata.get("seed", "na")
+            filename = f"loop_{loop_type}_{detected_bpm}bpm_{bars}bars_{seed}.wav"
 
-                buffer = io.BytesIO(result["wav_bytes"])
-                buffer.seek(0)
-                return send_file(buffer, mimetype='audio/wav', as_attachment=True, download_name=filename)
-
-            return jsonify({
-                "success": True,
-                "audio_base64": result["audio_base64"],
-                "metadata": result["metadata"]
-            })
+            buffer = io.BytesIO(result["wav_bytes"])
+            buffer.seek(0)
+            return send_file(buffer, mimetype='audio/wav', as_attachment=True, download_name=filename)
 
         else:
             # Form data input

@@ -8,20 +8,80 @@ and now ships as a signed Swift app target, also called `gary4local`, that
 handles service lifecycle, logs, setup flows, model downloads, and update
 checks from a normal desktop app instead of a pile of terminal tabs.
 
-if you want the Windows version, that's here:
-[gary-localhost-installer](https://github.com/betweentwomidnights/gary-localhost-installer).
+## this app is retired
 
-## planned final mac-specific release
+gary4local is one app now, on Windows, macOS and Linux:
+[gary4local v0.7.6](https://github.com/betweentwomidnights/gary-localhost-installer/releases/tag/v0.7.6).
+it runs every service on native C++ with Metal instead of Python and MLX, and
+it's signed and notarized. this repo won't get any more updates.
 
-v0.4.1 is likely to be the **last update of this
-separate macOS installer repo**. we're moving toward fully native C++ services
-and one unified gary4local application for macOS and Windows, so the two
-installers no longer need parallel maintenance.
+### moving to the new gary4local
 
-this is a roadmap notice, not a retirement announcement: the replacement and
-its migration instructions are not released yet. keep using this app for now.
-this update does not automatically delete legacy models or move your runtime
-storage; Carey's optimized MLX downloads and legacy cleanup remain optional.
+1. quit this app with Command-Q. that stops its services.
+2. download the `.dmg` from the
+   [v0.7.6 release](https://github.com/betweentwomidnights/gary-localhost-installer/releases/tag/v0.7.6)
+   and drag gary4local into Applications. both apps are called gary4local, so
+   Finder asks to replace this one. that's expected.
+3. update gary4juce to
+   [v5.0.7](https://github.com/betweentwomidnights/gary4juce/releases/tag/v5.0.7)
+   at the same time.
+4. in the new app, press `set up all runtimes`, then download models from each
+   service's Models panel. models don't carry over: the C++ runtimes use their
+   own model files, so plan for the downloads.
+
+### jerry and gary4juce
+
+gary4juce v5.0.7 is built for the new gary4local, but this app's last update,
+v0.4.2, keeps local jerry working with it too: generate and smart loops, on the
+base model and on finetunes. Sparkle offers v0.4.2 from inside the app.
+
+- v0.4.1 and earlier don't work with v5.0.7's jerry. they were built for the
+  older Mac gary4juce (v5.0.4-mac and before).
+- finetunes still load here: pick one in jerry's model panel and press
+  `use model`. gary4juce v5.0.7 lists whatever this app has loaded.
+
+### cleaning up
+
+the new gary4local keeps its files in its own folder and never touches this
+app's, so it can't clean them up for you. almost everything this app
+downloaded lives in `~/Library/Application Support/GaryLocalhost`: Python
+environments, models, and your SA3 and carey LoRAs. that's usually most of the
+space.
+
+this script lists what's left, offers to keep your LoRAs, prompts and training
+runs in `~/Documents/gary4local-mac-loras`, and moves the rest to the Trash:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/betweentwomidnights/gary-localhost-installer-mac/main/scripts/remove-old-gary4local.sh
+bash remove-old-gary4local.sh --dry-run   # only lists
+bash remove-old-gary4local.sh
+```
+
+nothing is deleted until you empty the Trash. we haven't tested whether LoRAs
+trained in this app load in the new one.
+
+to do it by hand instead, quit this app and move these to the Trash:
+
+- `~/Library/Application Support/GaryLocalhost`
+- `~/Library/Application Support/gary4local` (this app's copy of `uv`)
+- `~/Library/Logs/GaryLocalhost`
+- `~/Library/Caches/thecollabagepatch.gary4local`
+- `~/Library/Caches/com.apple.python/Applications/gary4local.app`
+- `~/Library/HTTPStorages/thecollabagepatch.gary4local`
+- `~/Library/WebKit/thecollabagepatch.gary4local`
+- `~/Library/Saved Application State/thecollabagepatch.gary4local.savedState`
+- `~/Library/Preferences/thecollabagepatch.gary4local.plist`
+
+if you gave this app a hugging face token, it's still in your keychain. the
+script leaves it alone. to remove it, open Keychain Access, search for
+`gary.localhost.controlcenter`, and delete `stable-audio-hf-token`, or run:
+
+```sh
+security delete-generic-password -s com.betweentwomidnights.gary.localhost.controlcenter -a stable-audio-hf-token
+```
+
+don't touch `~/Library/Application Support/com.betweentwomidnights.gary4local`.
+that's the new app.
 
 ## version history
 
